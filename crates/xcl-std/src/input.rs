@@ -175,35 +175,35 @@ fn emit_prompt(prompt: &str) {
 ///
 /// ```xcl
 /// # Read a line of text (default)
-/// $name = io.input "Enter your name: "
-/// io.print "Hello, $name!"
+/// $name = input "Enter your name: "
+/// print "Hello, " $name "!"
 /// ```
 ///
 /// ```xcl
 /// # Read an integer
-/// $age = io.input --int=true "Enter your age: "
+/// $age = input --int=true "Enter your age: "
 /// if $age is i64 {
-///     io.print "You are $age years old."
+///     print "You are " $age " years old."
 /// }
 /// ```
 ///
 /// ```xcl
 /// # Read a boolean
-/// $confirmed = io.input --bool=true "Continue? (yes/no): "
+/// $confirmed = input --bool=true "Continue? (yes/no): "
 /// if $confirmed == true {
-///     io.print "Proceeding..."
+///     print "Proceeding..."
 /// }
 /// ```
 ///
 /// ```xcl
 /// # Read a single word
-/// $word = io.input --word=true "Enter a word: "
+/// $word = input --word=true "Enter a word: "
 /// ```
 ///
 /// ```xcl
 /// # Read all input until EOF
-/// $content = io.input --all=true
-/// io.print "Read ${$content.len()} characters"
+/// $content = input --all=true
+/// print "Read " $content " characters"
 /// ```
 ///
 /// ## OUTPUT TYPES
@@ -223,7 +223,7 @@ fn emit_prompt(prompt: &str) {
 /// - On EOF, returns `none` (except `--all`, which returns an empty string).
 /// - The prompt is written to stdout and flushed before reading begins.
 #[xcl_fn(
-    name = "io.input",
+    name = "input",
     ret = "any",
     args = "prompt: str",
     named(

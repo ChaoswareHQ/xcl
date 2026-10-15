@@ -165,10 +165,10 @@ $m.key"#, &mut vm);
     }
 
     #[test]
-    fn io_print_space_form() {
-        // `io.print "hello"` should work (space-separated call)
+    fn print_space_form() {
+        // `print "hello"` should work (space-separated call)
         let mut vm = new_vm();
-        let _r = evaluate(r#"io.print "hello""#, &mut vm);
+        let _r = evaluate(r#"print "hello""#, &mut vm);
     }
 
     // â”€â”€ Newline-separated statement tests â”€â”€
@@ -183,9 +183,9 @@ $m.key"#, &mut vm);
 
     #[test]
     fn parenthesized_on_same_line_is_arg() {
-        // `io.print ($x)` on the same line should pass the parenthesized value
+        // `print ($x)` on the same line should pass the parenthesized value
         let mut vm = new_vm();
-        let r = evaluate("$x = 42\nio.print ($x)", &mut vm);
+        let r = evaluate("$x = 42\nprint ($x)", &mut vm);
         assert!(r.is_nil());
     }
 
@@ -230,17 +230,17 @@ $f.double 5"#, &mut vm);
     // â”€â”€ Print and format tests â”€â”€
 
     #[test]
-    fn io_print_multiple_args() {
-        // `io.print "a" "b" "c"` should not panic and returns none
+    fn print_multiple_args() {
+        // `print "a" "b" "c"` should not panic and returns none
         let mut vm = new_vm();
-        let r = evaluate(r#"io.print "a" "b" "c""#, &mut vm);
+        let r = evaluate(r#"print "a" "b" "c""#, &mut vm);
         assert!(r.is_nil());
     }
 
     #[test]
-    fn io_print_int_and_float() {
+    fn print_int_and_float() {
         let mut vm = new_vm();
-        let r = evaluate(r#"io.print 42 3.14 true"#, &mut vm);
+        let r = evaluate(r#"print 42 3.14 true"#, &mut vm);
         assert!(r.is_nil());
     }
 
@@ -447,5 +447,72 @@ $pair $ident $three"#;
         // r should be an array with 2 elements
         let arr = r.as_array().expect("result should be an array");
         assert_eq!(arr.len(), 2);
+    }
+
+    // ── defer tests ──
+
+    #[test]
+    fn defer_builtin_registered() {
+        // Verify defer is registered as a global builtin
+        let vm = new_vm();
+        assert!(vm.resolve_builtin("defer").is_some(), "defer should be registered");
+    }
+
+    // ── block-lambda tests ──
+
+    #[test]
+    fn block_lambda_basic() {
+        // `{ print "hello" }` creates a zero-param closure
+        let mut vm = new_vm();
+        let r = evaluate(r#"$f = { print "hello" }; $f"#, &mut vm);
+        assert!(r.as_func().is_some(), "block-lambda should produce a function");
+    }
+
+    #[test]
+    fn block_lambda_call() {
+        // Calling a block-lambda executes its body and returns the last value
+        let mut vm = new_vm();
+        let r = evaluate(r#"$f = { 42 }; $f"#, &mut vm);
+        assert!(r.as_func().is_some());
+        // Call the function
+        let r2 = evaluate(r#"$f = { 42 }; $f ()"#, &mut vm);
+        assert_eq!(r2.as_i48(), 42);
+    }
+
+    #[test]
+    fn block_lambda_multiple_statements() {
+        // Block-lambda with multiple statements
+        let mut vm = new_vm();
+        let r = evaluate(r#"$f = { $x = 10; $x + 2 }; $f ()"#, &mut vm);
+        assert_eq!(r.as_i48(), 12);
+    }
+
+    #[test]
+    fn block_lambda_empty() {
+        // `{ }` is an empty block-lambda that returns nil
+        let mut vm = new_vm();
+        let r = evaluate(r#"$f = { }; $f ()"#, &mut vm);
+        assert!(r.is_nil(), "empty block-lambda should return nil");
+    }
+
+    #[test]
+    fn dict_literal_still_works() {
+        // `{ key: value }` is still a dict literal
+        let mut vm = new_vm();
+        let r = evaluate(r#"{ a: 1; b: 2 }"#, &mut vm);
+        let map = r.as_map().expect("should be a dict");
+        assert_eq!(map.get("a").unwrap().as_i48(), 1);
+        assert_eq!(map.get("b").unwrap().as_i48(), 2);
+    }
+
+    #[test]
+    fn defer_block_syntax() {
+        // `defer { ... }` keyword-like syntax
+        let mut vm = new_vm();
+        let r = evaluate(r#"
+defer { print "cleaned" }
+print "main"
+"#, &mut vm);
+        assert!(r.is_nil());
     }
 }

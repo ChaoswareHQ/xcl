@@ -67,7 +67,36 @@ impl<'a> Parser<'a> {
             Some(Token::IdentPlain) if self.lookahead_type_def() => self.type_def(),
             // Impl block: `Name is Trait { ... }`
             Some(Token::IdentPlain) if self.lookahead_impl_def() => self.impl_def(),
+            // `defer { ... }` — keyword-like syntax for deferred closures
+            Some(Token::IdentPlain) if self.lookahead_defer() => self.defer_expr(),
             _ => self.expr_stmt(),
+        }
+    }
+
+    #[inline]
+    fn lookahead_defer(&self) -> bool {
+        // `defer` followed by `{`
+        if self.current().map(|t| t.text != "defer").unwrap_or(true) {
+            return false;
+        }
+        matches!(self.tokens.get(self.pos + 1).map(|t| &t.token), Some(Token::LBrace))
+    }
+
+    fn defer_expr(&mut self) -> AstNode {
+        let span = self.span();
+        self.consume(); // consume "defer"
+        // Parse the block { ... }
+        let statements = self.block();
+        // Wrap in: defer( Lambda { params: [], body: Block { statements } } )
+        let lambda = AstNode::Lambda {
+            span: span.clone(),
+            params: vec![],
+            body: Box::new(AstNode::Block { span: span.clone(), statements }),
+        };
+        AstNode::Call {
+            span: span.clone(),
+            callee: Box::new(AstNode::Ident { span, name: "defer".to_string() }),
+            args: vec![CallArg { value: lambda, name: None }],
         }
     }
 
@@ -181,6 +210,26 @@ impl<'a> Parser<'a> {
         }
         self.expect(Token::RBrace);
         AstNode::ImplDef { span, type_name, trait_name, body }
+    }
+
+    #[inline]
+    fn lookahead_dict_literal(&self) -> bool {
+        // self.pos already points past the consumed `{`, so start here.
+        // Find the first meaningful token. If it's followed by `:`, it's a dict literal.
+        // Otherwise, it's a block-lambda.
+        // `{ }` → empty block-lambda (returns nil)
+        let mut i = self.pos;
+        while i < self.tokens.len() {
+            match self.tokens[i].token {
+                Token::RBrace => return false, // empty `{ }` → block-lambda
+                Token::Semi | Token::Comma => { i += 1; continue; }
+                _ => {
+                    // Found the first meaningful token — check if next is `:`
+                    return matches!(self.tokens.get(i + 1).map(|t| &t.token), Some(Token::Colon));
+                }
+            }
+        }
+        false // reached EOF without `}` → block-lambda
     }
 
     #[inline]
@@ -817,20 +866,37 @@ impl<'a> Parser<'a> {
             }
 
             Token::LBrace => {
-                let mut entries = Vec::new();
-                while !self.at(Token::RBrace) && !self.at_eof() {
-                    if self.at(Token::Semi) || self.at(Token::Comma) { self.consume(); continue; }
-                    let key = self.consume().text.clone();
-                    if self.at(Token::Colon) {
-                        self.consume();
-                        let value = self.expr();
-                        entries.push((key, value));
-                    } else {
-                        entries.push((key.clone(), AstNode::Ident { span: span.clone(), name: key }));
+                // Lookahead: if the first meaningful token inside { is followed by `:`, it's a dict literal.
+                // Otherwise, it's a block-lambda (zero-param closure).
+                if self.lookahead_dict_literal() {
+                    let mut entries = Vec::new();
+                    while !self.at(Token::RBrace) && !self.at_eof() {
+                        if self.at(Token::Semi) || self.at(Token::Comma) { self.consume(); continue; }
+                        let key = self.consume().text.clone();
+                        if self.at(Token::Colon) {
+                            self.consume();
+                            let value = self.expr();
+                            entries.push((key, value));
+                        } else {
+                            entries.push((key.clone(), AstNode::Ident { span: span.clone(), name: key }));
+                        }
+                    }
+                    self.expect(Token::RBrace);
+                    AstNode::DictLit { span, entries }
+                } else {
+                    // Block-lambda: { stmt1; stmt2; ... }
+                    let mut statements = Vec::new();
+                    while !self.at(Token::RBrace) && !self.at_eof() {
+                        if self.at(Token::Semi) { self.consume(); continue; }
+                        statements.push(self.statement());
+                    }
+                    self.expect(Token::RBrace);
+                    AstNode::Lambda {
+                        span: span.clone(),
+                        params: vec![],
+                        body: Box::new(AstNode::Block { span, statements }),
                     }
                 }
-                self.expect(Token::RBrace);
-                AstNode::DictLit { span, entries }
             }
 
             Token::LParen => {

@@ -190,27 +190,27 @@ fn parse_print_named_args(
 ///
 /// ```xcl
 /// # Basic printing
-/// io.print "Hello, world!"
+/// print "Hello, world!"
 /// ```
 ///
 /// ```xcl
 /// # Multiple values
-/// io.print "Name:" $name "Age:" $age
+/// print "Name:" $name "Age:" $age
 /// ```
 ///
 /// ```xcl
 /// # Colored output
-/// io.print "Error!" foreground="red"
+/// print "Error!" foreground="red"
 /// ```
 ///
 /// ```xcl
 /// # Without newline
-/// io.print "Loading..." no_newline=true
+/// print "Loading..." no_newline=true
 /// ```
 ///
 /// ```xcl
 /// # To stderr
-/// io.print "Warning!" to_stderr=true
+/// print "Warning!" to_stderr=true
 /// ```
 ///
 /// ## NOTES
@@ -219,7 +219,7 @@ fn parse_print_named_args(
 ///   `white`, and their `bright_` variants (e.g., `bright_red`).
 /// - Output is buffered; call `io.flush()` to force immediate writing.
 /// - Arrays, dicts, and functions are printed using their default string representation.
-#[xcl_fn(name = "io.print", ret = "none")]
+#[xcl_fn(name = "print", ret = "none")]
 pub fn io_print_fn(args: &[Value]) -> Value {
     let (values, fg, bg, no_newline, to_stderr) = parse_print_named_args(args);
 
