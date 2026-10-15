@@ -337,6 +337,50 @@ impl VM {
                 self.push(Value::nil());
                 Action::Next
             }
+            OP_CALL_METHOD => {
+                // Dispatch a method call on a value by looking up its type's domain.
+                // Stack: receiver, arg1, arg2, ... -> result
+                let field_idx = i.a() as usize;
+                let nargs = i.b() as usize;
+                let string_table = self.frames[top].code.string_table.clone();
+                let method_name = &string_table[field_idx];
+
+                // Collect args (excluding receiver)
+                let mut args = Vec::with_capacity(nargs);
+                for _ in 0..nargs { args.push(self.pop()); }
+                args.reverse();
+                let receiver = self.pop();
+
+                // Look up the domain from the receiver's type.
+                // For typed maps (Result, Error, Handle), use the subtype to find the domain.
+                let domain_name = if let Some(subtype) = receiver.map_subtype() {
+                    match subtype {
+                        1 => Some("result"),   // SUBTYPE_RESULT
+                        2 => Some("error"),    // SUBTYPE_ERROR
+                        3 => Some("handle"),   // SUBTYPE_HANDLE
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(domain) = domain_name {
+                    if let Some(impl_) = self.resolve_domain_method(domain, method_name) {
+                        let impl_copy = *impl_;
+                        // Prepend receiver as the first argument
+                        let mut all_args = Vec::with_capacity(nargs + 1);
+                        all_args.push(receiver);
+                        all_args.extend(args);
+                        let result = impl_copy.call(self, &all_args);
+                        self.push(result);
+                        return Action::Next;
+                    }
+                }
+
+                // Not found
+                self.push(Value::nil());
+                Action::Next
+            }
             OP_RETURN | OP_HALT => Action::Return,
             OP_LEN => { let v = self.pop(); self.push(Value::from_i48(v.len() as i64)); Action::Next }
             OP_GET_INDEX => {

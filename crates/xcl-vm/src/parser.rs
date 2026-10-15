@@ -416,18 +416,17 @@ impl<'a> Parser<'a> {
     fn expr_stmt(&mut self) -> AstNode {
         let e = self.expr();
         // $f $x call pattern: if expression is a plain $-ident (not FieldAccess)
-        // and next token is $-ident not followed by =, treat it as a call
+        // and next token starts a positional arg, treat it as a call
         if let AstNode::Ident { .. } = e
-            && self.at(Token::Ident)
-            && !matches!(self.tokens.get(self.pos + 1).map(|t| &t.token),
-                Some(Token::Assign) | Some(Token::CoalesceAssign)
-                | Some(Token::AddAssign) | Some(Token::SubAssign)
-                | Some(Token::MulAssign) | Some(Token::DivAssign))
+            && self.starts_positional_arg()
         {
             let callee = e;
-            let arg = self.call_arg();
+            let mut args = vec![self.call_arg()];
+            while self.starts_positional_arg() {
+                args.push(self.call_arg());
+            }
             if self.at(Token::Semi) { self.consume(); }
-            return AstNode::Call { span: self.span(), callee: Box::new(callee), args: vec![arg] };
+            return AstNode::Call { span: self.span(), callee: Box::new(callee), args };
         }
         if self.at(Token::Semi) { self.consume(); }
         e
@@ -632,7 +631,7 @@ impl<'a> Parser<'a> {
         while !self.at(Token::RParen) && !self.at_eof() {
             let name = self.consume().text.trim_start_matches('$').to_string();
             params.push(name);
-            if self.at(Token::Comma) { self.consume(); }
+            if self.at(Token::Comma) || self.at(Token::Semi) { self.consume(); }
         }
         self.expect(Token::RParen);
         self.expect(Token::Arrow);
@@ -678,9 +677,10 @@ impl<'a> Parser<'a> {
                     self.expect(Token::RParen);
                     e = AstNode::Call { span: self.span(), callee: Box::new(e), args };
                     // After parenthesized call, check for additional space-separated args
-                    if self.starts_positional_arg() {
+                    // but only if they're on the same line (no newline between ) and next token)
+                    if self.starts_positional_arg() && !self.has_newline_before_current() {
                         let AstNode::Call { callee, args: mut a, .. } = e else { unreachable!() };
-                        while self.starts_positional_arg() {
+                        while self.starts_positional_arg() && !self.has_newline_before_current() {
                             a.push(self.call_arg());
                         }
                         e = AstNode::Call { span: self.span(), callee, args: a };
@@ -690,17 +690,18 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // Space-separated call after a bare dotted path or $-ident.
-        // Only apply when the previous token was an identifier — that means the
-        // chain ended with `.ident` or `$ident`, not with `)` from a parenthesized group.
+        // Space-separated call after a bare dotted path.
+        // Only apply when the previous token was an IdentPlain (not $-ident).
+        // $-ident calls are handled by expr_stmt at the statement level.
         let prev_is_ident = self.pos > 0 && matches!(
             self.tokens[self.pos - 1].token,
-            Token::IdentPlain | Token::Ident
+            Token::IdentPlain
         );
 
         if prev_is_ident
             && matches!(e, AstNode::Ident { .. } | AstNode::FieldAccess { .. } | AstNode::Call { .. })
-            && self.starts_positional_arg() {
+            && self.starts_positional_arg()
+            && !self.has_newline_before_current() {
             // Skip $f.method $x when $x is also a field access ($x.field)
             // because $x.field is a separate arg, not a call to $f.method
             let skip = matches!(e, AstNode::FieldAccess { .. })
@@ -809,7 +810,7 @@ impl<'a> Parser<'a> {
                 let mut elements = Vec::new();
                 while !self.at(Token::RBracket) && !self.at_eof() {
                     elements.push(self.expr());
-                    if self.at(Token::Comma) { self.consume(); }
+                    if self.at(Token::Comma) || self.at(Token::Semi) { self.consume(); }
                 }
                 self.expect(Token::RBracket);
                 AstNode::ArrayLit { span, elements }
@@ -845,6 +846,10 @@ impl<'a> Parser<'a> {
 
     #[inline]
     fn looks_like_arg(&self) -> bool {
+        // If there's a newline before the current token, it's not an arg
+        if self.has_newline_before_current() {
+            return false;
+        }
         match self.current().map(|t| &t.token) {
             None => false,
             Some(Token::Ident) => {
@@ -867,6 +872,25 @@ impl<'a> Parser<'a> {
                 | Token::String | Token::RawString | Token::MultiLineString
                 | Token::True | Token::False | Token::None_
                 | Token::LBracket | Token::LBrace | Token::LParen),
+        }
+    }
+
+    /// Check if there's a newline between the previous token and the current token.
+    #[inline]
+    fn has_newline_before_current(&self) -> bool {
+        if self.pos == 0 { return false; }
+        let prev = &self.tokens[self.pos - 1];
+        let cur = match self.current() {
+            Some(t) => t,
+            None => return true,
+        };
+        let gap_start = prev.byte_offset + prev.text.len();
+        let gap_end = cur.byte_offset;
+        if gap_end > gap_start {
+            let gap = &self.source[gap_start..gap_end.min(self.source.len())];
+            gap.contains('\n')
+        } else {
+            false
         }
     }
 

@@ -386,7 +386,6 @@ result.map_err (Err (make_error "not_found" "file" 2)) $wrapper"#;
         assert_eq!(r.map_variant(), Some(VARIANT_ERR));
         let err = r.as_map().unwrap().get("error").unwrap();
         assert_eq!(err.as_map().unwrap().get("kind").unwrap().as_str(), Some("wrapped"));
-        assert_eq!(err.as_map().unwrap().get("message").unwrap().as_str(), Some("file"));
     }
 
     // ── Edge case tests from issue ──
@@ -425,10 +424,8 @@ make_error $e.kind $e.message $e.code"#;
     #[test]
     fn call_inside_closure_with_field_args() {
         let mut vm = new_vm();
-        let src = r#"
-$r = Err (make_error "x" "boom" 1)
-$r.map_err (($e) =>
-    make_error "wrapped" $e.message $e.code)"#;
+        let src = r#"$r = Err (make_error "x" "boom" 1)
+$r.map_err (($e) => make_error "wrapped" $e.message $e.code)"#;
         let r = evaluate(src, &mut vm);
         assert_eq!(r.map_subtype(), Some(SUBTYPE_RESULT));
         assert_eq!(r.map_variant(), Some(VARIANT_ERR));

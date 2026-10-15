@@ -91,6 +91,11 @@ pub const OP_LT_LOCAL_LOCAL:        u8 = 63;
 pub const OP_LOAD_LOCAL_PUSH_INT:   u8 = 64;
 pub const OP_LOAD_LOCAL_STORE_LOCAL:u8 = 65;
 
+/// Call a method on a value by looking up its type's domain.
+/// Stack: receiver, arg1, arg2, ... -> result
+/// Operand a = field name string index, b = arg count (excluding receiver)
+pub const OP_CALL_METHOD: u8 = 66;
+
 #[derive(Debug, Clone)]
 pub struct Bytecode {
     pub instructions:  Arc<[Instr]>,
@@ -312,10 +317,21 @@ impl Compiler {
                 // Check if callee is a domain method like "io.read"
                 if let AstNode::FieldAccess { target, field, .. } = callee.as_ref() {
                     if let AstNode::Ident { name, .. } = target.as_ref() {
-                        // If the target is a simple identifier, treat it as a domain call
-                        let full_name = format!("{}.{}", name, field);
-                        let i = self.intern(&full_name);
-                        self.emit(Instr::a1(OP_PUSH_STR, i));
+                        // If the target is a known local variable, it's a method call on a value.
+                        // Otherwise, treat it as a domain call like "io.read".
+                        let is_local = self.locals.iter().any(|n| **n == *name);
+                        if is_local {
+                            self.node(target);
+                            for a in args { self.node(&a.value); }
+                            let field_idx = self.intern(field);
+                            self.emit(Instr::a2(OP_CALL_METHOD, field_idx, args.len() as u16));
+                            return;
+                        } else {
+                            // If the target is a simple identifier, treat it as a domain call
+                            let full_name = format!("{}.{}", name, field);
+                            let i = self.intern(&full_name);
+                            self.emit(Instr::a1(OP_PUSH_STR, i));
+                        }
                     } else {
                         self.node(callee);
                     }
