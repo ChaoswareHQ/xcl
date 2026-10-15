@@ -479,3 +479,5 @@ MigrationBackup/
 .ionide/
 
 # End of https://www.toptal.com/developers/gitignore/api/rust,jetbrains+all,vs,visualstudiocode
+
+.research/

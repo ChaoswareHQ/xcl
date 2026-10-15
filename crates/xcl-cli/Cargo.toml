@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 mimalloc.workspace = true
+xcl-decompile.workspace = true
 xcl-std.workspace = true
 xcl-vm.workspace = true
 linkme.workspace = true

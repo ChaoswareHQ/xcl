@@ -16,6 +16,7 @@ struct CliOpts {
     version:   bool,
     eval:      Option<String>,
     quiet:     bool,
+    decompile: bool,
     files:     Vec<String>,
 }
 
@@ -42,7 +43,8 @@ where
             match arg.as_str() {
                 "--help"      => opts.help = true,
                 "--version"   => opts.version = true,
-                "--quiet" => opts.quiet = true,
+                "--quiet"     => opts.quiet = true,
+                "--decompile" => opts.decompile = true,
                 "--eval" => {
                     if let Some(val) = args.next() {
                         opts.eval = Some(val);
@@ -68,6 +70,7 @@ where
                     'h' => opts.help = true,
                     'v' => opts.version = true,
                     'q' => opts.quiet = true,
+                    'd' => opts.decompile = true,
                     'e' => {
                         let val = if i + 1 < chars.len() {
                             chars[i + 1..].iter().collect::<String>()
@@ -107,6 +110,7 @@ Options:
   -v, --version       Show version information
   -e, --eval <EXPR>   Evaluate the given expression
   -q, --quiet         Suppress result output
+  -d, --decompile     Decompile source to bytecode and print (do not run)
   --                  End of options
 
 When no FILE or -e is given, reads from stdin.
@@ -186,9 +190,31 @@ fn main() {
 
     // Mode 1: -e expression
     if let Some(expr) = &opts.eval {
-        let result = run_source(expr, opts.quiet);
-        // Exit with non-zero if result is an Err Result
-        check_result_exit(result);
+        if opts.decompile {
+            // Decompile mode: show bytecode instead of running
+            let output = xcl_decompile::decompile_source(expr);
+            print!("{}", output);
+        } else {
+            let result = run_source(expr, opts.quiet);
+            check_result_exit(result);
+        }
+        return;
+    }
+
+    // Mode 1b: Decompile file(s)
+    if opts.decompile && !opts.files.is_empty() {
+        for file in &opts.files {
+            match fs::read_to_string(file) {
+                Ok(source) => {
+                    let output = xcl_decompile::decompile_source(&source);
+                    print!("{}", output);
+                }
+                Err(e) => {
+                    eprintln!("xcl: error: cannot read '{}': {}", file, e);
+                    process::exit(1);
+                }
+            }
+        }
         return;
     }
 

@@ -14,6 +14,7 @@ readme       = "README.md"
 homepage     = "https://chaoswarehq.com"
 
 [workspace.dependencies]
+xcl-decompile = { path = "crates/xcl-decompile" }
 xcl-macros = { path = "crates/xcl-macros" }
 xcl-std    = { path = "crates/xcl-std" }
 xcl-vm     = { path = "crates/xcl-vm" }

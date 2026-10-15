@@ -642,4 +642,9 @@ impl<'a> DomainCtx<'a> {
     pub fn call(&mut self, func: Value, args: &[Value]) -> Value {
         self.vm.call_value(func, args)
     }
+
+    /// Push a closure onto the current frame's defer stack.
+    pub fn defer(&mut self, closure: Value) {
+        self.vm.push_defer(closure);
+    }
 }

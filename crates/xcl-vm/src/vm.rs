@@ -51,6 +51,8 @@ struct Frame {
     range_end: i64,
     stack_base: u32,
     catch_stack: Vec<(u32, u32)>,
+    /// Deferred closures to run when this frame returns (LIFO order).
+    defer_stack: Vec<Value>,
 }
 
 pub struct DomainSlot {
@@ -69,7 +71,7 @@ pub struct VM {
     pub type_index:   hashbrown::HashMap<Box<str>, &'static TypeDescriptor>,
     pub arena: Bump,
     pub well_known: crate::wellknown::WellKnown,
-    frames: Vec<Frame>,
+    pub(crate) frames: Vec<Frame>,
     pending: Option<Frame>,
     closures: Vec<crate::value::FuncValue>,
     #[cfg(feature = "opcode-stats")]
@@ -196,11 +198,20 @@ impl VM {
             range_end: 0,
             stack_base: 0,
             catch_stack: Vec::new(),
+            defer_stack: Vec::new(),
         });
 
         while let Some(top) = self.frames.len().checked_sub(1) {
             let frame = &self.frames[top];
             if frame.ip as usize >= frame.code.instructions.len() {
+                // Run deferred closures before returning
+                if let Some(frame) = self.frames.last_mut() {
+                    let mut stack = std::mem::take(&mut frame.defer_stack);
+                    stack.reverse();
+                    for closure in stack {
+                        let _ = self.call_value(closure, &[]);
+                    }
+                }
                 let r = self.stack.pop().unwrap_or(Value::nil());
                 self.frames.pop();
                 if let Some(c) = self.frames.last_mut() {
@@ -217,6 +228,14 @@ impl VM {
                 Action::Next => self.frames[top].ip += 1,
                 Action::Jump(to) => self.frames[top].ip = to,
                 Action::Return => {
+                    // Run deferred closures before returning
+                    if let Some(frame) = self.frames.last_mut() {
+                        let mut stack = std::mem::take(&mut frame.defer_stack);
+                        stack.reverse();
+                        for closure in stack {
+                            let _ = self.call_value(closure, &[]);
+                        }
+                    }
                     let r = self.stack.pop().unwrap_or(Value::nil());
                     self.frames.pop();
                     if self.frames.is_empty() { return r; }
@@ -648,6 +667,7 @@ impl VM {
             range_end: 0,
             stack_base: base,
             catch_stack: Vec::new(),
+            defer_stack: Vec::new(),
         });
         Action::PushFrame
     }
@@ -691,6 +711,7 @@ impl VM {
             range_end: 0,
             stack_base,
             catch_stack: Vec::new(),
+            defer_stack: Vec::new(),
         });
 
         // Run the VM dispatch loop until the frame we just pushed returns
@@ -711,6 +732,14 @@ impl VM {
 
             let frame = &self.frames[top];
             if frame.ip as usize >= frame.code.instructions.len() {
+                // Run deferred closures before returning
+                if let Some(frame) = self.frames.last_mut() {
+                    let mut stack = std::mem::take(&mut frame.defer_stack);
+                    stack.reverse();
+                    for closure in stack {
+                        let _ = self.call_value(closure, &[]);
+                    }
+                }
                 // Frame ran off the end — treat top of stack as return value
                 let result = self.stack.pop().unwrap_or(Value::nil());
                 self.frames.pop();
@@ -734,6 +763,14 @@ impl VM {
                 Action::Next => self.frames[top].ip += 1,
                 Action::Jump(to) => self.frames[top].ip = to,
                 Action::Return => {
+                    // Run deferred closures before returning
+                    if let Some(frame) = self.frames.last_mut() {
+                        let mut stack = std::mem::take(&mut frame.defer_stack);
+                        stack.reverse();
+                        for closure in stack {
+                            let _ = self.call_value(closure, &[]);
+                        }
+                    }
                     let result = self.stack.pop().unwrap_or(Value::nil());
                     self.frames.pop();
                     if self.frames.len() <= initial_depth {
@@ -769,6 +806,13 @@ impl VM {
             }
         }
         map
+    }
+
+    /// Push a closure onto the current frame's defer stack.
+    pub fn push_defer(&mut self, closure: Value) {
+        if let Some(frame) = self.frames.last_mut() {
+            frame.defer_stack.push(closure);
+        }
     }
 
     /// Prints a histogram of the top N opcodes by dispatch count.
