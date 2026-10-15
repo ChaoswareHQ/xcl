@@ -92,6 +92,65 @@ pub const OP_LOAD_LOCAL_STORE_LOCAL:u8 = 65;
 /// Operand a = field name string index, b = arg count (excluding receiver)
 pub const OP_CALL_METHOD: u8 = 66;
 
+/// Integer-specialized arithmetic — bypasses Value type checking
+pub const OP_ADD_INT:       u8 = 70;
+pub const OP_SUB_INT:       u8 = 71;
+pub const OP_MUL_INT:       u8 = 72;
+pub const OP_LT_INT:        u8 = 73;
+pub const OP_GT_INT:        u8 = 74;
+pub const OP_EQ_INT:        u8 = 75;
+
+/// Superinstructions for hot patterns
+pub const OP_INC_LOCAL:           u8 = 80;  /// $x = $x + 1
+pub const OP_DEC_LOCAL:           u8 = 81;  /// $x = $x - 1
+pub const OP_MUL_LOCAL_LOCAL:     u8 = 82;  /// $a * $b
+pub const OP_DIV_LOCAL_LOCAL:     u8 = 83;  /// $a / $b
+pub const OP_ADD_INT_STORE_LOCAL: u8 = 84;  /// $a = $b + c (a=dest, b=local, c=int)
+pub const OP_INC_LOCAL_INT:       u8 = 85;  /// $a = $a + c (a=local, c=int from b)
+
+/// Single-opcode numeric for-loop (like Luau's FORNLOOP)
+/// Operand a = local slot index, b = jump offset (negative = backward), c = step (default 1)
+/// This replaces: FOR_RANGE_NEXT + STORE_LOCAL + body + JUMP
+pub const OP_FOR_NUMBER_LOOP:     u8 = 90;
+
+/// Fused: load local + add int constant + store back (for $x = $x + c pattern)
+/// Operand a = local slot, b = int constant
+pub const OP_ADD_INT_LOCAL:       u8 = 91;
+
+/// Fused: load two locals + add + store to first (for $a = $a + $b pattern)
+/// Operand a = dest slot, b = src slot
+pub const OP_ADD_LOCAL_STORE:     u8 = 92;
+
+/// Fused: load local + sub int constant + store back
+/// Operand a = local slot, b = int constant
+pub const OP_SUB_INT_LOCAL:       u8 = 93;
+
+/// Fused: load local + mul int constant + store back
+/// Operand a = local slot, b = int constant
+pub const OP_MUL_INT_LOCAL:       u8 = 94;
+
+/// Fused while-loop condition + jump: while $a < b { ... }
+/// Operand a = local slot, b = int constant to compare against
+/// If locals[a] < b, continue (Action::Next), else jump past body
+/// The body follows, ending with OP_JUMP back to this instruction
+pub const OP_WHILE_LT_INT:        u8 = 95;
+
+/// Fused: load local + mul local + store back (for $zr = $zr * $zr - $zi * $zi + $cr pattern)
+/// Operand a = dest slot, b = src slot
+pub const OP_MUL_LOCAL_STORE:     u8 = 96;
+
+/// Fused: load local + sub local + store back (for $a = $a - $b pattern)
+/// Operand a = dest slot, b = src slot
+pub const OP_SUB_LOCAL_STORE:     u8 = 97;
+
+/// Fused: load local + add local + store to third (for $c = $a + $b pattern)
+/// Operand a = dest slot, b = (src1_slot << 16) | src2_slot
+pub const OP_ADD_LOCAL_LOCAL_STORE: u8 = 98;
+
+/// Fused: load local + mul local + store to third (for $c = $a * $b pattern)
+/// Operand a = dest slot, b = (src1_slot << 16) | src2_slot
+pub const OP_MUL_LOCAL_LOCAL_STORE: u8 = 99;
+
 #[derive(Debug, Clone)]
 pub struct Bytecode {
     pub instructions:  Arc<[Instr]>,
@@ -180,6 +239,21 @@ impl Compiler {
         false
     }
 
+    /// Check if the last two instructions are LOAD_LOCAL + LOAD_LOCAL for mul/sub/div
+    fn try_fuse_local_local(&mut self, op: u8) -> bool {
+        if self.code.len() < 2 { return false; }
+        let l2 = self.code[self.code.len() - 1].op();
+        let l1 = self.code[self.code.len() - 2].op();
+        if l1 == OP_LOAD_LOCAL && l2 == OP_LOAD_LOCAL {
+            let a = self.code[self.code.len() - 2].a();
+            let b_slot = self.code[self.code.len() - 1].a();
+            self.code.truncate(self.code.len() - 2);
+            self.emit(Instr::make(op, a, b_slot as u16, 0));
+            return true;
+        }
+        false
+    }
+
     fn compile(&mut self, ast: &[AstNode]) -> Bytecode {
         for n in ast { self.node(n); }
         self.emit(Instr::none(OP_HALT));
@@ -196,8 +270,55 @@ impl Compiler {
     fn node(&mut self, node: &AstNode) {
         match node {
             AstNode::Assign { name, value, .. } => {
-                self.node(value);
                 let slot = self.local(name);
+                // Try to fuse hot patterns: $x = $x + 1, $x = $x - 1, $x = $x + c, $a = $a + $b
+                if let AstNode::BinaryOp { left, op, right, .. } = value.as_ref() {
+                    if let AstNode::Ident { name: left_name, .. } = left.as_ref() {
+                        if left_name == name {
+                            // $x = $x op something
+                            match op {
+                                BinaryOperator::Add => {
+                                    if let AstNode::Int { value: 1, .. } = right.as_ref() {
+                                        // $x = $x + 1 → OP_INC_LOCAL
+                                        self.emit(Instr::a1(OP_INC_LOCAL, slot));
+                                        return;
+                                    } else if let AstNode::Int { value: c, .. } = right.as_ref() {
+                                        // $x = $x + c → OP_INC_LOCAL_INT
+                                        self.emit(Instr::make(OP_INC_LOCAL_INT, slot, *c as u16, 0));
+                                        return;
+                                    } else if let AstNode::Ident { name: right_name, .. } = right.as_ref() {
+                                        // $x = $x + $y → OP_ADD_LOCAL_STORE (direct local-to-local)
+                                        let right_slot = self.local(right_name);
+                                        self.emit(Instr::a2(OP_ADD_LOCAL_STORE, slot, right_slot as u16));
+                                        return;
+                                    }
+                                }
+                                BinaryOperator::Sub => {
+                                    if let AstNode::Int { value: 1, .. } = right.as_ref() {
+                                        // $x = $x - 1 → OP_DEC_LOCAL
+                                        self.emit(Instr::a1(OP_DEC_LOCAL, slot));
+                                        return;
+                                    }
+                                }
+                                BinaryOperator::Mul => {
+                                    if let AstNode::Int { value: c, .. } = right.as_ref() {
+                                        // $x = $x * c → OP_MUL_INT_LOCAL
+                                        self.emit(Instr::a2(OP_MUL_INT_LOCAL, slot, *c as u16));
+                                        return;
+                                    }
+                                }
+                                BinaryOperator::Div => {
+                                    if let AstNode::Int { value: c, .. } = right.as_ref() {
+                                        // $x = $x / c → handled by general path for now
+                                        let _ = c;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                self.node(value);
                 self.emit(Instr::a1(OP_STORE_LOCAL, slot));
             }
             AstNode::Return { value, .. } => {
@@ -228,20 +349,48 @@ impl Compiler {
 
             AstNode::For { variable, iterable, body, .. } => {
                 if let AstNode::Range { start, end, .. } = iterable.as_ref() {
-                    if let Some(s) = start { self.node(s); }
-                    else { self.emit(Instr::a1(OP_PUSH_INT, 0)); }
-                    if let Some(e) = end { self.node(e); }
-                    else { self.emit(Instr::a1(OP_PUSH_INT, 0)); }
-                    self.emit(Instr::none(OP_FOR_RANGE_START));
-                    let start_ip = self.ip();
-                    let next = self.ip();
-                    self.emit(Instr::a1(OP_FOR_RANGE_NEXT, 0));
-                    let var = self.local(variable);
-                    self.emit(Instr::a1(OP_STORE_LOCAL, var));
-                    for s in body { self.node(s); }
-                    self.emit(Instr::a1(OP_JUMP, start_ip));
-                    let end = self.ip();
-                    self.patch_jump(next, end);
+                    // Check if start and end are integer constants — if so, use OP_FOR_NUMBER_LOOP
+                    let start_val = match start.as_ref().map(|n| n.as_ref()) {
+                        Some(AstNode::Int { value, .. }) => Some(*value),
+                        Some(_) => None,
+                        None => Some(0),
+                    };
+                    let end_val = match end.as_ref().map(|n| n.as_ref()) {
+                        Some(AstNode::Int { value, .. }) => Some(*value),
+                        Some(_) => None,
+                        None => Some(0),
+                    };
+
+                    if let (Some(start_i), Some(end_i)) = (start_val, end_val) {
+                        // Use single-opcode FOR_NUMBER_LOOP (like Luau's FORNLOOP)
+                        let var = self.local(variable);
+                        // Emit start value and end value as wide operands for the loop
+                        let start_wide = self.wide(start_i);
+                        let end_wide = self.wide(end_i);
+                        // a = (var_slot << 16) | start_wide_idx, b = end_wide_idx
+                        let a_combined = (var as u32) << 16 | (start_wide & 0xFFFF);
+                        self.emit(Instr::a2(OP_FOR_NUMBER_LOOP, a_combined, end_wide as u16));
+                        let loop_start = self.ip();
+                        for s in body { self.node(s); }
+                        // Jump back to FOR_NUMBER_LOOP
+                        self.emit(Instr::a1(OP_JUMP, loop_start));
+                    } else {
+                        // Fallback: use FOR_RANGE_START/NEXT for non-constant ranges
+                        if let Some(s) = start { self.node(s); }
+                        else { self.emit(Instr::a1(OP_PUSH_INT, 0)); }
+                        if let Some(e) = end { self.node(e); }
+                        else { self.emit(Instr::a1(OP_PUSH_INT, 0)); }
+                        self.emit(Instr::none(OP_FOR_RANGE_START));
+                        let start_ip = self.ip();
+                        let next = self.ip();
+                        self.emit(Instr::a1(OP_FOR_RANGE_NEXT, 0));
+                        let var = self.local(variable);
+                        self.emit(Instr::a1(OP_STORE_LOCAL, var));
+                        for s in body { self.node(s); }
+                        self.emit(Instr::a1(OP_JUMP, start_ip));
+                        let end = self.ip();
+                        self.patch_jump(next, end);
+                    }
                 } else {
                     self.node(iterable);
                     self.emit(Instr::none(OP_FOR_ITER_START));
@@ -258,14 +407,43 @@ impl Compiler {
             }
 
             AstNode::While { condition, body, .. } => {
-                let start = self.ip();
-                self.node(condition);
-                let j = self.ip();
-                self.emit(Instr::a1(OP_JUMP_IF_FALSE, 0));
-                for s in body { self.node(s); }
-                self.emit(Instr::a1(OP_JUMP, start));
-                let end = self.ip();
-                self.patch_jump(j, end);
+                // Try to fuse: while $i < N { ... } → OP_WHILE_LT_INT
+                let fused = match condition.as_ref() {
+                    AstNode::BinaryOp { left, op: BinaryOperator::Lt, right, .. } => {
+                        if let AstNode::Ident { name: var_name, .. } = left.as_ref() {
+                            if let AstNode::Int { value: limit, .. } = right.as_ref() {
+                                let slot = self.local(var_name);
+                                self.emit(Instr::a2(OP_WHILE_LT_INT, slot, *limit as u16));
+                                Some((self.ip(), slot))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+
+                if fused.is_none() {
+                    // Fallback: generic while loop
+                    let start = self.ip();
+                    self.node(condition);
+                    let j = self.ip();
+                    self.emit(Instr::a1(OP_JUMP_IF_FALSE, 0));
+                    for s in body { self.node(s); }
+                    self.emit(Instr::a1(OP_JUMP, start));
+                    let end = self.ip();
+                    self.patch_jump(j, end);
+                } else {
+                    // Fused while loop: body follows OP_WHILE_LT_INT
+                    for s in body { self.node(s); }
+                    // Jump back to OP_WHILE_LT_INT
+                    self.emit(Instr::a1(OP_JUMP, fused.unwrap().0));
+                    // Patch the end jump — need to find where to skip past
+                    // The OP_WHILE_LT_INT needs to know where to jump when condition is false
+                    // We'll handle this in the VM by scanning for the closing OP_JUMP
+                }
             }
 
             AstNode::FunctionDef { body, name, params, .. } => {
@@ -354,13 +532,32 @@ impl Compiler {
             }
 
             AstNode::BinaryOp { left, op, right, .. } => {
-                if matches!(op, BinaryOperator::Add)
-                    && self.try_fuse_add_local_local()
-                {
-                    return;
-                }
                 self.node(left);
                 self.node(right);
+                // Try superinstructions AFTER emitting operands
+                match op {
+                    BinaryOperator::Add => {
+                        if self.try_fuse_add_local_local() {
+                            return;
+                        }
+                    }
+                    BinaryOperator::Sub => {
+                        if self.try_fuse_local_local(OP_SUB_LOCAL_LOCAL) {
+                            return;
+                        }
+                    }
+                    BinaryOperator::Mul => {
+                        if self.try_fuse_local_local(OP_MUL_LOCAL_LOCAL) {
+                            return;
+                        }
+                    }
+                    BinaryOperator::Div => {
+                        if self.try_fuse_local_local(OP_DIV_LOCAL_LOCAL) {
+                            return;
+                        }
+                    }
+                    _ => {}
+                }
                 let opcode = match op {
                     BinaryOperator::Add => OP_ADD,
                     BinaryOperator::Sub => OP_SUB,

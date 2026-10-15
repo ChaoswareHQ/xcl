@@ -622,6 +622,373 @@ impl VM {
                 Action::Next
             }
 
+            // ── Integer-specialized arithmetic ──
+            OP_ADD_INT => {
+                let b = self.pop(); let a = self.pop();
+                if a.is_int() && b.is_int() {
+                    let r = a.as_i48().checked_add(b.as_i48()).unwrap_or_else(|| {
+                        (a.as_i48() as f64 + b.as_i48() as f64) as i64
+                    });
+                    self.push(Value::from_i48(r));
+                } else {
+                    self.push(a.add(b, &self.arena));
+                }
+                Action::Next
+            }
+            OP_SUB_INT => {
+                let b = self.pop(); let a = self.pop();
+                if a.is_int() && b.is_int() {
+                    let r = a.as_i48().checked_sub(b.as_i48()).unwrap_or_else(|| {
+                        (a.as_i48() as f64 - b.as_i48() as f64) as i64
+                    });
+                    self.push(Value::from_i48(r));
+                } else {
+                    self.push(a.sub_(b));
+                }
+                Action::Next
+            }
+            OP_MUL_INT => {
+                let b = self.pop(); let a = self.pop();
+                if a.is_int() && b.is_int() {
+                    let r = a.as_i48().checked_mul(b.as_i48()).unwrap_or_else(|| {
+                        (a.as_i48() as f64 * b.as_i48() as f64) as i64
+                    });
+                    self.push(Value::from_i48(r));
+                } else {
+                    self.push(a.mul(b, &self.arena));
+                }
+                Action::Next
+            }
+            OP_LT_INT => {
+                let b = self.pop(); let a = self.pop();
+                let r = if a.is_int() && b.is_int() {
+                    a.as_i48() < b.as_i48()
+                } else {
+                    a.lt(b)
+                };
+                self.push(Value::bool(r));
+                Action::Next
+            }
+            OP_GT_INT => {
+                let b = self.pop(); let a = self.pop();
+                let r = if a.is_int() && b.is_int() {
+                    a.as_i48() > b.as_i48()
+                } else {
+                    a.gt(b)
+                };
+                self.push(Value::bool(r));
+                Action::Next
+            }
+            OP_EQ_INT => {
+                let b = self.pop(); let a = self.pop();
+                let r = if a.is_int() && b.is_int() {
+                    a.as_i48() == b.as_i48()
+                } else {
+                    a.eq_(b)
+                };
+                self.push(Value::bool(r));
+                Action::Next
+            }
+
+            // ── Superinstructions ──
+            OP_INC_LOCAL => {
+                let l = &mut self.frames[top].locals;
+                let idx = i.a() as usize;
+                let v = unsafe { *l.get_unchecked(idx) };
+                if v.is_int() {
+                    let r = v.as_i48().checked_add(1).unwrap_or(v.as_i48());
+                    unsafe { *l.get_unchecked_mut(idx) = Value::from_i48(r); }
+                } else {
+                    let r = v.add(Value::from_i48(1), &self.arena);
+                    unsafe { *l.get_unchecked_mut(idx) = r; }
+                }
+                Action::Next
+            }
+            OP_DEC_LOCAL => {
+                let l = &mut self.frames[top].locals;
+                let idx = i.a() as usize;
+                let v = unsafe { *l.get_unchecked(idx) };
+                if v.is_int() {
+                    let r = v.as_i48().checked_sub(1).unwrap_or(v.as_i48());
+                    unsafe { *l.get_unchecked_mut(idx) = Value::from_i48(r); }
+                } else {
+                    let r = v.sub_(Value::from_i48(1));
+                    unsafe { *l.get_unchecked_mut(idx) = r; }
+                }
+                Action::Next
+            }
+            OP_MUL_LOCAL_LOCAL => {
+                let l = &self.frames[top].locals;
+                let a = unsafe { *l.get_unchecked(i.a() as usize) };
+                let b = unsafe { *l.get_unchecked(i.b() as usize) };
+                self.push(a.mul(b, &self.arena));
+                Action::Next
+            }
+            OP_DIV_LOCAL_LOCAL => {
+                let l = &self.frames[top].locals;
+                let a = unsafe { *l.get_unchecked(i.a() as usize) };
+                let b = unsafe { *l.get_unchecked(i.b() as usize) };
+                self.push(a.div_(b));
+                Action::Next
+            }
+            OP_ADD_INT_STORE_LOCAL => {
+                // a = dest slot, b = source slot, c = int constant (as u16)
+                let l = &mut self.frames[top].locals;
+                let dest = i.a() as usize;
+                let src = i.b() as usize;
+                let c = i.c() as i64;
+                let v = unsafe { *l.get_unchecked(src) };
+                if v.is_int() {
+                    let r = v.as_i48().checked_add(c).unwrap_or(v.as_i48());
+                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
+                } else {
+                    let r = v.add(Value::from_i48(c), &self.arena);
+                    unsafe { *l.get_unchecked_mut(dest) = r; }
+                }
+                Action::Next
+            }
+            OP_INC_LOCAL_INT => {
+                // a = local slot, b = int constant
+                let l = &mut self.frames[top].locals;
+                let idx = i.a() as usize;
+                let c = i.b() as i64;
+                let v = unsafe { *l.get_unchecked(idx) };
+                if v.is_int() {
+                    let r = v.as_i48().checked_add(c).unwrap_or(v.as_i48());
+                    unsafe { *l.get_unchecked_mut(idx) = Value::from_i48(r); }
+                } else {
+                    let r = v.add(Value::from_i48(c), &self.arena);
+                    unsafe { *l.get_unchecked_mut(idx) = r; }
+                }
+                Action::Next
+            }
+
+            // ── FOR_NUMBER_LOOP: single-opcode numeric for-loop (Luau FORNLOOP style) ──
+            // a = (var_slot << 16) | start_wide_idx, b = end_wide_idx
+            // The loop body follows this instruction, ending with OP_JUMP back here
+            OP_FOR_NUMBER_LOOP => {
+                let f = &mut self.frames[top];
+                let var_slot = (i.a() >> 16) as usize;
+                let start_wide_idx = (i.a() & 0xFFFF) as usize;
+                let end_wide_idx = i.b() as usize;
+
+                // Get start and end from wide operands (only on first iteration)
+                let start = f.code.wide_operands[start_wide_idx];
+                let end = f.code.wide_operands[end_wide_idx];
+
+                // Read current value from local slot
+                let cur = unsafe { *f.locals.get_unchecked(var_slot) };
+                let cur_val = if cur.is_int() { cur.as_i48() } else { start };
+
+                // Increment
+                let next_val = cur_val + 1;
+
+                // Compare and jump
+                if next_val < end {
+                    // Store incremented value back to local
+                    unsafe { *f.locals.get_unchecked_mut(var_slot) = Value::from_i48(next_val); }
+                    // Continue to loop body (next instruction)
+                    f.ip += 1;
+                    Action::Next
+                } else {
+                    // Loop done — jump past the body and the OP_JUMP at the end
+                    // We need to find the OP_JUMP at the end of the body and skip it
+                    // The OP_JUMP's target tells us where the loop started, so we skip to ip+1
+                    // Actually, we need to skip past the body. The body ends with OP_JUMP.
+                    // We need to find where the body ends. Since the body always ends with
+                    // OP_JUMP back to this instruction, we can scan forward to find it.
+                    let loop_ip = f.ip; // current instruction pointer (FOR_NUMBER_LOOP)
+                    f.ip += 1; // skip past FOR_NUMBER_LOOP to start of body
+                    // Scan forward to find the OP_JUMP that closes the loop
+                    let code = &f.code.instructions;
+                    let mut scan = f.ip as usize;
+                    while scan < code.len() {
+                        let instr = unsafe { *code.get_unchecked(scan) };
+                        if instr.op() == OP_JUMP && instr.a() == loop_ip {
+                            // Found the closing jump — skip past it
+                            f.ip = (scan + 1) as u32;
+                            return Action::Jump(f.ip);
+                        }
+                        scan += 1;
+                    }
+                    // Fallback: should not happen with valid bytecode
+                    Action::Next
+                }
+            }
+
+            // ── ADD_INT_LOCAL: $x = $x + c ──
+            OP_ADD_INT_LOCAL => {
+                let l = &mut self.frames[top].locals;
+                let idx = i.a() as usize;
+                let c = i.b() as i64;
+                let v = unsafe { *l.get_unchecked(idx) };
+                if v.is_int() {
+                    let r = v.as_i48().checked_add(c).unwrap_or(v.as_i48());
+                    unsafe { *l.get_unchecked_mut(idx) = Value::from_i48(r); }
+                } else {
+                    let r = v.add(Value::from_i48(c), &self.arena);
+                    unsafe { *l.get_unchecked_mut(idx) = r; }
+                }
+                Action::Next
+            }
+
+            // ── ADD_LOCAL_STORE: $a = $a + $b (direct local-to-local add) ──
+            OP_ADD_LOCAL_STORE => {
+                let l = &mut self.frames[top].locals;
+                let dest = i.a() as usize;
+                let src = i.b() as usize;
+                let a = unsafe { *l.get_unchecked(dest) };
+                let b = unsafe { *l.get_unchecked(src) };
+                // Fast integer path
+                if a.is_int() && b.is_int() {
+                    let r = a.as_i48().checked_add(b.as_i48()).unwrap_or_else(|| {
+                        (a.as_i48() as f64 + b.as_i48() as f64) as i64
+                    });
+                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
+                } else {
+                    unsafe { *l.get_unchecked_mut(dest) = a.add(b, &self.arena); }
+                }
+                Action::Next
+            }
+
+            // ── SUB_INT_LOCAL: $x = $x - c ──
+            OP_SUB_INT_LOCAL => {
+                let l = &mut self.frames[top].locals;
+                let idx = i.a() as usize;
+                let c = i.b() as i64;
+                let v = unsafe { *l.get_unchecked(idx) };
+                if v.is_int() {
+                    let r = v.as_i48().checked_sub(c).unwrap_or(v.as_i48());
+                    unsafe { *l.get_unchecked_mut(idx) = Value::from_i48(r); }
+                } else {
+                    let r = v.sub_(Value::from_i48(c));
+                    unsafe { *l.get_unchecked_mut(idx) = r; }
+                }
+                Action::Next
+            }
+
+            // ── MUL_INT_LOCAL: $x = $x * c ──
+            OP_MUL_INT_LOCAL => {
+                let l = &mut self.frames[top].locals;
+                let idx = i.a() as usize;
+                let c = i.b() as i64;
+                let v = unsafe { *l.get_unchecked(idx) };
+                if v.is_int() {
+                    let r = v.as_i48().checked_mul(c).unwrap_or(v.as_i48());
+                    unsafe { *l.get_unchecked_mut(idx) = Value::from_i48(r); }
+                } else {
+                    let r = v.mul(Value::from_i48(c), &self.arena);
+                    unsafe { *l.get_unchecked_mut(idx) = r; }
+                }
+                Action::Next
+            }
+
+            // ── WHILE_LT_INT: while $a < b { body } (single-opcode while-loop) ──
+            // Operand a = local slot, b = int constant
+            // If locals[a] < b, continue to body. Otherwise, skip past body.
+            OP_WHILE_LT_INT => {
+                let f = &mut self.frames[top];
+                let slot = i.a() as usize;
+                let limit = i.b() as i32 as i64;
+                let v = unsafe { *f.locals.get_unchecked(slot) };
+                let val = if v.is_int() { v.as_i48() } else { v.as_int() };
+                if val < limit {
+                    // Continue to loop body
+                    Action::Next
+                } else {
+                    // Skip past body — find the closing OP_JUMP
+                    let loop_ip = f.ip;
+                    f.ip += 1;
+                    let code = &f.code.instructions;
+                    let mut scan = f.ip as usize;
+                    while scan < code.len() {
+                        let instr = unsafe { *code.get_unchecked(scan) };
+                        if instr.op() == OP_JUMP && instr.a() == loop_ip {
+                            f.ip = (scan + 1) as u32;
+                            return Action::Jump(f.ip);
+                        }
+                        scan += 1;
+                    }
+                    Action::Next
+                }
+            }
+
+            // ── SUB_LOCAL_STORE: $a = $a - $b ──
+            OP_SUB_LOCAL_STORE => {
+                let l = &mut self.frames[top].locals;
+                let dest = i.a() as usize;
+                let src = i.b() as usize;
+                let a = unsafe { *l.get_unchecked(dest) };
+                let b = unsafe { *l.get_unchecked(src) };
+                if a.is_int() && b.is_int() {
+                    let r = a.as_i48().checked_sub(b.as_i48()).unwrap_or_else(|| {
+                        (a.as_i48() as f64 - b.as_i48() as f64) as i64
+                    });
+                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
+                } else {
+                    unsafe { *l.get_unchecked_mut(dest) = a.sub_(b); }
+                }
+                Action::Next
+            }
+
+            // ── ADD_LOCAL_LOCAL_STORE: $c = $a + $b ──
+            OP_ADD_LOCAL_LOCAL_STORE => {
+                let l = &mut self.frames[top].locals;
+                let dest = i.a() as usize;
+                let b_val = i.b() as u32;
+                let src1 = (b_val >> 16) as usize;
+                let src2 = (b_val & 0xFFFF) as usize;
+                let a = unsafe { *l.get_unchecked(src1) };
+                let b = unsafe { *l.get_unchecked(src2) };
+                if a.is_int() && b.is_int() {
+                    let r = a.as_i48().checked_add(b.as_i48()).unwrap_or_else(|| {
+                        (a.as_i48() as f64 + b.as_i48() as f64) as i64
+                    });
+                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
+                } else {
+                    unsafe { *l.get_unchecked_mut(dest) = a.add(b, &self.arena); }
+                }
+                Action::Next
+            }
+
+            // ── MUL_LOCAL_LOCAL_STORE: $c = $a * $b ──
+            OP_MUL_LOCAL_LOCAL_STORE => {
+                let l = &mut self.frames[top].locals;
+                let dest = i.a() as usize;
+                let b_val = i.b() as u32;
+                let src1 = (b_val >> 16) as usize;
+                let src2 = (b_val & 0xFFFF) as usize;
+                let a = unsafe { *l.get_unchecked(src1) };
+                let b = unsafe { *l.get_unchecked(src2) };
+                if a.is_int() && b.is_int() {
+                    let r = a.as_i48().checked_mul(b.as_i48()).unwrap_or_else(|| {
+                        (a.as_i48() as f64 * b.as_i48() as f64) as i64
+                    });
+                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
+                } else {
+                    unsafe { *l.get_unchecked_mut(dest) = a.mul(b, &self.arena); }
+                }
+                Action::Next
+            }
+
+            // ── MUL_LOCAL_STORE: $a = $a * $b (direct local-to-local mul) ──
+            OP_MUL_LOCAL_STORE => {
+                let l = &mut self.frames[top].locals;
+                let dest = i.a() as usize;
+                let src = i.b() as usize;
+                let a = unsafe { *l.get_unchecked(dest) };
+                let b = unsafe { *l.get_unchecked(src) };
+                if a.is_int() && b.is_int() {
+                    let r = a.as_i48().checked_mul(b.as_i48()).unwrap_or_else(|| {
+                        (a.as_i48() as f64 * b.as_i48() as f64) as i64
+                    });
+                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
+                } else {
+                    unsafe { *l.get_unchecked_mut(dest) = a.mul(b, &self.arena); }
+                }
+                Action::Next
+            }
+
             _ => Action::Next,
         }
     }
@@ -873,6 +1240,16 @@ fn opcode_name(op: u8) -> String {
         OP_LT_LOCAL_LOCAL => "OP_LT_LL".to_string(),
         OP_LOAD_LOCAL_PUSH_INT => "OP_LL_PI".to_string(),
         OP_LOAD_LOCAL_STORE_LOCAL => "OP_LL_SL".to_string(),
+        OP_FOR_NUMBER_LOOP => "OP_FOR_NUM_LP".to_string(),
+        OP_ADD_INT_LOCAL => "OP_ADD_INT_L".to_string(),
+        OP_ADD_LOCAL_STORE => "OP_ADD_L_ST".to_string(),
+        OP_SUB_INT_LOCAL => "OP_SUB_INT_L".to_string(),
+        OP_MUL_INT_LOCAL => "OP_MUL_INT_L".to_string(),
+        OP_WHILE_LT_INT => "OP_WHILE_LT".to_string(),
+        OP_MUL_LOCAL_STORE => "OP_MUL_L_ST".to_string(),
+        OP_SUB_LOCAL_STORE => "OP_SUB_L_ST".to_string(),
+        OP_ADD_LOCAL_LOCAL_STORE => "OP_ADD_LL_ST".to_string(),
+        OP_MUL_LOCAL_LOCAL_STORE => "OP_MUL_LL_ST".to_string(),
         _ => format!("0x{:02X}", op),
     }
 }
