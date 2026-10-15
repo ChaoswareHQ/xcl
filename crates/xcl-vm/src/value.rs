@@ -3,6 +3,9 @@
 //! XCL uses a NaN-boxed value representation: primitives (int, float, bool, nil)
 //! are stored directly in the 64-bit word, while heap-allocated types (String, Array,
 //! Map, Func, Handle) are stored as pointers in the lower 48 bits of a NaN payload.
+//!
+//! NaN-boxing keeps Value at exactly 8 bytes (one machine word), which is optimal
+//! for cache performance. Type checks use bit masking which modern CPUs handle well.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -197,7 +200,6 @@ impl Value {
             Some(unsafe { (*ptr).variant })
         } else { None }
     }
-
 
     #[inline(always)]
     pub fn as_str(self) -> Option<&'static str> {
