@@ -1,0 +1,16 @@
+[package]
+name = "xcl-vm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+homepage.workspace = true
+
+[dependencies]
+logos.workspace = true
+bumpalo.workspace = true
+smallvec.workspace = true
+hashbrown.workspace = true

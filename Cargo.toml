@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+default-members = ["crates/xcl-cli"]
+members = ["crates/*"]
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.99.0"
+authors      = ["Nguyễn Quý Ngọc ngoc.nguyen@chaoswarehq.com"]
+license      = "MIT OR Apache-2.0"
+repository   = "https://github.com/AzzoDude/xcelerate"
+readme       = "README.md"
+homepage     = "https://chaoswarehq.com"
+
+[workspace.dependencies]
+xcl-macros = { path = "crates/xcl-macros" }
+xcl-std    = { path = "crates/xcl-std" }
+xcl-vm     = { path = "crates/xcl-vm" }
+
+# xcl-cli
+mimalloc = "0.1.52"
+
+# xcl-vm
+logos     = "0.16.1"
+smallvec  = "1.16.3"
+bumpalo   = "3.20.3"
+hashbrown = "0.17.1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+overflow-checks = false
+debug-assertions = false
