@@ -17,3 +17,10 @@ linkme.workspace = true
 # [std.io]
 itoa.workspace = true
 ryu.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "integration"
+harness = false

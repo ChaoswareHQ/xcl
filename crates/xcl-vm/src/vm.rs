@@ -4,6 +4,41 @@ use smallvec::SmallVec;
 use crate::bytecode::*;
 use crate::value::{Value, BuiltinImpl, TypeDescriptor};
 
+/// Tracks opcode dispatch frequency for profiling.
+/// Gated behind `cfg(feature = "opcode-stats")` for zero overhead in normal builds.
+#[cfg(feature = "opcode-stats")]
+struct OpcodeCounter {
+    counts: [u64; 256],
+}
+
+#[cfg(feature = "opcode-stats")]
+impl OpcodeCounter {
+    fn new() -> Self {
+        Self { counts: [0; 256] }
+    }
+
+    #[inline(always)]
+    fn record(&mut self, op: u8) {
+        self.counts[op as usize] += 1;
+    }
+
+    fn total(&self) -> u64 {
+        self.counts.iter().sum()
+    }
+
+    /// Returns a sorted list of (opcode, count) pairs, highest count first.
+    fn top(&self, n: usize) -> Vec<(u8, u64)> {
+        let mut pairs: Vec<(u8, u64)> = self.counts
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &c)| if c > 0 { Some((i as u8, c)) } else { None })
+            .collect();
+        pairs.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
+        pairs.truncate(n);
+        pairs
+    }
+}
+
 enum Action { Next, Jump(u32), Return, PushFrame }
 
 struct Frame {
@@ -37,6 +72,8 @@ pub struct VM {
     frames: Vec<Frame>,
     pending: Option<Frame>,
     closures: Vec<crate::value::FuncValue>,
+    #[cfg(feature = "opcode-stats")]
+    opcode_counter: OpcodeCounter,
 }
 
 impl Default for VM { fn default() -> Self { Self::new() } }
@@ -56,6 +93,8 @@ impl VM {
             frames: Vec::new(),
             pending: None,
             closures: Vec::new(),
+            #[cfg(feature = "opcode-stats")]
+            opcode_counter: OpcodeCounter::new(),
         }
     }
 
@@ -197,6 +236,8 @@ impl VM {
 
     #[inline(always)]
     fn dispatch(&mut self, top: usize, i: Instr) -> Action {
+        #[cfg(feature = "opcode-stats")]
+        self.opcode_counter.record(i.op());
         match i.op() {
             OP_NOP => Action::Next,
             OP_PUSH_NIL => { self.push(Value::nil()); Action::Next }
@@ -321,6 +362,59 @@ impl VM {
                             let impl_copy = *impl_;
                             let result = impl_copy.call(self, &args);
                             self.push(result);
+                            return Action::Next;
+                        }
+                    }
+                    // 2b. Domain expansion: if callee is a domain name, check for block/dict args.
+                    if self.domain_index.contains_key(name) {
+                        // Case 1: one arg is a function — execute it with domain methods in scope.
+                        if let Some((func_idx, func)) = args.iter().enumerate().find_map(|(i, a)| {
+                            a.as_func().map(|f| (i, f.clone()))
+                        }) {
+                            let call_args: Vec<Value> = args.into_iter().enumerate()
+                                .filter(|(i, _)| *i != func_idx)
+                                .map(|(_, v)| v)
+                                .collect();
+                            let &didx = self.domain_index.get(name).unwrap();
+                            let slot = &self.domain_table[didx as usize];
+                            let mut saved: Vec<(Box<str>, Option<u32>)> = Vec::new();
+                            for (method_name, &midx) in slot.index.iter() {
+                                let existing = self.global_index.insert(method_name.clone(), self.global_table.len() as u32);
+                                saved.push((method_name.clone(), existing));
+                                let impl_ = slot.methods[midx as usize];
+                                self.global_table.push(impl_);
+                            }
+                            let func_value = Value::from_func(func.clone(), &self.arena);
+                            let result = self.call_value(func_value, &call_args);
+                            for (method_name, existing) in saved.into_iter().rev() {
+                                self.global_table.pop();
+                                if let Some(idx) = existing {
+                                    self.global_index.insert(method_name.clone(), idx);
+                                } else {
+                                    self.global_index.remove(&method_name);
+                                }
+                            }
+                            self.push(result);
+                            return Action::Next;
+                        }
+                        // Case 2: one arg is a map — each key is a method name, each value is the arg.
+                        if let Some((_map_idx, map)) = args.iter().enumerate().find_map(|(i, a)| {
+                            a.as_map().map(|m| (i, m))
+                        }) {
+                            let &didx = self.domain_index.get(name).unwrap();
+                            // Collect method calls to avoid borrow conflict
+                            let calls: Vec<(u32, Value)> = self.domain_table[didx as usize].index.iter()
+                                .filter_map(|(method_name, &midx)| {
+                                    map.get(&**method_name).map(|v| (midx, *v))
+                                })
+                                .collect();
+                            let mut last_result = Value::nil();
+                            for (midx, value) in calls {
+                                let impl_ = self.domain_table[didx as usize].methods[midx as usize]
+                                    .as_ref().copied().unwrap();
+                                last_result = impl_.call(self, &[value]);
+                            }
+                            self.push(last_result);
                             return Action::Next;
                         }
                     }
@@ -662,5 +756,102 @@ impl VM {
 
         self.closures = saved_closures;
         Value::nil()
+    }
+
+    /// Returns the opcode dispatch counts as a HashMap<opcode, count>.
+    /// Only available when the `opcode-stats` feature is enabled.
+    #[cfg(feature = "opcode-stats")]
+    pub fn opcode_counts(&self) -> std::collections::HashMap<u8, u64> {
+        let mut map = std::collections::HashMap::new();
+        for (op, &count) in self.opcode_counter.counts.iter().enumerate() {
+            if count > 0 {
+                map.insert(op as u8, count);
+            }
+        }
+        map
+    }
+
+    /// Prints a histogram of the top N opcodes by dispatch count.
+    /// Only available when the `opcode-stats` feature is enabled.
+    #[cfg(feature = "opcode-stats")]
+    pub fn print_opcode_histogram(&self, top_n: usize) {
+        let total = self.opcode_counter.total();
+        let top = self.opcode_counter.top(top_n);
+        eprintln!("\n=== Opcode Dispatch Histogram (top {}) ===", top_n);
+        eprintln!("Total dispatches: {}", total);
+        eprintln!("{:<12} {:>12} {:>8}", "Opcode", "Count", "%");
+        eprintln!("{:-<34}", "");
+        for (op, count) in &top {
+            let pct = *count as f64 / total as f64 * 100.0;
+            let name = opcode_name(*op);
+            eprintln!("{:<12} {:>12} {:>7.2}%", name, count, pct);
+        }
+        eprintln!("====================================\n");
+    }
+}
+
+/// Returns a human-readable name for an opcode, or the hex value if unknown.
+#[cfg(feature = "opcode-stats")]
+fn opcode_name(op: u8) -> String {
+    match op {
+        OP_NOP => "OP_NOP".to_string(),
+        OP_PUSH_NIL => "OP_PUSH_NIL".to_string(),
+        OP_PUSH_TRUE => "OP_PUSH_TRUE".to_string(),
+        OP_PUSH_FALSE => "OP_PUSH_FALSE".to_string(),
+        OP_PUSH_INT => "OP_PUSH_INT".to_string(),
+        OP_PUSH_INT_WIDE => "OP_PUSH_INT_WIDE".to_string(),
+        OP_PUSH_FLOAT => "OP_PUSH_FLOAT".to_string(),
+        OP_PUSH_STR => "OP_PUSH_STR".to_string(),
+        OP_LOAD_LOCAL => "OP_LOAD_LOCAL".to_string(),
+        OP_STORE_LOCAL => "OP_STORE_LOCAL".to_string(),
+        OP_LOAD_GLOBAL => "OP_LOAD_GLOBAL".to_string(),
+        OP_STORE_GLOBAL => "OP_STORE_GLOBAL".to_string(),
+        OP_ADD => "OP_ADD".to_string(),
+        OP_SUB => "OP_SUB".to_string(),
+        OP_MUL => "OP_MUL".to_string(),
+        OP_DIV => "OP_DIV".to_string(),
+        OP_MOD => "OP_MOD".to_string(),
+        OP_NEG => "OP_NEG".to_string(),
+        OP_EQ => "OP_EQ".to_string(),
+        OP_NEQ => "OP_NEQ".to_string(),
+        OP_LT => "OP_LT".to_string(),
+        OP_GT => "OP_GT".to_string(),
+        OP_LE => "OP_LE".to_string(),
+        OP_GE => "OP_GE".to_string(),
+        OP_AND => "OP_AND".to_string(),
+        OP_OR => "OP_OR".to_string(),
+        OP_NOT => "OP_NOT".to_string(),
+        OP_IN => "OP_IN".to_string(),
+        OP_TYPE_TEST => "OP_TYPE_TEST".to_string(),
+        OP_JUMP => "OP_JUMP".to_string(),
+        OP_JUMP_IF_FALSE => "OP_JUMP_IF_FALSE".to_string(),
+        OP_JUMP_IF_NIL => "OP_JUMP_IF_NIL".to_string(),
+        OP_CALL => "OP_CALL".to_string(),
+        OP_CALL_METHOD => "OP_CALL_METHOD".to_string(),
+        OP_RETURN => "OP_RETURN".to_string(),
+        OP_HALT => "OP_HALT".to_string(),
+        OP_LEN => "OP_LEN".to_string(),
+        OP_GET_INDEX => "OP_GET_INDEX".to_string(),
+        OP_GET_FIELD => "OP_GET_FIELD".to_string(),
+        OP_MAKE_ARRAY => "OP_MAKE_ARRAY".to_string(),
+        OP_MAKE_DICT => "OP_MAKE_DICT".to_string(),
+        OP_ARRAY_PUSH => "OP_ARRAY_PUSH".to_string(),
+        OP_FOR_ITER_START => "OP_FOR_ITER_START".to_string(),
+        OP_FOR_ITER_NEXT => "OP_FOR_ITER_NEXT".to_string(),
+        OP_FOR_RANGE_START => "OP_FOR_RANGE_START".to_string(),
+        OP_FOR_RANGE_NEXT => "OP_FOR_RANGE_NEXT".to_string(),
+        OP_LOAD_LAMBDA => "OP_LOAD_LAMBDA".to_string(),
+        OP_COALESCE => "OP_COALESCE".to_string(),
+        OP_TRY_START => "OP_TRY_START".to_string(),
+        OP_TRY_END => "OP_TRY_END".to_string(),
+        OP_THROW => "OP_THROW".to_string(),
+        OP_CATCH => "OP_CATCH".to_string(),
+        OP_LOAD_LOCAL_LOAD_LOCAL => "OP_LL_LL".to_string(),
+        OP_ADD_LOCAL_LOCAL => "OP_ADD_LL".to_string(),
+        OP_SUB_LOCAL_LOCAL => "OP_SUB_LL".to_string(),
+        OP_LT_LOCAL_LOCAL => "OP_LT_LL".to_string(),
+        OP_LOAD_LOCAL_PUSH_INT => "OP_LL_PI".to_string(),
+        OP_LOAD_LOCAL_STORE_LOCAL => "OP_LL_SL".to_string(),
+        _ => format!("0x{:02X}", op),
     }
 }

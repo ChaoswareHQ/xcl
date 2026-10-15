@@ -37,6 +37,9 @@ linkme    = "0.3"
 itoa = "1.0.18"
 ryu = "1.0.23"
 
+# Benchmarking
+criterion = "0.5"
+
 [profile.release]
 opt-level = 3
 lto = "fat"
@@ -45,3 +48,16 @@ panic = "abort"
 strip = true
 overflow-checks = false
 debug-assertions = false
+
+# Profiling: debug info + opt-level 1 for flamegraph readability
+[profile.bench-flamegraph]
+inherits = "release"
+opt-level = 1
+debug = true
+strip = false
+
+# Profiling: LTO release with debuginfo for BOLT re-compilation
+[profile.release-lto-debug]
+inherits = "release"
+debug = true
+strip = false
