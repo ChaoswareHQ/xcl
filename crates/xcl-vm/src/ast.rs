@@ -34,6 +34,39 @@ pub enum AstNode {
     FieldAccess { span: Span, target: Box<AstNode>, field: String },
     Range { span: Span, start: Option<Box<AstNode>>, end: Option<Box<AstNode>> },
     Block { span: Span, statements: Vec<AstNode> },
+
+    /// Type definition: `Point = { x: f64; y: f64; dist() -> f64 { ... } }`
+    TypeDef { span: Span, name: String, kind: TypeKind, body: Vec<AstNode> },
+    /// Impl block: `Circle is Shape { area() -> f64 { ... } }`
+    ImplDef { span: Span, type_name: String, trait_name: String, body: Vec<AstNode> },
+    /// Type test expression: `$x is Shape`
+    TypeTest { span: Span, value: Box<AstNode>, type_name: String },
+}
+
+/// Kind of type definition
+#[derive(Debug, Clone)]
+pub enum TypeKind {
+    /// Record: `Point = { x: f64; y: f64 }`
+    Record,
+    /// Sum type: `Shape = | Circle { r: f64 } | Square { s: f64 }`
+    Sum { variants: Vec<SumVariant> },
+    /// Trait: `Printable = { to_string() -> str }`
+    Trait,
+}
+
+/// A variant in a sum type definition
+#[derive(Debug, Clone)]
+pub struct SumVariant {
+    pub name: String,
+    pub fields: Vec<TypeField>,
+}
+
+/// A field in a type definition
+#[derive(Debug, Clone)]
+pub struct TypeField {
+    pub name: String,
+    pub ty: String,
+    pub mutable: bool,
 }
 
 #[derive(Debug, Clone)]

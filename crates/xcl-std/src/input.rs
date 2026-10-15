@@ -135,70 +135,166 @@ fn emit_prompt(prompt: &str) {
     crate::output::flush_out();
 }
 
-#[xcl_fn(domain = "io", name = "input", ret = "str?")]
+/// Read input from standard input, with optional type conversion.
+///
+/// By default, reads a full line of text. Use named flags to specify the input type:
+/// `--bool` for boolean, `--int` for integer, `--float` for floating-point,
+/// `--word` for a single word, `--line` for a full line (default), or `--all`
+/// for all remaining input until EOF.
+///
+/// ## SYNTAX
+///
+/// ```xcl
+/// fn input($prompt: str; --bool: bool; --int: bool; --float: bool; --word: bool; --line: bool; --all: bool) -> any
+/// ```
+///
+/// ## PARAMETERS
+///
+/// `$prompt`: An optional string displayed before reading input. If omitted or empty, no
+/// prompt is shown.
+///
+/// `--bool`: When set to `true`, reads and parses a boolean value. Accepts `true`, `yes`,
+/// `y`, `1` for true and `false`, `no`, `n`, `0` for false. Returns `none` for
+/// unrecognized input.
+///
+/// `--int`: When set to `true`, reads and parses a signed 64-bit integer. Returns `none`
+/// if the input cannot be parsed.
+///
+/// `--float`: When set to `true`, reads and parses a 64-bit floating-point number.
+/// Returns `none` if the input cannot be parsed.
+///
+/// `--word`: When set to `true`, reads a single whitespace-delimited word instead of a
+/// full line.
+///
+/// `--line`: When set to `true`, reads a full line of text (default behavior).
+///
+/// `--all`: When set to `true`, reads all remaining input until EOF. Ignores the prompt
+/// parameter.
+///
+/// ## EXAMPLES
+///
+/// ```xcl
+/// # Read a line of text (default)
+/// $name = io.input "Enter your name: "
+/// io.print "Hello, $name!"
+/// ```
+///
+/// ```xcl
+/// # Read an integer
+/// $age = io.input --int=true "Enter your age: "
+/// if $age is i64 {
+///     io.print "You are $age years old."
+/// }
+/// ```
+///
+/// ```xcl
+/// # Read a boolean
+/// $confirmed = io.input --bool=true "Continue? (yes/no): "
+/// if $confirmed == true {
+///     io.print "Proceeding..."
+/// }
+/// ```
+///
+/// ```xcl
+/// # Read a single word
+/// $word = io.input --word=true "Enter a word: "
+/// ```
+///
+/// ```xcl
+/// # Read all input until EOF
+/// $content = io.input --all=true
+/// io.print "Read ${$content.len()} characters"
+/// ```
+///
+/// ## OUTPUT TYPES
+///
+/// - `str?` — Default (line mode) or `--word=true`.
+/// - `bool?` — When `--bool=true`.
+/// - `i64?` — When `--int=true`.
+/// - `f64?` — When `--float=true`.
+/// - `str` — When `--all=true`.
+///
+/// ## NOTES
+///
+/// - Only one type flag should be set at a time; if multiple are set, the first matching
+/// flag takes precedence in the order: `--all`, `--bool`, `--int`, `--float`, `--word`,
+/// `--line`.
+/// - The returned string in line mode has trailing `\n` and `\r` characters removed.
+/// - On EOF, returns `none` (except `--all`, which returns an empty string).
+/// - The prompt is written to stdout and flushed before reading begins.
+#[xcl_fn(
+    name = "io.input",
+    ret = "any",
+    args = "prompt: str",
+    named(
+        { name = "bool", ty = "bool", default = "false" },
+        { name = "int", ty = "bool", default = "false" },
+        { name = "float", ty = "bool", default = "false" },
+        { name = "word", ty = "bool", default = "false" },
+        { name = "line", ty = "bool", default = "false" },
+        { name = "all", ty = "bool", default = "false" },
+    ),
+)]
 pub fn io_input_fn(args: &[Value]) -> Value {
+    // Parse positional prompt arg
     let prompt = args.first().and_then(|v| v.as_str()).unwrap_or("");
+
+    // Determine input mode from named params
+    let mut as_bool = false;
+    let mut as_int = false;
+    let mut as_float = false;
+    let mut as_word = false;
+    let mut as_all = false;
+
+    // Named params come as a map value in the args array
+    for arg in args {
+        if let Some(map) = arg.as_map() {
+            for (key, val) in map {
+                let is_true = val.is_bool() && val.as_bool();
+                match key.as_str() {
+                    "bool" => as_bool = is_true,
+                    "int" => as_int = is_true,
+                    "float" => as_float = is_true,
+                    "word" => as_word = is_true,
+                    "all" => as_all = is_true,
+                    _ => {}
+                }
+            }
+        }
+    }
+
     emit_prompt(prompt);
 
-    with_in(|r| match r.read_line() {
-        Ok(Some(s)) => Value::from_str_boxed(s),
-        _ => Value::unit(),
-    })
-}
-
-#[xcl_fn(domain = "io", name = "input_line", ret = "str?")]
-pub fn io_input_line_fn(args: &[Value]) -> Value {
-    io_input_fn(args)
-}
-
-#[xcl_fn(domain = "io", name = "input_int", ret = "i64?")]
-pub fn io_input_int_fn(args: &[Value]) -> Value {
-    let prompt = args.first().and_then(|v| v.as_str()).unwrap_or("");
-    emit_prompt(prompt);
-
-    with_in(|r| match r.read_i64() {
-        Ok(Some(n)) => Value::from_i48(n),
-        _ => Value::unit(),
-    })
-}
-
-#[xcl_fn(domain = "io", name = "input_float", ret = "f64?")]
-pub fn io_input_float_fn(args: &[Value]) -> Value {
-    let prompt = args.first().and_then(|v| v.as_str()).unwrap_or("");
-    emit_prompt(prompt);
-
-    with_in(|r| match r.read_f64() {
-        Ok(Some(f)) => Value::from_f64(f),
-        _ => Value::unit(),
-    })
-}
-
-#[xcl_fn(domain = "io", name = "input_bool", ret = "bool?")]
-pub fn io_input_bool_fn(args: &[Value]) -> Value {
-    let prompt = args.first().and_then(|v| v.as_str()).unwrap_or("");
-    emit_prompt(prompt);
-
-    with_in(|r| match r.read_bool() {
-        Ok(Some(b)) => Value::bool_(b),
-        _ => Value::unit(),
-    })
-}
-
-#[xcl_fn(domain = "io", name = "input_word", ret = "str?")]
-pub fn io_input_word_fn(args: &[Value]) -> Value {
-    let prompt = args.first().and_then(|v| v.as_str()).unwrap_or("");
-    emit_prompt(prompt);
-
-    with_in(|r| match r.read_str() {
-        Ok(Some(s)) => Value::from_str_boxed(s),
-        _ => Value::unit(),
-    })
-}
-
-#[xcl_fn(domain = "io", name = "input_all", ret = "str")]
-pub fn io_input_all_fn(_args: &[Value]) -> Value {
-    with_in(|r| match r.read_all() {
-        Ok(s) => Value::from_str_boxed(s),
-        Err(_) => Value::unit(),
-    })
+    if as_all {
+        with_in(|r| match r.read_all() {
+            Ok(s) => Value::from_str_boxed(s),
+            Err(_) => Value::unit(),
+        })
+    } else if as_bool {
+        with_in(|r| match r.read_bool() {
+            Ok(Some(b)) => Value::bool_(b),
+            _ => Value::unit(),
+        })
+    } else if as_int {
+        with_in(|r| match r.read_i64() {
+            Ok(Some(n)) => Value::from_i48(n),
+            _ => Value::unit(),
+        })
+    } else if as_float {
+        with_in(|r| match r.read_f64() {
+            Ok(Some(f)) => Value::from_f64(f),
+            _ => Value::unit(),
+        })
+    } else if as_word {
+        with_in(|r| match r.read_str() {
+            Ok(Some(s)) => Value::from_str_boxed(s),
+            _ => Value::unit(),
+        })
+    } else {
+        // Default: read line
+        with_in(|r| match r.read_line() {
+            Ok(Some(s)) => Value::from_str_boxed(s),
+            _ => Value::unit(),
+        })
+    }
 }

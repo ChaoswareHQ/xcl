@@ -6,10 +6,6 @@ use xcl_vm::Value;
 
 const OUT_CAPACITY: usize = 128 * 1024;
 
-// ═══════════════════════════════════════════════════════════════
-//  FastOut
-// ═══════════════════════════════════════════════════════════════
-
 pub struct FastOut<W: Write> {
     buf: BufWriter<W>,
 }
@@ -71,10 +67,6 @@ impl<W: Write> Drop for FastOut<W> {
         let _ = self.buf.flush();
     }
 }
-
-// ═══════════════════════════════════════════════════════════════
-//  Thread-local instances
-// ═══════════════════════════════════════════════════════════════
 
 thread_local! {
     static OUT: RefCell<FastOut<StdoutLock<'static>>> =
@@ -154,10 +146,6 @@ fn bg_code(name: &str) -> Option<&'static [u8]> {
 
 const RESET: &[u8] = b"\x1b[0m";
 
-// ═══════════════════════════════════════════════════════════════
-//  Named arg parsing helpers
-// ═══════════════════════════════════════════════════════════════
-
 /// Parse named args for `io.print`: foreground, background, no_newline, to_stderr.
 fn parse_print_named_args(
     args: &[Value],
@@ -173,11 +161,65 @@ fn parse_print_named_args(
     (positional, fg, bg, no_newline, to_stderr)
 }
 
-// ═══════════════════════════════════════════════════════════════
-//  io.print — single print function, routes to stdout or stderr via `to_stderr`
-// ═══════════════════════════════════════════════════════════════
-
-#[xcl_fn(domain = "io", name = "print", ret = "none")]
+/// Print values to standard output.
+///
+/// Converts each argument to its string representation and prints them separated by spaces,
+/// followed by a newline. Supports named parameters for ANSI coloring and output routing.
+///
+/// ## SYNTAX
+///
+/// ```xcl
+/// fn print($value1; $value2; ...) -> none
+/// ```
+///
+/// ## PARAMETERS
+///
+/// Positional arguments are converted to strings and printed separated by spaces.
+///
+/// ## NAMED PARAMETERS
+///
+/// `foreground`: Text color name (e.g., `"red"`, `"green"`, `"bright_blue"`).
+///
+/// `background`: Background color name.
+///
+/// `no_newline`: If `true`, suppress the trailing newline.
+///
+/// `to_stderr`: If `true`, write to stderr instead of stdout.
+///
+/// ## EXAMPLES
+///
+/// ```xcl
+/// # Basic printing
+/// io.print "Hello, world!"
+/// ```
+///
+/// ```xcl
+/// # Multiple values
+/// io.print "Name:" $name "Age:" $age
+/// ```
+///
+/// ```xcl
+/// # Colored output
+/// io.print "Error!" foreground="red"
+/// ```
+///
+/// ```xcl
+/// # Without newline
+/// io.print "Loading..." no_newline=true
+/// ```
+///
+/// ```xcl
+/// # To stderr
+/// io.print "Warning!" to_stderr=true
+/// ```
+///
+/// ## NOTES
+///
+/// - Supported color names: `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`,
+///   `white`, and their `bright_` variants (e.g., `bright_red`).
+/// - Output is buffered; call `io.flush()` to force immediate writing.
+/// - Arrays, dicts, and functions are printed using their default string representation.
+#[xcl_fn(name = "io.print", ret = "none")]
 pub fn io_print_fn(args: &[Value]) -> Value {
     let (values, fg, bg, no_newline, to_stderr) = parse_print_named_args(args);
 
@@ -232,11 +274,43 @@ pub fn io_print_fn(args: &[Value]) -> Value {
     Value::unit()
 }
 
-// ═══════════════════════════════════════════════════════════════
-//  io.format — returns a String instead of writing
-// ═══════════════════════════════════════════════════════════════
-
-#[xcl_fn(domain = "io", name = "format", ret = "str")]
+/// Format values into a string without printing.
+///
+/// Converts each argument to its string representation and joins them with spaces,
+/// returning the result as a string. Unlike `io.print`, this does not write to any output stream.
+///
+/// ## SYNTAX
+///
+/// ```xcl
+/// fn format($value1; $value2; ...) -> str
+/// ```
+///
+/// ## PARAMETERS
+///
+/// Positional arguments are converted to strings and joined with spaces.
+///
+/// ## EXAMPLES
+///
+/// ```xcl
+/// # Format multiple values
+/// $msg = io.format "Hello," $name "!"
+/// ```
+///
+/// ```xcl
+/// # Build a message
+/// $line = io.format "Total:" $total "items"
+/// ```
+///
+/// ## OUTPUT TYPES
+///
+/// - `str`
+///
+/// ## NOTES
+///
+/// - Does not append a trailing newline.
+/// - `none` values are formatted as `"()"`.
+/// - Booleans are formatted as `"true"` or `"false"`.
+#[xcl_fn(name = "io.format", ret = "str")]
 pub fn io_format_fn(args: &[Value]) -> Value {
     let mut out = String::new();
     for (i, v) in args.iter().enumerate() {

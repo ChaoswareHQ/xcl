@@ -2,6 +2,8 @@
 
 A scripting language with a fast VM, standard library, and CLI.
 
+[Documentation](https://azzodude.github.io/xcelerate/)
+
 ## Quick Start
 
 ```bash
@@ -20,7 +22,7 @@ cargo run --release -- -e 'io.print "hello" 42'
 | `xcl-macros` | Procedural macros: `#[xcl_fn]` for native functions, `#[xcl_type]` for type descriptors |
 | `xcl-std` | Standard library: `io.*` functions, `Ok`/`Err` constructors, `print`, `format`, `input` |
 | `xcl-cli` | Command-line interface |
-| `xcl-docs` | Documentation generator — reads macro metadata and produces Markdown |
+| `xcl-doc` | Documentation generator — reads macro metadata and produces an HTML site |
 
 ## Writing Native Functions
 
@@ -68,10 +70,19 @@ pub fn greet_fn(name: &str) -> Value {
 ## Generating Documentation
 
 ```bash
-cargo run -p xcl-docs --release
+cargo run -p xcl-doc --release -- build --out docs
 ```
 
-This reads all `#[xcl_fn]` and `#[xcl_type]` entries and writes `docs/README.md`.
+This reads all `#[xcl_fn]` and `#[xcl_type]` entries and generates a complete HTML documentation site in `docs/`. The site includes:
+
+- **Index page** — overview of all domains, functions, and types
+- **Domain pages** — grouped view of each namespace (e.g., `io`, `Global`)
+- **Item pages** — detailed documentation for each function and type
+- **Sidebar navigation** — quick access to all items
+- **Client-side search** — filter functions and types by name or summary
+- **Dark mode** — automatic detection via `prefers-color-scheme`
+
+Open `docs/index.html` in a browser to browse the documentation.
 
 ## CLI Usage
 

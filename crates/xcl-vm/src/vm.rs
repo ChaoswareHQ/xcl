@@ -258,6 +258,28 @@ impl VM {
                 let found = c.as_array().map(|a| a.iter().any(|v| v.eq_(item))).unwrap_or(false);
                 self.push(Value::bool(found)); Action::Next
             }
+            OP_TYPE_TEST => {
+                // Stack: value, type_name
+                let type_name_s = self.pop().as_str();
+                let value = self.pop();
+                let is_type = if let Some(tn) = type_name_s {
+                    // Check if the value is a map with a "tag" field matching the type name
+                    if let Some(map) = value.as_map() {
+                        if let Some(tag_val) = map.get("tag") {
+                            if let Some(tag) = tag_val.as_str() {
+                                tag == tn
+                            } else { false }
+                        } else { false }
+                    } else {
+                        // Check type index for registered types
+                        self.type_index.contains_key(tn)
+                            && !value.is_nil()
+                    }
+                } else {
+                    false
+                };
+                self.push(Value::bool(is_type)); Action::Next
+            }
             OP_JUMP => Action::Jump(i.a()),
             OP_JUMP_IF_FALSE => {
                 let c = self.pop();
@@ -490,5 +512,111 @@ impl VM {
             catch_stack: Vec::new(),
         });
         Action::PushFrame
+    }
+
+    /// Call an XCL closure value with the given args. Reentrant.
+    /// Runs the VM dispatch loop until the closure frame returns, then returns its result.
+    pub fn call_value(&mut self, func: Value, args: &[Value]) -> Value {
+        let func_ref = match func.as_func() {
+            Some(f) => f,
+            None    => return Value::nil(),
+        };
+
+        let bc = match &func_ref.bytecode {
+            Some(b) => Arc::clone(b),
+            None    => return Value::nil(),
+        };
+
+        // Save and replace closures table so OP_LOAD_LAMBDA works for nested closures
+        let saved_closures = std::mem::replace(&mut self.closures, bc.closures.clone());
+
+        // Prepare locals: params first (matching how enter_call does it)
+        let n = bc.local_names.len().max(func_ref.params.len());
+        let mut locals = SmallVec::<[Value; 16]>::with_capacity(n);
+        for (i, _) in func_ref.params.iter().enumerate() {
+            locals.push(args.get(i).copied().unwrap_or(Value::nil()));
+        }
+        while locals.len() < n {
+            locals.push(Value::nil());
+        }
+
+        let initial_depth = self.frames.len();
+        let stack_base = self.stack.len() as u32;
+
+        self.frames.push(Frame {
+            code: Arc::clone(&bc),
+            locals,
+            ip: 0,
+            iter: Vec::new(),
+            iter_idx: 0,
+            range_cur: 0,
+            range_end: 0,
+            stack_base,
+            catch_stack: Vec::new(),
+        });
+
+        // Run the VM dispatch loop until the frame we just pushed returns
+        loop {
+            let top = match self.frames.len().checked_sub(1) {
+                Some(i) => i,
+                None    => {
+                    self.closures = saved_closures;
+                    self.frames.truncate(initial_depth);
+                    return Value::nil();
+                }
+            };
+
+            // If we've returned to the caller depth, the closure is done
+            if self.frames.len() <= initial_depth {
+                break;
+            }
+
+            let frame = &self.frames[top];
+            if frame.ip as usize >= frame.code.instructions.len() {
+                // Frame ran off the end — treat top of stack as return value
+                let result = self.stack.pop().unwrap_or(Value::nil());
+                self.frames.pop();
+                if self.frames.len() <= initial_depth {
+                    self.stack.truncate(stack_base as usize);
+                    self.closures = saved_closures;
+                    return result;
+                }
+                // Nested call returned; hand the value to the outer frame
+                if let Some(caller) = self.frames.last_mut() {
+                    caller.ip += 1;
+                    self.stack.truncate(caller.stack_base as usize);
+                    self.stack.push(result);
+                }
+                continue;
+            }
+
+            let instr = unsafe { *frame.code.instructions.get_unchecked(frame.ip as usize) };
+            let action = self.dispatch(top, instr);
+            match action {
+                Action::Next => self.frames[top].ip += 1,
+                Action::Jump(to) => self.frames[top].ip = to,
+                Action::Return => {
+                    let result = self.stack.pop().unwrap_or(Value::nil());
+                    self.frames.pop();
+                    if self.frames.len() <= initial_depth {
+                        self.stack.truncate(stack_base as usize);
+                        self.closures = saved_closures;
+                        return result;
+                    }
+                    if let Some(caller) = self.frames.last_mut() {
+                        caller.ip += 1;
+                        self.stack.truncate(caller.stack_base as usize);
+                        self.stack.push(result);
+                    }
+                }
+                Action::PushFrame => {
+                    let f = self.pending.take().expect("missing frame");
+                    self.frames.push(f);
+                }
+            }
+        }
+
+        self.closures = saved_closures;
+        Value::nil()
     }
 }

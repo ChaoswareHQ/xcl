@@ -1,0 +1,668 @@
+/* ============================================================
+   XCL Docs — Rustdoc-inspired Design
+   Clean, compact, white/dark primary with soft blue accents.
+   Code blocks use bright syntax on dark background (reversed).
+   JetBrains Mono for code. System sans-serif for body.
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+:root {
+    /* Light mode — white primary, soft blue accent */
+    --bg-canvas:     #ffffff;
+    --bg-sidebar:    #f6f6f6;
+    --bg-surface:    #f0f0f0;
+    --bg-hover:      #e8e8e8;
+
+    --fg-primary:    #2c2c2c;
+    --fg-secondary:  #4a4a4a;
+    --fg-muted:      #828282;
+
+    /* Soft blue accent — like rustdoc's orange but softer */
+    --accent:        #5b8af5;
+    --accent-dim:    rgba(91, 138, 245, 0.1);
+    --accent-border: rgba(91, 138, 245, 0.3);
+
+    --link:          #5b8af5;
+    --link-hover:    #3a6ad4;
+
+    --border:        #e8e8e8;
+
+    /* Code — dark background with bright syntax (reversed) */
+    --code-bg:       #1e1e2e;
+    --code-fg:       #cdd6f4;
+    --code-bg-inline: rgba(91, 138, 245, 0.08);
+
+    /* Syntax highlighting — bright on dark */
+    --kw:            #cba6f7;
+    --str:           #a6e3a1;
+    --num:           #fab387;
+    --type:          #89dceb;
+    --var:           #f5c2e7;
+    --ctor:          #f9e2af;
+    --cmt:           #6c7086;
+    --meta:          #cba6f7;
+
+    /* Typography */
+    --font-body:     system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --font-mono:     'JetBrains Mono', 'SF Mono', 'Cascadia Code', monospace;
+
+    /* Layout — compact */
+    --sidebar-w:     240px;
+    --content-max:   840px;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg-canvas:     #1c1c1c;
+        --bg-sidebar:    #161616;
+        --bg-surface:    #242424;
+        --bg-hover:      #2e2e2e;
+
+        --fg-primary:    #e0e0e0;
+        --fg-secondary:  #a8a8a8;
+        --fg-muted:      #707070;
+
+        --accent:        #7ba4f7;
+        --accent-dim:    rgba(123, 164, 247, 0.12);
+        --accent-border: rgba(123, 164, 247, 0.25);
+
+        --link:          #7ba4f7;
+        --link-hover:    #99bdf9;
+
+        --border:        #2e2e2e;
+
+        --code-bg:       #141414;
+        --code-fg:       #c8c8c8;
+        --code-bg-inline: rgba(123, 164, 247, 0.1);
+
+        --kw:            #cba6f7;
+        --str:           #a6e3a1;
+        --num:           #fab387;
+        --type:          #89dceb;
+        --var:           #f5c2e7;
+        --ctor:          #f9e2af;
+        --cmt:           #555555;
+        --meta:          #cba6f7;
+    }
+}
+
+/* ============================================================
+   Reset & Base
+   ============================================================ */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html {
+    font-size: 15px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+    font-family: var(--font-body);
+    font-size: 0.875rem;
+    line-height: 1.55;
+    color: var(--fg-primary);
+    background: var(--bg-canvas);
+    display: grid;
+    grid-template-columns: var(--sidebar-w) 1fr;
+    min-height: 100vh;
+}
+
+/* ============================================================
+   Sidebar
+   ============================================================ */
+
+#sidebar {
+    position: sticky;
+    top: 0;
+    width: var(--sidebar-w);
+    height: 100vh;
+    overflow-y: auto;
+    background: var(--bg-sidebar);
+    border-right: 1px solid var(--border);
+    padding: 0.75rem 0;
+    z-index: 10;
+}
+
+#sidebar::-webkit-scrollbar { width: 3px; }
+#sidebar::-webkit-scrollbar-thumb { background: var(--border); }
+
+.sidebar-header {
+    padding: 0 1rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 0.5rem;
+}
+
+.sidebar-logo {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    text-decoration: none;
+    color: var(--fg-primary);
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 1rem;
+}
+
+.sidebar-logo:hover { color: var(--accent); }
+.sidebar-logo .ph { color: var(--accent); width: 1.2em; height: 1.2em; }
+
+/* Phosphor icon base — compact sizes */
+.ph {
+    display: inline-block;
+    width: 0.9em;
+    height: 0.9em;
+    vertical-align: -0.15em;
+}
+
+/* Search */
+#search-wrapper {
+    padding: 0 1rem;
+    margin-bottom: 0.5rem;
+    position: relative;
+}
+
+#search {
+    width: 100%;
+    padding: 0.35rem 0.5rem 0.35rem 1.75rem;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: var(--bg-canvas);
+    color: var(--fg-primary);
+    font-family: var(--font-body);
+    font-size: 0.8rem;
+    outline: none;
+    transition: border-color 0.15s;
+}
+
+#search::placeholder { color: var(--fg-muted); }
+#search:focus { border-color: var(--accent); }
+
+#search-wrapper .ph {
+    position: absolute;
+    left: 1.35rem;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--fg-muted);
+    pointer-events: none;
+    width: 0.85em;
+    height: 0.85em;
+}
+
+/* Nav sections */
+.sidebar-section { margin-bottom: 0.5rem; }
+
+.sidebar-section-title {
+    padding: 0.25rem 1rem;
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--fg-muted);
+}
+
+.sidebar-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.sidebar-list li a {
+    display: block;
+    padding: 0.2rem 1rem 0.2rem 1.25rem;
+    color: var(--fg-secondary);
+    text-decoration: none;
+    font-size: 0.8rem;
+    transition: all 0.1s;
+    border-left: 2px solid transparent;
+}
+
+.sidebar-list li a:hover {
+    color: var(--fg-primary);
+    background: var(--accent-dim);
+}
+
+.sidebar-list li a.active {
+    color: var(--accent);
+    border-left-color: var(--accent);
+    font-weight: 500;
+}
+
+/* Search results */
+#search-results {
+    position: fixed;
+    top: auto;
+    left: calc(var(--sidebar-w) + 1rem);
+    right: 1rem;
+    background: var(--bg-canvas);
+    border: 1px solid var(--border);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    max-height: 350px;
+    overflow-y: auto;
+    display: none;
+    z-index: 100;
+}
+
+#search-results.visible { display: block; }
+
+#search-results a {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.4rem 0.75rem;
+    color: var(--fg-primary);
+    text-decoration: none;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.8rem;
+}
+
+#search-results a:last-child { border-bottom: none; }
+#search-results a:hover { background: var(--bg-surface); }
+
+#search-results .kind {
+    font-size: 0.6rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--fg-muted);
+    background: var(--bg-surface);
+    padding: 0.1rem 0.35rem;
+    border-radius: 2px;
+}
+
+#search-results code {
+    background: none;
+    padding: 0;
+    color: inherit;
+    font-size: 0.8rem;
+}
+
+/* ============================================================
+   Main content
+   ============================================================ */
+
+main {
+    padding: 1.5rem 2.5rem;
+    max-width: var(--content-max);
+    min-width: 0;
+}
+
+/* ============================================================
+   Typography
+   ============================================================ */
+
+h1 {
+    font-size: 1.6rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.25;
+    margin-bottom: 0.35rem;
+    color: var(--fg-primary);
+}
+
+h2 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    margin: 1.5rem 0 0.5rem;
+    padding-bottom: 0.3rem;
+    border-bottom: 1px solid var(--border);
+    color: var(--fg-primary);
+}
+
+h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin: 1.25rem 0 0.35rem;
+    color: var(--fg-primary);
+}
+
+h4 {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--fg-muted);
+    margin: 1rem 0 0.35rem;
+}
+
+p {
+    color: var(--fg-secondary);
+    line-height: 1.55;
+    margin-bottom: 0.75rem;
+}
+
+a {
+    color: var(--link);
+    text-decoration: none;
+}
+
+a:hover {
+    color: var(--link-hover);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+/* ============================================================
+   Code — JetBrains Mono, dark bg with bright syntax
+   ============================================================ */
+
+code {
+    font-family: var(--font-mono);
+    font-size: 0.82em;
+    background: var(--code-bg-inline);
+    padding: 0.08em 0.25em;
+    border-radius: 2px;
+    color: var(--fg-primary);
+}
+
+pre {
+    background: var(--code-bg);
+    color: var(--code-fg);
+    padding: 0.75rem 1rem;
+    overflow-x: auto;
+    position: relative;
+    border-radius: 4px;
+    margin: 0.75rem 0;
+}
+
+pre code {
+    background: none;
+    padding: 0;
+    font-size: 0.78rem;
+    line-height: 1.55;
+    color: var(--code-fg);
+}
+
+/* Syntax — bright on dark */
+.kw   { color: var(--kw); font-weight: 500; }
+.str  { color: var(--str); }
+.num  { color: var(--num); }
+.type { color: var(--type); }
+.var  { color: var(--var); }
+.ctor { color: var(--ctor); }
+.cmt  { color: var(--cmt); font-style: italic; }
+.meta { color: var(--meta); }
+
+/* ============================================================
+   Signature block
+   ============================================================ */
+
+.signature {
+    background: var(--code-bg);
+    color: var(--code-fg);
+    padding: 0.6rem 1rem;
+    border-radius: 4px;
+    margin: 0.5rem 0 0.75rem;
+    overflow-x: auto;
+}
+
+.signature code {
+    font-size: 0.82rem;
+    font-weight: 500;
+    background: none;
+    padding: 0;
+    color: var(--code-fg);
+}
+
+/* ============================================================
+   Kind badge
+   ============================================================ */
+
+.kind-badge {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+    background: var(--accent-dim);
+    padding: 0.1rem 0.4rem;
+    border-radius: 2px;
+    vertical-align: middle;
+    margin-left: 0.4rem;
+}
+
+/* ============================================================
+   Tables
+   ============================================================ */
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.5rem 0 1rem;
+    font-size: 0.8rem;
+}
+
+table th, table td {
+    text-align: left;
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid var(--border);
+}
+
+table th {
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--fg-muted);
+    background: var(--bg-surface);
+}
+
+table td { color: var(--fg-secondary); }
+
+/* ============================================================
+   Doc block (rustdoc style)
+   ============================================================ */
+
+.docblock {
+    color: var(--fg-secondary);
+    line-height: 1.6;
+    margin: 0.5rem 0 1rem;
+}
+
+.docblock p { margin: 0 0 0.5rem; }
+.docblock p:last-child { margin: 0; }
+.docblock ul, .docblock ol {
+    padding-left: 1.5rem;
+    margin: 0.3rem 0;
+}
+
+.doc {
+    color: var(--fg-secondary);
+    line-height: 1.55;
+    margin: 0.5rem 0 1rem;
+}
+
+.doc p { margin: 0 0 0.5rem; }
+.doc p:last-child { margin: 0; }
+
+/* ============================================================
+   Item list (rustdoc style — used in summary sections)
+   ============================================================ */
+
+.item-list {
+    list-style: none;
+    padding: 0;
+    margin: 0.25rem 0;
+}
+
+.item-list li {
+    padding: 0.2rem 0;
+    color: var(--fg-secondary);
+    line-height: 1.5;
+}
+
+.item-list li code a {
+    color: var(--fg-primary);
+    font-weight: 500;
+}
+
+.item-list li code a:hover {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.item-name {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    margin-bottom: 0.2rem;
+}
+
+/* ============================================================
+   Type markers in h1 (rustdoc style)
+   ============================================================ */
+
+h1 .fn, h1 .mod, h1 .struct, h1 .enum, h1 .trait {
+    color: var(--fg-muted);
+    font-weight: 400;
+    font-size: 0.9em;
+}
+
+/* ============================================================
+   Lists
+   ============================================================ */
+
+ul, ol {
+    padding-left: 1.25rem;
+    margin: 0.35rem 0 0.75rem;
+}
+
+li {
+    color: var(--fg-secondary);
+    line-height: 1.55;
+    margin: 0.15rem 0;
+}
+
+/* ============================================================
+   Examples
+   ============================================================ */
+
+.example-wrap {
+    margin: 0.5rem 0;
+}
+
+/* ============================================================
+   Section anchor links (§)
+   ============================================================ */
+
+h2 a[href^="#"], h3 a[href^="#"] {
+    color: var(--fg-muted);
+    text-decoration: none;
+    margin-left: 0.2rem;
+    font-size: 0.85em;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+
+h2:hover a[href^="#"], h3:hover a[href^="#"] {
+    opacity: 1;
+}
+
+/* ============================================================
+   Impl block
+   ============================================================ */
+
+.impl-block {
+    margin: 1rem 0;
+    padding: 0.75rem;
+    background: var(--bg-surface);
+    border-radius: 4px;
+    border: 1px solid var(--border);
+}
+
+.impl-header {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--fg-primary);
+    margin-bottom: 0.5rem;
+}
+
+.impl-header code {
+    color: var(--type);
+    background: none;
+    padding: 0;
+}
+
+/* ============================================================
+   Copy button
+   ============================================================ */
+
+.copy-btn {
+    position: absolute;
+    top: 0.4rem;
+    right: 0.4rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    padding: 0.15rem 0.4rem;
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    color: var(--fg-muted);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s;
+    border-radius: 2px;
+    z-index: 2;
+}
+
+pre:hover .copy-btn { opacity: 1; }
+.copy-btn:hover { color: var(--fg-primary); }
+
+.copy-btn.copied {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+    opacity: 1;
+}
+
+/* ============================================================
+   Mobile
+   ============================================================ */
+
+#menu-toggle {
+    display: none;
+    position: fixed;
+    top: 0.5rem;
+    left: 0.5rem;
+    z-index: 20;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    padding: 0.3rem 0.5rem;
+    color: var(--fg-primary);
+    cursor: pointer;
+    border-radius: 3px;
+}
+
+@media (max-width: 768px) {
+    body { grid-template-columns: 1fr; }
+
+    #menu-toggle { display: flex; align-items: center; justify-content: center; }
+
+    #sidebar {
+        position: fixed;
+        left: 0;
+        top: 0;
+        width: var(--sidebar-w);
+        transform: translateX(-100%);
+        z-index: 15;
+    }
+
+    #sidebar.open { transform: translateX(0); }
+
+    main {
+        padding: 1.25rem;
+        padding-top: 2.5rem;
+    }
+
+    #search-results { left: 0.5rem; right: 0.5rem; }
+}
+
+/* ============================================================
+   Selection
+   ============================================================ */
+
+::selection {
+    background: var(--accent-dim);
+    color: var(--accent);
+}

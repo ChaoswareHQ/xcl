@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use crate::ast::{AstNode, BinaryOperator, UnaryOperator};
+use crate::ast::{AstNode, BinaryOperator, UnaryOperator, TypeKind};
 use crate::value::FuncValue;
 
 #[derive(Debug, Clone, Copy)]
@@ -80,6 +80,9 @@ pub const OP_TRY_END:         u8 = 48;
 pub const OP_THROW:           u8 = 49;
 pub const OP_CATCH:           u8 = 50;
 pub const OP_COALESCE:        u8 = 51;
+
+/// Type test: check if a value is of a given type (by tag field or type index)
+pub const OP_TYPE_TEST:         u8 = 52;
 
 pub const OP_LOAD_LOCAL_LOAD_LOCAL: u8 = 60;
 pub const OP_ADD_LOCAL_LOCAL:       u8 = 61;
@@ -317,8 +320,14 @@ impl Compiler {
                         self.node(callee);
                     }
                 } else if let AstNode::Ident { name, .. } = callee.as_ref() {
-                    let i = self.intern(name);
-                    self.emit(Instr::a1(OP_PUSH_STR, i));
+                    // If the name was originally a $-prefixed variable, load from local
+                    // Otherwise push the name string for global/builtin lookup
+                    if let Some(slot) = self.locals.iter().position(|n| **n == *name).map(|i| i as u32) {
+                        self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
+                    } else {
+                        let i = self.intern(name);
+                        self.emit(Instr::a1(OP_PUSH_STR, i));
+                    }
                 } else {
                     self.node(callee);
                 }
@@ -456,6 +465,54 @@ impl Compiler {
                     else { self.emit(Instr::none(OP_PUSH_NIL)); }
                     self.emit(Instr::a2(OP_CALL, 2, 0));
                 }
+            }
+
+            // Type definition: compile body (fields + methods), register type name as a global
+            AstNode::TypeDef { name, kind, body, .. } => {
+                // Compile any methods in the body
+                for s in body {
+                    if let AstNode::FunctionDef { .. } = s {
+                        self.node(s);
+                    }
+                }
+                // Register the type name as a global variable (nil for now, VM will resolve it)
+                let type_idx = self.intern(name);
+                self.emit(Instr::a1(OP_PUSH_STR, type_idx));
+                let slot = self.local(name);
+                self.emit(Instr::a1(OP_STORE_LOCAL, slot));
+                // For sum types, compile variant constructors
+                if let TypeKind::Sum { variants } = kind {
+                    for v in variants {
+                        // Each variant becomes a function call: VariantName(args) -> dict with tag
+                        let v_idx = self.intern(&v.name);
+                        self.emit(Instr::a1(OP_PUSH_STR, v_idx));
+                        let v_slot = self.local(&v.name);
+                        self.emit(Instr::a1(OP_STORE_LOCAL, v_slot));
+                    }
+                }
+            }
+
+            // Impl block: compile methods, associate with type
+            AstNode::ImplDef { type_name, trait_name, body, .. } => {
+                // Compile all methods in the impl body
+                for s in body {
+                    if let AstNode::FunctionDef { .. } = s {
+                        self.node(s);
+                    }
+                }
+                // Store the impl relationship as a global marker
+                let impl_key = format!("__impl_{}_{}", type_name, trait_name);
+                let idx = self.intern(&impl_key);
+                self.emit(Instr::a1(OP_PUSH_STR, idx));
+                self.emit(Instr::none(OP_PUSH_TRUE));
+            }
+
+            // Type test: $x is TypeName
+            AstNode::TypeTest { value, type_name, .. } => {
+                self.node(value);
+                let type_idx = self.intern(type_name);
+                self.emit(Instr::a1(OP_PUSH_STR, type_idx));
+                self.emit(Instr::none(OP_TYPE_TEST));
             }
         }
     }

@@ -15,6 +15,7 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
     let ret_attr = parsed.ret;
     let summary = parsed.summary;
     let arg_descs = parsed.arg_desc;
+    let named_params = parsed.named;
 
     let statik = syn::Ident::new(
         &format!("__XCL_FN_{}", fn_ident),
@@ -55,6 +56,25 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote!(&[#(#entries),*])
     };
 
+    // Generate named params tokens
+    let named_static = if named_params.is_empty() {
+        quote!(&[])
+    } else {
+        let entries = named_params.iter().map(|np| {
+            let n = &np.name;
+            let t = &np.ty;
+            let d = &np.default;
+            quote! {
+                ::xcl_vm::NamedParam {
+                    name: #n,
+                    ty: #t,
+                    default: #d,
+                }
+            }
+        });
+        quote!(&[#(#entries),*])
+    };
+
     // Check if the function uses typed Rust parameters (not &[Value] or &mut DomainCtx)
     let uses_typed_params = !func.sig.inputs.is_empty() && !is_raw_args_signature(&func);
 
@@ -85,7 +105,7 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
                 ptr: ::xcl_vm::RawPtr(#wrapper_ident as *const ()),
                 args: #args_static,
                 ret: #ret_static,
-                named: &[],
+                named: #named_static,
                 summary: #summary_static,
                 arg_desc: #arg_desc_static,
             };
@@ -108,7 +128,7 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
                 ptr: ::xcl_vm::RawPtr(#fn_ident as *const ()),
                 args: #args_static,
                 ret: #ret_static,
-                named: &[],
+                named: #named_static,
                 summary: #summary_static,
                 arg_desc: #arg_desc_static,
             };
@@ -149,6 +169,13 @@ struct NativeAttr {
     ret:      Option<String>,
     summary:  Option<String>,
     arg_desc: Vec<(String, String)>,
+    named:    Vec<NamedParamSpec>,
+}
+
+struct NamedParamSpec {
+    name:    String,
+    ty:      String,
+    default: String,
 }
 
 impl syn::parse::Parse for NativeAttr {
@@ -156,13 +183,17 @@ impl syn::parse::Parse for NativeAttr {
         // Check if it's a simple string literal
         if input.peek(syn::Lit) {
             let lit: LitStr = input.parse()?;
+            let val = lit.value();
+            // Extract domain from dotted name like "io.print"
+            let (method, domain) = split_dotted_name(&val);
             return Ok(NativeAttr {
-                method:   lit.value(),
-                domain:   None,
+                method,
+                domain,
                 args:     None,
                 ret:      None,
                 summary:  None,
                 arg_desc: Vec::new(),
+                named:    Vec::new(),
             });
         }
 
@@ -173,6 +204,7 @@ impl syn::parse::Parse for NativeAttr {
         let mut ret = None;
         let mut summary = None;
         let mut arg_desc = Vec::new();
+        let mut named = Vec::new();
 
         loop {
             if input.is_empty() {
@@ -195,13 +227,58 @@ impl syn::parse::Parse for NativeAttr {
                         content.parse::<syn::Token![,]>()?;
                     }
                 }
+            } else if key_s == "named" {
+                // named(
+                //   { name = "bool", ty = "bool", default = "false" },
+                //   { name = "int", ty = "i64", default = "none" },
+                // )
+                let content;
+                syn::parenthesized!(content in input);
+                while !content.is_empty() {
+                    let inner;
+                    syn::braced!(inner in content);
+                    let mut name = None;
+                    let mut ty = None;
+                    let mut default = None;
+                    while !inner.is_empty() {
+                        let k: syn::Ident = inner.parse()?;
+                        let _: syn::Token![=] = inner.parse()?;
+                        let v: LitStr = inner.parse()?;
+                        match k.to_string().as_str() {
+                            "name" => name = Some(v.value()),
+                            "ty" => ty = Some(v.value()),
+                            "default" => default = Some(v.value()),
+                            _ => {}
+                        }
+                        if inner.peek(syn::Token![,]) {
+                            inner.parse::<syn::Token![,]>()?;
+                        }
+                    }
+                    if let (Some(n), Some(t), Some(d)) = (name, ty, default) {
+                        named.push(NamedParamSpec { name: n, ty: t, default: d });
+                    }
+                    if content.peek(syn::Token![,]) {
+                        content.parse::<syn::Token![,]>()?;
+                    } else {
+                        break;
+                    }
+                }
             } else {
                 // key = "value" form
                 let _: syn::Token![=] = input.parse()?;
                 let lit: LitStr = input.parse()?;
                 let val = lit.value();
                 match key_s.as_str() {
-                    "name" | "method" => method = Some(val),
+                    "name" | "method" => {
+                        // If domain not explicitly set, try to extract from dotted name
+                        if domain.is_none() {
+                            let (m, d) = split_dotted_name(&val);
+                            method = Some(m);
+                            domain = d;
+                        } else {
+                            method = Some(val);
+                        }
+                    }
                     "domain" => domain = Some(val),
                     "args" => args = Some(val),
                     "ret" => ret = Some(val),
@@ -224,7 +301,20 @@ impl syn::parse::Parse for NativeAttr {
             ret,
             summary,
             arg_desc,
+            named,
         })
+    }
+}
+
+/// Split a dotted name like "io.print" into ("print", Some("io")).
+/// If no dot, returns the whole name with None domain.
+fn split_dotted_name(name: &str) -> (String, Option<String>) {
+    if let Some(dot_pos) = name.find('.') {
+        let domain = name[..dot_pos].to_string();
+        let method = name[dot_pos + 1..].to_string();
+        (method, Some(domain))
+    } else {
+        (name.to_string(), None)
     }
 }
 
@@ -521,4 +611,185 @@ fn is_ctx_type(ty: &Type) -> bool {
         return seg.ident == "DomainCtx";
     }
     false
+}
+
+/// `#[xcl_impl(type = "Dog", trait = "Animal")]` — registers an impl block
+/// so the doc generator knows `Dog` implements `Animal`.
+///
+/// The attribute can also include method declarations:
+/// ```ignore
+/// #[xcl_impl(
+///     type = "Dog",
+///     trait = "Animal",
+///     methods(
+///         bark { args = "volume: i64", ret = "str", summary = "Make a barking sound." },
+///         eat { args = "food: str", summary = "Eat some food." },
+///     ),
+/// )]
+/// ```
+#[proc_macro_attribute]
+pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let parsed: ImplAttr = parse_macro_input!(attr);
+    let item = parse_macro_input!(item as syn::Item);
+
+    let type_name = parsed.type_name;
+    let trait_name = parsed.trait_name;
+    let domain = parsed.domain;
+
+    let domain_expr = if let Some(ref d) = domain {
+        quote!(Some(#d))
+    } else {
+        quote!(None)
+    };
+
+    // Generate methods tokens
+    let methods_tokens = if parsed.methods.is_empty() {
+        quote!(&[])
+    } else {
+        let entries = parsed.methods.iter().map(|m| {
+            let name_s = m.name.to_string();
+            let args_static = match &m.args {
+                Some(s) => quote!(Some(#s)),
+                None => quote!(None),
+            };
+            let ret_static = match &m.ret {
+                Some(s) => quote!(Some(#s)),
+                None => quote!(None),
+            };
+            let summary_static = match &m.summary {
+                Some(s) => quote!(Some(#s)),
+                None => quote!(None),
+            };
+            quote! {
+                ::xcl_vm::ImplMethod {
+                    name: #name_s,
+                    args: #args_static,
+                    ret: #ret_static,
+                    summary: #summary_static,
+                }
+            }
+        });
+        quote!(&[#(#entries),*])
+    };
+
+    // Generate a unique static name from type + trait
+    let statik = syn::Ident::new(
+        &format!("__XCL_IMPL_{}_{}", type_name.to_uppercase(), trait_name.to_uppercase()),
+        proc_macro2::Span::call_site(),
+    );
+
+    let expanded = quote! {
+        #item
+
+        #[::linkme::distributed_slice(::xcl_vm::IMPL_REGISTRY)]
+        #[allow(non_upper_case_globals)]
+        static #statik: ::xcl_vm::ImplDescriptor = ::xcl_vm::ImplDescriptor {
+            type_name: #type_name,
+            trait_name: #trait_name,
+            domain: #domain_expr,
+            methods: #methods_tokens,
+        };
+    };
+
+    expanded.into()
+}
+
+struct ImplAttr {
+    type_name: String,
+    trait_name: String,
+    domain: Option<String>,
+    methods: Vec<MethodImplSpec>,
+}
+
+struct MethodImplSpec {
+    name: syn::Ident,
+    args: Option<String>,
+    ret: Option<String>,
+    summary: Option<String>,
+}
+
+impl syn::parse::Parse for ImplAttr {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        let mut type_name = None;
+        let mut trait_name = None;
+        let mut domain = None;
+        let mut methods = Vec::new();
+
+        loop {
+            if input.is_empty() {
+                break;
+            }
+
+            let ident: syn::Ident = input.parse()?;
+            let ident_s = ident.to_string();
+
+            if input.peek(syn::Token![=]) {
+                let _eq: syn::Token![=] = input.parse()?;
+                let lit: LitStr = input.parse()?;
+                match ident_s.as_str() {
+                    "type" => type_name = Some(lit.value()),
+                    "trait" => trait_name = Some(lit.value()),
+                    "domain" => domain = Some(lit.value()),
+                    _ => {}
+                }
+            } else if input.peek(syn::token::Paren) {
+                let content;
+                syn::parenthesized!(content in input);
+                if ident_s == "methods" {
+                    methods = parse_impl_methods_stream(&content)?;
+                }
+            }
+
+            if input.peek(syn::Token![,]) {
+                input.parse::<syn::Token![,]>()?;
+            } else {
+                break;
+            }
+        }
+
+        Ok(ImplAttr {
+            type_name: type_name.unwrap_or_default(),
+            trait_name: trait_name.unwrap_or_default(),
+            domain,
+            methods,
+        })
+    }
+}
+
+fn parse_impl_methods_stream(input: syn::parse::ParseStream<'_>) -> syn::Result<Vec<MethodImplSpec>> {
+    let mut methods = Vec::new();
+    while !input.is_empty() {
+        let name: syn::Ident = input.parse()?;
+        let mut args = None;
+        let mut ret = None;
+        let mut summary = None;
+
+        if input.peek(syn::token::Brace) {
+            let content;
+            syn::braced!(content in input);
+            while !content.is_empty() {
+                let key: syn::Ident = content.parse()?;
+                let _eq: syn::Token![=] = content.parse()?;
+                let lit: LitStr = content.parse()?;
+                match key.to_string().as_str() {
+                    "args" => args = Some(lit.value()),
+                    "ret" => ret = Some(lit.value()),
+                    "summary" => summary = Some(lit.value()),
+                    _ => {}
+                }
+                if content.peek(syn::Token![,]) {
+                    content.parse::<syn::Token![,]>()?;
+                }
+            }
+        }
+
+        methods.push(MethodImplSpec { name, args, ret, summary });
+
+        if input.peek(syn::Token![,]) {
+            input.parse::<syn::Token![,]>()?;
+        } else {
+            break;
+        }
+    }
+    Ok(methods)
 }

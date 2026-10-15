@@ -81,6 +81,8 @@ pub enum Token {
 
     #[token("||")]
     OrOp,
+    #[token("|")]
+    Pipe,
     #[token("&&")]
     AndOp,
     #[token("==")]

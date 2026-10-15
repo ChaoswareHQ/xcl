@@ -1,3 +1,9 @@
+//! XCL runtime values.
+//!
+//! XCL uses a NaN-boxed value representation: primitives (int, float, bool, nil)
+//! are stored directly in the 64-bit word, while heap-allocated types (String, Array,
+//! Map, Func, Handle) are stored as pointers in the lower 48 bits of a NaN payload.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -17,6 +23,19 @@ const KIND_MAP:     u8 = 2;
 const KIND_FUNC:    u8 = 3;
 const KIND_HANDLE:  u8 = 6;
 
+/// Subtype constants for typed heap maps (Result, Error, etc.)
+pub const SUBTYPE_NONE:    u16 = 0;
+pub const SUBTYPE_RESULT:  u16 = 1;
+pub const SUBTYPE_ERROR:   u16 = 2;
+pub const SUBTYPE_HANDLE:  u16 = 3;
+pub const SUBTYPE_USER_BASE: u16 = 100;
+
+/// Variant constants for sum types
+pub const VARIANT_OK:      u8 = 0;
+pub const VARIANT_ERR:     u8 = 1;
+pub const VARIANT_DEFAULT: u8 = 0;
+
+/// Header for all heap-allocated XCL values.
 #[repr(C)]
 pub struct HeapHeader { pub kind: u8, pub flags: u8, pub _pad: [u8; 6] }
 
@@ -25,21 +44,33 @@ pub struct HeapStr   { pub header: HeapHeader, pub data: String }
 #[repr(C)]
 pub struct HeapArray { pub header: HeapHeader, pub data: Vec<Value> }
 #[repr(C)]
-pub struct HeapMap   { pub header: HeapHeader, pub data: HashMap<String, Value> }
+pub struct HeapMap   {
+    pub header:  HeapHeader,
+    pub subtype: u16,
+    pub variant: u8,
+    pub _pad:    [u8; 5],
+    pub data:    HashMap<String, Value>,
+}
 #[repr(C)]
 pub struct HeapFunc  { pub header: HeapHeader, pub data: FuncValue }
 
+/// Heap-allocated handle wrapping an OS resource.
 #[repr(C)]
 pub struct HeapHandle {
     pub header: HeapHeader,
     pub data:   Option<HandleKind>,
 }
 
+/// Kinds of OS handles that XCL can wrap.
 #[derive(Debug)]
 pub enum HandleKind {
+    /// An open file with its path stored for re-opening.
     File { file: std::fs::File, path: String },
+    /// Standard input stream.
     Stdin,
+    /// Standard output stream.
     Stdout,
+    /// Standard error stream.
     Stderr,
 }
 
@@ -86,8 +117,11 @@ impl Value {
     #[inline(always)]
     pub fn from_map(m: HashMap<String, Value>, arena: &bumpalo::Bump) -> Self {
         let obj = arena.alloc(HeapMap {
-            header: HeapHeader { kind: KIND_MAP, flags: 0, _pad: [0; 6] },
-            data: m,
+            header:  HeapHeader { kind: KIND_MAP, flags: 0, _pad: [0; 6] },
+            subtype: SUBTYPE_NONE,
+            variant: VARIANT_DEFAULT,
+            _pad:    [0; 5],
+            data:    m,
         });
         Value(TAG_PTR | ((obj as *const HeapMap as u64) & PAYLOAD))
     }
@@ -145,6 +179,25 @@ impl Value {
             Some(unsafe { &(*(self.as_ptr::<HeapMap>())).data })
         } else { None }
     }
+
+    /// Get the subtype of a heap map (Result=1, Error=2, etc.)
+    #[inline(always)]
+    pub fn map_subtype(self) -> Option<u16> {
+        if self.heap_kind() == Some(KIND_MAP) {
+            let ptr = self.as_ptr::<HeapMap>();
+            Some(unsafe { (*ptr).subtype })
+        } else { None }
+    }
+
+    /// Get the variant of a heap map (Ok=0, Err=1, etc.)
+    #[inline(always)]
+    pub fn map_variant(self) -> Option<u8> {
+        if self.heap_kind() == Some(KIND_MAP) {
+            let ptr = self.as_ptr::<HeapMap>();
+            Some(unsafe { (*ptr).variant })
+        } else { None }
+    }
+
 
     #[inline(always)]
     pub fn as_str(self) -> Option<&'static str> {
@@ -369,8 +422,16 @@ impl Value {
     }
 
     pub fn from_map_boxed(m: HashMap<String, Value>) -> Self {
+        Self::from_map_boxed_typed_v(m, SUBTYPE_NONE, VARIANT_DEFAULT)
+    }
+
+    /// Create a heap map with subtype/variant, leaked to static lifetime.
+    pub fn from_map_boxed_typed_v(m: HashMap<String, Value>, subtype: u16, variant: u8) -> Self {
         let obj = Box::leak(Box::new(HeapMap {
             header: HeapHeader { kind: KIND_MAP, flags: 0, _pad: [0; 6] },
+            subtype,
+            variant,
+            _pad: [0; 5],
             data: m,
         }));
         Value(TAG_PTR | ((obj as *const HeapMap as u64) & PAYLOAD))
@@ -544,6 +605,22 @@ pub struct TypeVariant {
     pub fields: &'static [TypeField],
 }
 
+// — Impl descriptor types —
+
+pub struct ImplDescriptor {
+    pub type_name:  &'static str,
+    pub trait_name: &'static str,
+    pub domain:     Option<&'static str>,
+    pub methods:    &'static [ImplMethod],
+}
+
+pub struct ImplMethod {
+    pub name:    &'static str,
+    pub args:    Option<&'static str>,
+    pub ret:     Option<&'static str>,
+    pub summary: Option<&'static str>,
+}
+
 pub struct DomainCtx<'a> {
     pub(crate) vm:   &'a mut crate::vm::VM,
     pub(crate) args: &'a [Value],
@@ -560,4 +637,9 @@ impl<'a> DomainCtx<'a> {
     pub fn array(&self, v: Vec<Value>) -> Value { Value::from_array_boxed(v) }
     pub fn i64(&self, n: i64) -> Value { Value::from_i48(n) }
     pub fn u64(&self, n: u64) -> Value { Value::from_i48(n as i64) }
+
+    /// Call an XCL closure value with the given args. Reentrant.
+    pub fn call(&mut self, func: Value, args: &[Value]) -> Value {
+        self.vm.call_value(func, args)
+    }
 }

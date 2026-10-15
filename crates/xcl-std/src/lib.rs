@@ -1,3 +1,4 @@
+﻿pub mod error;
 pub mod io;
 pub mod input;
 pub mod output;
@@ -9,7 +10,6 @@ use xcl_vm::{VM, Value};
 pub fn new_vm() -> VM {
     let mut vm = VM::new();
     vm.register_all();
-    result::register_well_known(&mut vm);
     vm
 }
 
@@ -29,25 +29,27 @@ pub fn evaluate_new(source: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xcl_vm::TypeKind;
+    use xcl_vm::{TypeKind, SUBTYPE_RESULT, VARIANT_OK, VARIANT_ERR, SUBTYPE_ERROR};
 
     #[test]
     fn ok_constructor() {
         let mut vm = new_vm();
         let r = evaluate(r#"Ok 42"#, &mut vm);
-        let m = r.as_map().unwrap();
-        assert_eq!(m.get("tag").unwrap().as_str(), Some("Ok"));
-        assert_eq!(m.get("value").unwrap().as_i48(), 42);
+        assert_eq!(r.map_subtype(), Some(SUBTYPE_RESULT));
+        assert_eq!(r.map_variant(), Some(VARIANT_OK));
+        assert_eq!(r.as_map().unwrap().get("value").unwrap().as_i48(), 42);
     }
 
     #[test]
     fn err_constructor() {
         let mut vm = new_vm();
-        let r = evaluate(r#"Err "boom", 500"#, &mut vm);
-        let m = r.as_map().unwrap();
-        assert_eq!(m.get("tag").unwrap().as_str(), Some("Err"));
-        assert_eq!(m.get("message").unwrap().as_str(), Some("boom"));
-        assert_eq!(m.get("code").unwrap().as_i48(), 500);
+        let r = evaluate(r#"Err (make_error "not_found" "boom" 500)"#, &mut vm);
+        assert_eq!(r.map_subtype(), Some(SUBTYPE_RESULT));
+        assert_eq!(r.map_variant(), Some(VARIANT_ERR));
+        let err = r.as_map().unwrap().get("error").unwrap();
+        assert_eq!(err.as_map().unwrap().get("kind").unwrap().as_str(), Some("not_found"));
+        assert_eq!(err.as_map().unwrap().get("message").unwrap().as_str(), Some("boom"));
+        assert_eq!(err.as_map().unwrap().get("code").unwrap().as_i48(), 500);
     }
 
     #[test]
@@ -55,32 +57,6 @@ mod tests {
         let vm = new_vm();
         let desc = vm.type_index.get("Result").expect("Result registered");
         assert!(matches!(desc.kind, TypeKind::Sum));
-    }
-
-    #[test]
-    fn well_known_filled() {
-        let vm = new_vm();
-        assert!(vm.well_known.has_result());
-        assert_eq!(vm.well_known.ok_ctor, Some("Ok"));
-        assert_eq!(vm.well_known.err_ctor, Some("Err"));
-        assert_eq!(vm.well_known.result_type, Some("Result"));
-        assert_eq!(vm.well_known.tag_field, Some("tag"));
-    }
-
-    #[test]
-    fn bare_vm_has_empty_well_known() {
-        // A VM that never called new_vm() has no result vocabulary
-        let vm = xcl_vm::VM::new();
-        assert!(!vm.well_known.has_result());
-        assert!(vm.well_known.ok_ctor.is_none());
-    }
-
-    #[test]
-    fn well_known_result_variant_lookup() {
-        let vm = new_vm();
-        assert_eq!(vm.well_known.result_variant("Ok"), Some(true));
-        assert_eq!(vm.well_known.result_variant("Err"), Some(false));
-        assert_eq!(vm.well_known.result_variant("Foo"), None);
     }
 
     #[test]
@@ -95,22 +71,39 @@ mod tests {
         assert_eq!(desc.variants[0].fields[0].ty, "any");
 
         assert_eq!(desc.variants[1].name, "Err");
-        assert_eq!(desc.variants[1].fields.len(), 2);
-        assert_eq!(desc.variants[1].fields[0].name, "message");
-        assert_eq!(desc.variants[1].fields[0].ty, "str");
-        assert_eq!(desc.variants[1].fields[1].name, "code");
-        assert_eq!(desc.variants[1].fields[1].ty, "i64");
+        assert_eq!(desc.variants[1].fields.len(), 1);
+        assert_eq!(desc.variants[1].fields[0].name, "error");
+        assert_eq!(desc.variants[1].fields[0].ty, "Error");
 
         assert!(desc.summary.is_some());
         assert!(desc.summary.unwrap().contains("success or failure"));
     }
 
     #[test]
+    fn error_type_registered() {
+        let vm = new_vm();
+        let desc = vm.type_index.get("Error").expect("Error registered");
+        assert!(matches!(desc.kind, TypeKind::Record));
+        assert_eq!(desc.fields.len(), 3);
+    }
+
+    #[test]
+    fn make_error_builtin() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"make_error "not_found" "file missing" 2"#, &mut vm);
+        assert_eq!(r.map_subtype(), Some(SUBTYPE_ERROR));
+        let m = r.as_map().unwrap();
+        assert_eq!(m.get("kind").unwrap().as_str(), Some("not_found"));
+        assert_eq!(m.get("message").unwrap().as_str(), Some("file missing"));
+        assert_eq!(m.get("code").unwrap().as_i48(), 2);
+    }
+
+    #[test]
     fn io_read_returns_result() {
         let mut vm = new_vm();
-        let r = evaluate(r#"io.read("/tmp/nonexistent_xyz.txt")"#, &mut vm);
-        let m = r.as_map().expect("io.read should return a map (Result)");
-        assert_eq!(m.get("tag").unwrap().as_str(), Some("Err"));
+        let r = evaluate(r#"io.read "/tmp/nonexistent_xyz.txt""#, &mut vm);
+        assert_eq!(r.map_subtype(), Some(SUBTYPE_RESULT));
+        assert_eq!(r.map_variant(), Some(VARIANT_ERR));
     }
 
     #[test]
@@ -120,14 +113,13 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let mut vm = new_vm();
-        let write_r = evaluate(&format!(r#"io.write("{}", "hello")"#, path_str), &mut vm);
-        assert_eq!(write_r.as_map().unwrap().get("tag").unwrap().as_str(), Some("Ok"));
+        let write_r = evaluate(&format!(r#"io.write "{}" "hello""#, path_str), &mut vm);
+        assert_eq!(write_r.map_variant(), Some(VARIANT_OK));
 
         let mut vm = new_vm();
-        let read_r = evaluate(&format!(r#"io.read("{}")"#, path_str), &mut vm);
-        let m = read_r.as_map().unwrap();
-        assert_eq!(m.get("tag").unwrap().as_str(), Some("Ok"));
-        assert_eq!(m.get("value").unwrap().as_str(), Some("hello"));
+        let read_r = evaluate(&format!(r#"io.read "{}""#, path_str), &mut vm);
+        assert_eq!(read_r.map_variant(), Some(VARIANT_OK));
+        assert_eq!(read_r.as_map().unwrap().get("value").unwrap().as_str(), Some("hello"));
 
         let _ = std::fs::remove_file(&path);
     }
@@ -135,21 +127,18 @@ mod tests {
     #[test]
     fn io_open_returns_result() {
         let mut vm = new_vm();
-        let r = evaluate(r#"io.open("/tmp")"#, &mut vm);
-        let m = r.as_map().unwrap();
-        // /tmp is a directory, opening as file should return Err on some systems
-        // or Ok on others — just check it returns a Result
-        assert!(m.get("tag").is_some());
+        let r = evaluate(r#"io.open "/tmp" "r""#, &mut vm);
+        assert_eq!(r.map_subtype(), Some(SUBTYPE_RESULT));
     }
 
-    // ── Space-separated call tests ──
+    // â”€â”€ Space-separated call tests â”€â”€
 
     #[test]
     fn io_read_space_form() {
         let mut vm = new_vm();
         let r = evaluate(r#"io.read "/tmp/nonexistent_xyz.txt""#, &mut vm);
-        let m = r.as_map().expect("should return a dict");
-        assert_eq!(m.get("tag").unwrap().as_str(), Some("Err"));
+        assert_eq!(r.map_subtype(), Some(SUBTYPE_RESULT));
+        assert_eq!(r.map_variant(), Some(VARIANT_ERR));
     }
 
     #[test]
@@ -160,7 +149,7 @@ mod tests {
 
         let mut vm = new_vm();
         let r = evaluate(&format!(r#"io.write "{}" "hello""#, path_str), &mut vm);
-        assert_eq!(r.as_map().unwrap().get("tag").unwrap().as_str(), Some("Ok"));
+        assert_eq!(r.map_variant(), Some(VARIANT_OK));
 
         let _ = std::fs::remove_file(&path);
     }
@@ -181,7 +170,7 @@ $m.key"#, &mut vm);
         let _r = evaluate(r#"io.print "hello""#, &mut vm);
     }
 
-    // ── Newline-separated statement tests ──
+    // â”€â”€ Newline-separated statement tests â”€â”€
 
     #[test]
     fn parenthesized_on_new_line_is_new_statement() {
@@ -207,7 +196,7 @@ $m.key"#, &mut vm);
         assert!(r.as_map().is_some());
     }
 
-    // ── Parenthesized field access arithmetic tests ──
+    // â”€â”€ Parenthesized field access arithmetic tests â”€â”€
 
     #[test]
     fn parenthesized_field_access_is_arithmetic() {
@@ -237,7 +226,7 @@ $f.double 5"#, &mut vm);
         // If we get here without panic, the parser correctly built a Call node
     }
 
-    // ── Print and format tests ──
+    // â”€â”€ Print and format tests â”€â”€
 
     #[test]
     fn io_print_multiple_args() {
@@ -273,5 +262,192 @@ $f.double 5"#, &mut vm);
         let mut vm = new_vm();
         let r = evaluate(r#"io.format true false"#, &mut vm);
         assert_eq!(r.as_str(), Some("true false"));
+    }
+
+    // ── Closure dispatch tests ──
+
+    #[test]
+    fn closure_basic_call() {
+        // Verify a simple closure call works
+        let mut vm = new_vm();
+        let r = evaluate("($x) => $x * 2", &mut vm);
+        assert!(r.as_func().is_some(), "closure should be a func value");
+    }
+
+    #[test]
+    fn map_calls_closure() {
+        let mut vm = new_vm();
+        let r = evaluate("result.map (Ok 10) (($x) => $x * 2)", &mut vm);
+        assert_eq!(r.map_subtype(), Some(SUBTYPE_RESULT));
+        assert_eq!(r.map_variant(), Some(VARIANT_OK));
+        assert_eq!(r.as_map().unwrap().get("value").unwrap().as_i48(), 20);
+    }
+
+    #[test]
+    fn map_passes_err_through() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"result.map (Err (make_error "x" "y" 0)) (($x) => $x * 2)"#, &mut vm);
+        assert_eq!(r.map_subtype(), Some(SUBTYPE_RESULT));
+        assert_eq!(r.map_variant(), Some(VARIANT_ERR));
+    }
+
+    #[test]
+    fn and_then_chains() {
+        let mut vm = new_vm();
+        let src = r#"
+$double = ($x) => Ok ($x * 2)
+result.and_then (Ok 5) $double"#;
+        let r = evaluate(src, &mut vm);
+        assert_eq!(r.map_subtype(), Some(SUBTYPE_RESULT));
+        assert_eq!(r.map_variant(), Some(VARIANT_OK));
+        assert_eq!(r.as_map().unwrap().get("value").unwrap().as_i48(), 10);
+    }
+
+    #[test]
+    fn and_then_passes_err_through() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"result.and_then (Err (make_error "x" "y" 0)) (($x) => Ok ($x * 2))"#, &mut vm);
+        assert_eq!(r.map_subtype(), Some(SUBTYPE_RESULT));
+        assert_eq!(r.map_variant(), Some(VARIANT_ERR));
+    }
+
+    #[test]
+    fn or_else_recovers() {
+        let mut vm = new_vm();
+        let src = r#"
+$fallback = ($_) => Ok 99
+result.or_else (Err (make_error "x" "y" 0)) $fallback"#;
+        let r = evaluate(src, &mut vm);
+        assert_eq!(r.map_subtype(), Some(SUBTYPE_RESULT));
+        assert_eq!(r.map_variant(), Some(VARIANT_OK));
+        assert_eq!(r.as_map().unwrap().get("value").unwrap().as_i48(), 99);
+    }
+
+    #[test]
+    fn or_else_passes_ok_through() {
+        let mut vm = new_vm();
+        let src = r#"
+$fallback = ($_) => Ok 99
+result.or_else (Ok 42) $fallback"#;
+        let r = evaluate(src, &mut vm);
+        assert_eq!(r.map_subtype(), Some(SUBTYPE_RESULT));
+        assert_eq!(r.map_variant(), Some(VARIANT_OK));
+        assert_eq!(r.as_map().unwrap().get("value").unwrap().as_i48(), 42);
+    }
+
+    #[test]
+    fn unwrap_or_else_calls_fallback() {
+        let mut vm = new_vm();
+        let src = r#"
+$fallback = ($_) => 77
+result.unwrap_or_else (Err (make_error "x" "y" 0)) $fallback"#;
+        let r = evaluate(src, &mut vm);
+        assert_eq!(r.as_i48(), 77);
+    }
+
+    #[test]
+    fn unwrap_or_else_returns_ok_value() {
+        let mut vm = new_vm();
+        let src = r#"
+$fallback = ($_) => 77
+result.unwrap_or_else (Ok 42) $fallback"#;
+        let r = evaluate(src, &mut vm);
+        assert_eq!(r.as_i48(), 42);
+    }
+
+    #[test]
+    fn map_err_field_access_debug() {
+        // Test field access on Error directly (no closure)
+        let mut vm = new_vm();
+        let r = evaluate(r#"$e = make_error "not_found" "file" 2; $e.message"#, &mut vm);
+        assert_eq!(r.as_str(), Some("file"), "direct field access should return 'file'");
+    }
+
+    #[test]
+    fn map_err_field_access_in_closure() {
+        // Test field access on Error inside closure
+        let mut vm = new_vm();
+        let src = r#"
+$getter = ($e) => $e.message
+$e = make_error "not_found" "file" 2
+$getter $e"#;
+        let r = evaluate(src, &mut vm);
+        assert_eq!(r.as_str(), Some("file"), "closure field access should return 'file'");
+    }
+
+    #[test]
+    fn map_err_transforms_error() {
+        let mut vm = new_vm();
+        let src = r#"
+$wrapper = ($e) => make_error "wrapped" $e.message $e.code
+result.map_err (Err (make_error "not_found" "file" 2)) $wrapper"#;
+        let r = evaluate(src, &mut vm);
+        assert_eq!(r.map_subtype(), Some(SUBTYPE_RESULT));
+        assert_eq!(r.map_variant(), Some(VARIANT_ERR));
+        let err = r.as_map().unwrap().get("error").unwrap();
+        assert_eq!(err.as_map().unwrap().get("kind").unwrap().as_str(), Some("wrapped"));
+        assert_eq!(err.as_map().unwrap().get("message").unwrap().as_str(), Some("file"));
+    }
+
+    // ── Edge case tests from issue ──
+
+    #[test]
+    fn call_local_function_value() {
+        let mut vm = new_vm();
+        let src = r#"
+$double = ($x) => $x * 2
+$double 5"#;
+        assert_eq!(evaluate(src, &mut vm).as_i48(), 10);
+    }
+
+    #[test]
+    fn call_local_with_two_args() {
+        let mut vm = new_vm();
+        let src = r#"
+$add = ($a; $b) => $a + $b
+$add 3 4"#;
+        assert_eq!(evaluate(src, &mut vm).as_i48(), 7);
+    }
+
+    #[test]
+    fn field_accesses_as_separate_args() {
+        let mut vm = new_vm();
+        let src = r#"
+$e = make_error "not_found" "missing" 2
+make_error $e.kind $e.message $e.code"#;
+        let r = evaluate(src, &mut vm);
+        assert_eq!(
+            r.as_map().unwrap().get("kind").unwrap().as_str(),
+            Some("not_found")
+        );
+    }
+
+    #[test]
+    fn call_inside_closure_with_field_args() {
+        let mut vm = new_vm();
+        let src = r#"
+$r = Err (make_error "x" "boom" 1)
+$r.map_err (($e) =>
+    make_error "wrapped" $e.message $e.code)"#;
+        let r = evaluate(src, &mut vm);
+        assert_eq!(r.map_subtype(), Some(SUBTYPE_RESULT));
+        assert_eq!(r.map_variant(), Some(VARIANT_ERR));
+        let err = r.as_map().unwrap().get("error").unwrap();
+        assert_eq!(err.as_map().unwrap().get("kind").unwrap().as_str(), Some("wrapped"));
+    }
+
+    #[test]
+    fn multi_arg_does_not_nest_calls() {
+        // foo $f $x should be foo($f, $x), not foo($f($x))
+        let mut vm = new_vm();
+        let src = r#"
+$ident = ($x) => $x
+$three = 3
+$pair = ($a; $b) => [$a; $b]
+$pair $ident $three"#;
+        let r = evaluate(src, &mut vm);
+        // r should be an array with 2 elements
+        let arr = r.as_array().expect("result should be an array");
+        assert_eq!(arr.len(), 2);
     }
 }

@@ -1,5 +1,5 @@
 use crate::span::Span;
-use crate::ast::{AstNode, BinaryOperator, UnaryOperator, Param, CallArg, PipelineStage};
+use crate::ast::{AstNode, BinaryOperator, UnaryOperator, Param, CallArg, PipelineStage, TypeKind, SumVariant, TypeField};
 use crate::lexer::{Token, TokenWithText, extract_string};
 
 struct Parser<'a> {
@@ -63,8 +63,124 @@ impl<'a> Parser<'a> {
             Some(Token::Ident) if self.lookahead_assign() => self.assign(),
             Some(Token::IdentPlain) if self.lookahead_fn_def() => self.fn_def(),
             Some(Token::IdentPlain) if self.lookahead_throw() => self.throw_expr(),
+            // Type definition: `Name = { ... }` or `Name = | Variant1 { ... } | Variant2 { ... }`
+            Some(Token::IdentPlain) if self.lookahead_type_def() => self.type_def(),
+            // Impl block: `Name is Trait { ... }`
+            Some(Token::IdentPlain) if self.lookahead_impl_def() => self.impl_def(),
             _ => self.expr_stmt(),
         }
+    }
+
+    #[inline]
+    fn lookahead_type_def(&self) -> bool {
+        // Name = { or Name = |
+        if !matches!(self.tokens.get(self.pos + 1).map(|t| &t.token), Some(Token::Assign)) {
+            return false;
+        }
+        matches!(self.tokens.get(self.pos + 2).map(|t| &t.token),
+            Some(Token::LBrace) | Some(Token::Pipe))
+    }
+
+    #[inline]
+    fn lookahead_impl_def(&self) -> bool {
+        // Name is Trait {
+        if !matches!(self.tokens.get(self.pos + 1).map(|t| &t.token), Some(Token::Is)) {
+            return false;
+        }
+        // Check for: Name is IdentPlain {
+        if !matches!(self.tokens.get(self.pos + 2).map(|t| &t.token), Some(Token::IdentPlain)) {
+            return false;
+        }
+        matches!(self.tokens.get(self.pos + 3).map(|t| &t.token), Some(Token::LBrace))
+    }
+
+    fn type_def(&mut self) -> AstNode {
+        let span = self.span();
+        let name = self.consume().text; // IdentPlain
+        self.expect(Token::Assign);
+
+        if self.at(Token::Pipe) {
+            // Sum type: `Name = | Variant1 { ... } | Variant2 { ... }`
+            self.consume(); // |
+            let mut variants = Vec::new();
+            while self.at(Token::IdentPlain) {
+                let vname = self.consume().text;
+                let mut fields = Vec::new();
+                if self.at(Token::LBrace) {
+                    self.consume(); // {
+                    while !self.at(Token::RBrace) && !self.at(Token::Pipe) && !self.at_eof() {
+                        if self.at(Token::Semi) { self.consume(); continue; }
+                        let fname = self.consume().text;
+                        self.expect(Token::Colon);
+                        let fty = self.parse_type();
+                        fields.push(TypeField { name: fname, ty: fty, mutable: false });
+                        if self.at(Token::Semi) { self.consume(); }
+                    }
+                    self.expect(Token::RBrace);
+                }
+                variants.push(SumVariant { name: vname, fields });
+                if self.at(Token::Pipe) { self.consume(); }
+            }
+            AstNode::TypeDef { span, name, kind: TypeKind::Sum { variants }, body: Vec::new() }
+        } else {
+            // Record or Trait: `Name = { ... }`
+            self.expect(Token::LBrace);
+            let mut body = Vec::new();
+            while !self.at(Token::RBrace) && !self.at_eof() {
+                if self.at(Token::Semi) { self.consume(); continue; }
+                // Check if it's a method definition
+                if self.at(Token::IdentPlain) && self.lookahead_fn_def() {
+                    body.push(self.fn_def());
+                } else {
+                    // Field definition: `name: type` or `mut name: type`
+                    let span = self.span();
+                    let mut _mutable = false;
+                    if self.at(Token::IdentPlain) && self.current().map(|t| t.text == "mut").unwrap_or(false) {
+                        _mutable = true;
+                        self.consume();
+                    }
+                    let fname = self.consume().text;
+                    self.expect(Token::Colon);
+                    let fty = self.parse_type();
+                    // Store as a synthetic assign node for now; compiler will handle it
+                    body.push(AstNode::Assign {
+                        span,
+                        name: format!("__field__{}__{}__", fname, fty),
+                        value: Box::new(AstNode::Nil { span: Span::empty() }),
+                        type_annotation: None,
+                    });
+                    if self.at(Token::Semi) { self.consume(); }
+                }
+            }
+            self.expect(Token::RBrace);
+            // Determine if trait (only methods) or record (has fields)
+            let kind = if body.iter().all(|n| matches!(n, AstNode::FunctionDef { .. })) {
+                TypeKind::Trait
+            } else {
+                TypeKind::Record
+            };
+            AstNode::TypeDef { span, name, kind, body }
+        }
+    }
+
+    fn impl_def(&mut self) -> AstNode {
+        let span = self.span();
+        let type_name = self.consume().text; // IdentPlain
+        self.expect(Token::Is);
+        let trait_name = self.consume().text; // IdentPlain
+        self.expect(Token::LBrace);
+        let mut body = Vec::new();
+        while !self.at(Token::RBrace) && !self.at_eof() {
+            if self.at(Token::Semi) { self.consume(); continue; }
+            if self.at(Token::IdentPlain) && self.lookahead_fn_def() {
+                body.push(self.fn_def());
+            } else {
+                // Skip unknown content
+                self.consume();
+            }
+        }
+        self.expect(Token::RBrace);
+        AstNode::ImplDef { span, type_name, trait_name, body }
     }
 
     #[inline]
@@ -299,6 +415,20 @@ impl<'a> Parser<'a> {
 
     fn expr_stmt(&mut self) -> AstNode {
         let e = self.expr();
+        // $f $x call pattern: if expression is a plain $-ident (not FieldAccess)
+        // and next token is $-ident not followed by =, treat it as a call
+        if let AstNode::Ident { .. } = e
+            && self.at(Token::Ident)
+            && !matches!(self.tokens.get(self.pos + 1).map(|t| &t.token),
+                Some(Token::Assign) | Some(Token::CoalesceAssign)
+                | Some(Token::AddAssign) | Some(Token::SubAssign)
+                | Some(Token::MulAssign) | Some(Token::DivAssign))
+        {
+            let callee = e;
+            let arg = self.call_arg();
+            if self.at(Token::Semi) { self.consume(); }
+            return AstNode::Call { span: self.span(), callee: Box::new(callee), args: vec![arg] };
+        }
         if self.at(Token::Semi) { self.consume(); }
         e
     }
@@ -373,8 +503,15 @@ impl<'a> Parser<'a> {
                 Some(Token::Is) => {
                     let span = self.span();
                     self.consume();
-                    let r = Box::new(self.primary());
-                    e = AstNode::BinaryOp { span, left: Box::new(e), op: BinaryOperator::Eq, right: r };
+                    // Check if the next token is a type name (IdentPlain) — type test
+                    if self.at(Token::IdentPlain) {
+                        let type_name = self.consume().text;
+                        e = AstNode::TypeTest { span, value: Box::new(e), type_name };
+                    } else {
+                        // Fallback: equality check
+                        let r = Box::new(self.primary());
+                        e = AstNode::BinaryOp { span, left: Box::new(e), op: BinaryOperator::Eq, right: r };
+                    }
                     continue;
                 }
                 Some(Token::As) => {
@@ -540,37 +677,65 @@ impl<'a> Parser<'a> {
                     }
                     self.expect(Token::RParen);
                     e = AstNode::Call { span: self.span(), callee: Box::new(e), args };
+                    // After parenthesized call, check for additional space-separated args
+                    if self.starts_positional_arg() {
+                        let AstNode::Call { callee, args: mut a, .. } = e else { unreachable!() };
+                        while self.starts_positional_arg() {
+                            a.push(self.call_arg());
+                        }
+                        e = AstNode::Call { span: self.span(), callee, args: a };
+                    }
                 }
                 _ => break,
             }
         }
 
-        // Space-separated call after a bare dotted path.
+        // Space-separated call after a bare dotted path or $-ident.
         // Only apply when the previous token was an identifier — that means the
-        // chain ended with `.ident`, not with `)` from a parenthesized group.
+        // chain ended with `.ident` or `$ident`, not with `)` from a parenthesized group.
         let prev_is_ident = self.pos > 0 && matches!(
             self.tokens[self.pos - 1].token,
             Token::IdentPlain | Token::Ident
         );
 
         if prev_is_ident
-            && matches!(e, AstNode::FieldAccess { .. })
+            && matches!(e, AstNode::Ident { .. } | AstNode::FieldAccess { .. } | AstNode::Call { .. })
             && self.starts_positional_arg() {
-            let mut args = Vec::new();
-            while self.starts_positional_arg() {
-                args.push(self.call_arg());
-            }
-            while self.at(Token::Comma) {
-                self.consume();
-                if self.starts_positional_arg() {
+            // Skip $f.method $x when $x is also a field access ($x.field)
+            // because $x.field is a separate arg, not a call to $f.method
+            let skip = matches!(e, AstNode::FieldAccess { .. })
+                && self.at(Token::Ident)
+                && matches!(self.tokens.get(self.pos + 1).map(|t| &t.token),
+                    Some(Token::Dot) | Some(Token::LBracket));
+            if skip {
+                // Do nothing — $x.field will be consumed as a separate arg by the caller
+            } else {
+                // If e is already a Call (from parenthesized args), merge additional args
+                let mut args: Vec<CallArg> = if let AstNode::Call { args, .. } = &e {
+                    args.clone()
+                } else {
+                    Vec::new()
+                };
+                let callee: Box<AstNode> = if let AstNode::Call { callee, .. } = e {
+                    callee
+                } else {
+                    Box::new(e)
+                };
+                while self.starts_positional_arg() {
                     args.push(self.call_arg());
                 }
+                while self.at(Token::Comma) {
+                    self.consume();
+                    if self.starts_positional_arg() {
+                        args.push(self.call_arg());
+                    }
+                }
+                e = AstNode::Call {
+                    span: self.span(),
+                    callee,
+                    args,
+                };
             }
-            e = AstNode::Call {
-                span: self.span(),
-                callee: Box::new(e),
-                args,
-            };
         }
 
         e
@@ -616,19 +781,7 @@ impl<'a> Parser<'a> {
 
             Token::Ident => {
                 let name = t.text.trim_start_matches('$').to_string();
-                let mut args = Vec::new();
-                while self.looks_like_literal_arg() {
-                    args.push(CallArg { value: self.expr(), name: None });
-                }
-                if args.is_empty() {
-                    AstNode::Ident { span, name }
-                } else {
-                    AstNode::Call {
-                        span: span.clone(),
-                        callee: Box::new(AstNode::Ident { span, name }),
-                        args,
-                    }
-                }
+                AstNode::Ident { span, name }
             }
 
             Token::IdentPlain => {
@@ -691,22 +844,21 @@ impl<'a> Parser<'a> {
     }
 
     #[inline]
-    fn looks_like_literal_arg(&self) -> bool {
-        matches!(self.current().map(|t| &t.token),
-            Some(Token::Int) | Some(Token::Float) | Some(Token::String)
-            | Some(Token::RawString) | Some(Token::MultiLineString)
-            | Some(Token::True) | Some(Token::False) | Some(Token::None_))
-    }
-
-    #[inline]
     fn looks_like_arg(&self) -> bool {
         match self.current().map(|t| &t.token) {
             None => false,
             Some(Token::Ident) => {
-                !matches!(self.tokens.get(self.pos + 1).map(|t| &t.token),
-                    Some(Token::Assign) | Some(Token::Semi) | Some(Token::Colon)
-                    | Some(Token::CoalesceAssign) | Some(Token::AddAssign)
-                    | Some(Token::SubAssign) | Some(Token::MulAssign) | Some(Token::DivAssign))
+                // $-prefixed identifiers are args if:
+                // 1. Followed by = (named arg: $x = value)
+                // 2. Followed by . (field access: $x.field)
+                // 3. Followed by [ (index access: $x[0])
+                // NOT if followed by another $-ident (that's a call: $f $x)
+                let next = self.tokens.get(self.pos + 1).map(|t| &t.token);
+                matches!(next,
+                    Some(Token::Assign) | Some(Token::CoalesceAssign)
+                    | Some(Token::AddAssign) | Some(Token::SubAssign)
+                    | Some(Token::MulAssign) | Some(Token::DivAssign)
+                    | Some(Token::Dot) | Some(Token::LBracket))
             }
             Some(t) => matches!(t,
                 Token::Arr | Token::Str | Token::Fn | Token::Dict
@@ -736,7 +888,7 @@ impl<'a> Parser<'a> {
                 | Token::Int | Token::Float | Token::IntHex | Token::IntBin | Token::IntOct
                 | Token::String | Token::RawString | Token::MultiLineString
                 | Token::True | Token::False | Token::None_
-                | Token::LBracket),
+                | Token::LBracket | Token::LParen),
         }
     }
 
