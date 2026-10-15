@@ -11,10 +11,11 @@ const TAG_TRUE:  u64 = QNAN | (2u64 << 48);
 const TAG_INT:   u64 = QNAN | (3u64 << 48);
 const TAG_PTR:   u64 = QNAN | (4u64 << 48);
 
-const KIND_STR:   u8 = 0;
-const KIND_ARRAY: u8 = 1;
-const KIND_MAP:   u8 = 2;
-const KIND_FUNC:  u8 = 3;
+const KIND_STR:     u8 = 0;
+const KIND_ARRAY:   u8 = 1;
+const KIND_MAP:     u8 = 2;
+const KIND_FUNC:    u8 = 3;
+const KIND_HANDLE:  u8 = 6;
 
 #[repr(C)]
 pub struct HeapHeader { pub kind: u8, pub flags: u8, pub _pad: [u8; 6] }
@@ -28,12 +29,26 @@ pub struct HeapMap   { pub header: HeapHeader, pub data: HashMap<String, Value> 
 #[repr(C)]
 pub struct HeapFunc  { pub header: HeapHeader, pub data: FuncValue }
 
+#[repr(C)]
+pub struct HeapHandle {
+    pub header: HeapHeader,
+    pub data:   Option<HandleKind>,
+}
+
+#[derive(Debug)]
+pub enum HandleKind {
+    File { file: std::fs::File, path: String },
+    Stdin,
+    Stdout,
+    Stderr,
+}
+
 #[repr(transparent)]
 #[derive(Copy, Clone)]
 pub struct Value(pub u64);
 
 impl PartialEq for Value {
-    #[inline] fn eq(&self, other: &Self) -> bool { Value::eq(*self, *other) }
+    #[inline] fn eq(&self, other: &Self) -> bool { Value::eq_(*self, *other) }
 }
 impl Eq for Value {}
 
@@ -165,7 +180,8 @@ impl Value {
         Self::nil()
     }
 
-    pub fn sub(self, other: Self) -> Self {
+    #[doc(alias("sub"))]
+    pub fn sub_(self, other: Self) -> Self {
         if self.is_int() && other.is_int() {
             let a = self.as_i48();
             let b = other.as_i48();
@@ -198,7 +214,8 @@ impl Value {
         Self::nil()
     }
 
-    pub fn div(self, other: Self) -> Self {
+    #[doc(alias("div"))]
+    pub fn div_(self, other: Self) -> Self {
         if self.is_int() && other.is_int() {
             let b = other.as_i48();
             if b != 0 { return Self::from_i48(self.as_i48() / b); }
@@ -217,7 +234,8 @@ impl Value {
         Self::nil()
     }
 
-    pub fn eq(self, other: Self) -> bool {
+    #[doc(alias("eq"))]
+    pub fn eq_(self, other: Self) -> bool {
         if self.is_int() && other.is_int() { return self.as_i48() == other.as_i48(); }
         if self.is_float() && other.is_float() { return self.as_f64() == other.as_f64(); }
         if self.is_int() && other.is_float() { return self.as_i48() as f64 == other.as_f64(); }
@@ -246,10 +264,12 @@ impl Value {
         false
     }
 
-    #[inline] pub fn not(self) -> Self { Self::bool(!self.is_truthy()) }
+    #[doc(alias("not"))]
+    #[inline] pub fn not_(self) -> Self { Self::bool(!self.is_truthy()) }
 
+    #[doc(alias("neg"))]
     #[inline]
-    pub fn neg(self) -> Self {
+    pub fn neg_(self) -> Self {
         if self.is_int() { Self::from_i48(-self.as_i48()) }
         else if self.is_float() { Self::from_f64(-self.as_f64()) }
         else { self }
@@ -262,6 +282,10 @@ impl Value {
             Some(KIND_MAP)   => unsafe { (*(self.as_ptr::<HeapMap>())).data.len() },
             _ => 0,
         }
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
     }
 
     pub fn as_string(self) -> String {
@@ -299,11 +323,135 @@ impl Value {
         else if self.is_int() { self.as_i48() as f64 }
         else { 0.0 }
     }
+
+    pub fn from_handle(h: HandleKind) -> Self {
+        let obj = Box::leak(Box::new(HeapHandle {
+            header: HeapHeader { kind: KIND_HANDLE, flags: 0, _pad: [0; 6] },
+            data:   Some(h),
+        }));
+        Value(TAG_PTR | ((obj as *const HeapHandle as u64) & PAYLOAD))
+    }
+
+    pub fn as_handle(&self) -> Option<&HandleKind> {
+        if self.heap_kind() == Some(KIND_HANDLE) {
+            unsafe { (*(self.as_ptr::<HeapHandle>())).data.as_ref() }
+        } else { None }
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    pub fn as_handle_mut(&self) -> Option<&mut HandleKind> {
+        if self.heap_kind() == Some(KIND_HANDLE) {
+            unsafe { (*(self.as_ptr::<HeapHandle>() as *mut HeapHandle)).data.as_mut() }
+        } else { None }
+    }
+
+    pub fn take_handle(self) -> Option<HandleKind> {
+        if self.heap_kind() == Some(KIND_HANDLE) {
+            let heap = unsafe { &mut *(self.as_ptr::<HeapHandle>() as *mut HeapHandle) };
+            heap.data.take()
+        } else { None }
+    }
+
+    pub fn from_str_boxed(s: String) -> Self {
+        let obj = Box::leak(Box::new(HeapStr {
+            header: HeapHeader { kind: KIND_STR, flags: 0, _pad: [0; 6] },
+            data: s,
+        }));
+        Value(TAG_PTR | ((obj as *const HeapStr as u64) & PAYLOAD))
+    }
+
+    pub fn from_array_boxed(elements: Vec<Value>) -> Self {
+        let obj = Box::leak(Box::new(HeapArray {
+            header: HeapHeader { kind: KIND_ARRAY, flags: 0, _pad: [0; 6] },
+            data: elements,
+        }));
+        Value(TAG_PTR | ((obj as *const HeapArray as u64) & PAYLOAD))
+    }
+
+    pub fn from_map_boxed(m: HashMap<String, Value>) -> Self {
+        let obj = Box::leak(Box::new(HeapMap {
+            header: HeapHeader { kind: KIND_MAP, flags: 0, _pad: [0; 6] },
+            data: m,
+        }));
+        Value(TAG_PTR | ((obj as *const HeapMap as u64) & PAYLOAD))
+    }
+
+    pub fn unit() -> Self { Value(TAG_NIL) }
+
+    pub fn bool_(b: bool) -> Self { Value::bool(b) }
 }
 
 impl std::fmt::Debug for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_string())
+    }
+}
+
+// — Argument extraction for typed native functions —
+
+/// Extract a typed Rust argument from a `&[Value]` slice at the given index.
+/// This function is called by the `#[xcl_fn]` macro-generated wrappers.
+pub fn extract_arg<T: NativeArg>(args: &[Value], index: usize) -> T {
+    let v = args.get(index).copied().unwrap_or(Value::nil());
+    T::from_value(v)
+}
+
+/// Trait for types that can be extracted from a `Value`.
+pub trait NativeArg: Sized {
+    fn from_value(v: Value) -> Self;
+}
+
+impl NativeArg for &str {
+    fn from_value(v: Value) -> Self {
+        v.as_str().unwrap_or("")
+    }
+}
+
+impl NativeArg for String {
+    fn from_value(v: Value) -> Self {
+        v.as_str().unwrap_or("").to_string()
+    }
+}
+
+impl NativeArg for i64 {
+    fn from_value(v: Value) -> Self {
+        v.as_i48()
+    }
+}
+
+impl NativeArg for i32 {
+    fn from_value(v: Value) -> Self {
+        v.as_i48() as i32
+    }
+}
+
+impl NativeArg for u64 {
+    fn from_value(v: Value) -> Self {
+        v.as_i48() as u64
+    }
+}
+
+impl NativeArg for f64 {
+    fn from_value(v: Value) -> Self {
+        v.as_f64()
+    }
+}
+
+impl NativeArg for bool {
+    fn from_value(v: Value) -> Self {
+        v.as_bool()
+    }
+}
+
+impl NativeArg for Value {
+    fn from_value(v: Value) -> Self {
+        v
+    }
+}
+
+impl NativeArg for usize {
+    fn from_value(v: Value) -> Self {
+        v.as_i48() as usize
     }
 }
 
@@ -318,4 +466,98 @@ pub struct FuncValue {
 
 impl PartialEq for FuncValue {
     fn eq(&self, other: &Self) -> bool { self.name == other.name }
+}
+
+// — Native function registry types —
+
+pub struct NativeEntry {
+    pub domain:   Option<&'static str>,
+    pub method:   &'static str,
+    pub kind:     NativeKind,
+    pub ptr:      RawPtr,
+    pub args:     Option<&'static str>,
+    pub ret:      Option<&'static str>,
+    pub named:    &'static [NamedParam],
+    pub summary:  Option<&'static str>,
+    pub arg_desc: &'static [(&'static str, &'static str)],
+}
+
+#[derive(Clone, Copy)]
+pub struct RawPtr(pub *const ());
+
+unsafe impl Sync for RawPtr {}
+unsafe impl Send for RawPtr {}
+
+pub struct NamedParam {
+    pub name:    &'static str,
+    pub ty:      &'static str,
+    pub default: &'static str,
+}
+
+#[derive(Clone, Copy)]
+pub enum NativeKind { Pure, Ctx }
+
+pub type BuiltinFn    = fn(&[Value]) -> Value;
+pub type BuiltinCtxFn = fn(&mut DomainCtx) -> Value;
+
+#[derive(Clone, Copy)]
+pub enum BuiltinImpl {
+    Pure(BuiltinFn),
+    Ctx(BuiltinCtxFn),
+}
+
+impl BuiltinImpl {
+    #[inline]
+    pub fn call(&self, vm: &mut crate::vm::VM, args: &[Value]) -> Value {
+        match self {
+            BuiltinImpl::Pure(f) => f(args),
+            BuiltinImpl::Ctx(f) => {
+                let mut ctx = DomainCtx { vm, args };
+                f(&mut ctx)
+            }
+        }
+    }
+}
+
+// — Type descriptor types —
+
+pub struct TypeDescriptor {
+    pub name:     &'static str,
+    pub domain:   Option<&'static str>,
+    pub kind:     TypeKind,
+    pub fields:   &'static [TypeField],
+    pub variants: &'static [TypeVariant],
+    pub summary:  Option<&'static str>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum TypeKind { Opaque, Record, Sum, Alias }
+
+pub struct TypeField {
+    pub name:     &'static str,
+    pub ty:       &'static str,
+    pub optional: bool,
+}
+
+pub struct TypeVariant {
+    pub name:   &'static str,
+    pub fields: &'static [TypeField],
+}
+
+pub struct DomainCtx<'a> {
+    pub(crate) vm:   &'a mut crate::vm::VM,
+    pub(crate) args: &'a [Value],
+}
+
+impl<'a> DomainCtx<'a> {
+    pub fn args(&self) -> &[Value] { self.args }
+    pub fn argc(&self) -> usize { self.args.len() }
+    pub fn arg(&self, i: usize) -> Value { self.args.get(i).copied().unwrap_or(Value::unit()) }
+    pub fn arena(&self) -> &bumpalo::Bump { &self.vm.arena }
+    pub fn unit(&self) -> Value { Value::unit() }
+    pub fn boolean(&self, b: bool) -> Value { Value::bool_(b) }
+    pub fn string(&self, s: String) -> Value { Value::from_str_boxed(s) }
+    pub fn array(&self, v: Vec<Value>) -> Value { Value::from_array_boxed(v) }
+    pub fn i64(&self, n: i64) -> Value { Value::from_i48(n) }
+    pub fn u64(&self, n: u64) -> Value { Value::from_i48(n as i64) }
 }

@@ -2,9 +2,9 @@ use std::sync::Arc;
 use bumpalo::Bump;
 use smallvec::SmallVec;
 use crate::bytecode::*;
-use crate::value::Value;
+use crate::value::{Value, BuiltinImpl, TypeDescriptor};
 
-enum Action { Next, Jump(u32), Return, Halt, PushFrame }
+enum Action { Next, Jump(u32), Return, PushFrame }
 
 struct Frame {
     code: Arc<Bytecode>,
@@ -18,11 +18,22 @@ struct Frame {
     catch_stack: Vec<(u32, u32)>,
 }
 
+pub struct DomainSlot {
+    pub name:    Box<str>,
+    pub methods: Vec<Option<BuiltinImpl>>,
+    pub index:   hashbrown::HashMap<Box<str>, u32>,
+}
+
 pub struct VM {
-    stack: Vec<Value>,
+    pub stack: Vec<Value>,
     globals: Vec<Value>,
     global_index: hashbrown::HashMap<Box<str>, u32>,
-    arena: Bump,
+    pub global_table: Vec<Option<BuiltinImpl>>,
+    pub domain_index: hashbrown::HashMap<Box<str>, u32>,
+    pub domain_table: Vec<DomainSlot>,
+    pub type_index:   hashbrown::HashMap<Box<str>, &'static TypeDescriptor>,
+    pub arena: Bump,
+    pub well_known: crate::wellknown::WellKnown,
     frames: Vec<Frame>,
     pending: Option<Frame>,
     closures: Vec<crate::value::FuncValue>,
@@ -35,12 +46,86 @@ impl VM {
         Self {
             stack: Vec::with_capacity(64),
             globals: Vec::new(),
-            global_index: hashbrown::HashMap::new(),
+            global_index: Default::default(),
+            global_table: Vec::new(),
+            domain_index: Default::default(),
+            domain_table: Vec::new(),
+            type_index: Default::default(),
             arena: Bump::new(),
+            well_known: Default::default(),
             frames: Vec::new(),
             pending: None,
             closures: Vec::new(),
         }
+    }
+
+    /// Fill in the well-known type/constructor names.
+    /// Called by `xcl-std` after its own registration.
+    pub fn set_well_known(&mut self, wk: crate::wellknown::WellKnown) {
+        self.well_known = wk;
+    }
+
+    pub fn register_all(&mut self) {
+        self.register_all_natives();
+        self.register_all_types();
+    }
+
+    pub fn register_all_natives(&mut self) {
+        use crate::native::NATIVE_REGISTRY;
+        use crate::value::{NativeKind, BuiltinImpl};
+
+        for entry in NATIVE_REGISTRY.iter() {
+            let impl_ = match entry.kind {
+                NativeKind::Pure => {
+                    let f: crate::value::BuiltinFn = unsafe { std::mem::transmute(entry.ptr.0) };
+                    BuiltinImpl::Pure(f)
+                }
+                NativeKind::Ctx => {
+                    let f: crate::value::BuiltinCtxFn = unsafe { std::mem::transmute(entry.ptr.0) };
+                    BuiltinImpl::Ctx(f)
+                }
+            };
+
+            if let Some(domain) = entry.domain {
+                let didx = *self.domain_index.entry(domain.into()).or_insert_with(|| {
+                    let idx = self.domain_table.len() as u32;
+                    self.domain_table.push(DomainSlot {
+                        name: domain.into(),
+                        methods: Vec::new(),
+                        index: hashbrown::HashMap::new(),
+                    });
+                    idx
+                });
+                let slot = &mut self.domain_table[didx as usize];
+                let midx = slot.methods.len() as u32;
+                slot.methods.push(Some(impl_));
+                slot.index.insert(entry.method.into(), midx);
+            } else {
+                let idx = self.global_table.len() as u32;
+                self.global_table.push(Some(impl_));
+                self.global_index.insert(entry.method.into(), idx);
+            }
+        }
+    }
+
+    pub fn register_all_types(&mut self) {
+        use crate::native::TYPE_REGISTRY;
+        for desc in TYPE_REGISTRY.iter() {
+            self.type_index.insert(desc.name.into(), desc);
+        }
+    }
+
+    pub fn resolve_builtin(&self, name: &str) -> Option<&BuiltinImpl> {
+        self.global_index.get(name).and_then(|&idx| {
+            self.global_table.get(idx as usize).and_then(|e| e.as_ref())
+        })
+    }
+
+    pub fn resolve_domain_method(&self, domain: &str, method: &str) -> Option<&BuiltinImpl> {
+        let &didx = self.domain_index.get(domain)?;
+        let slot = self.domain_table.get(didx as usize)?;
+        let &midx = slot.index.get(method)?;
+        slot.methods.get(midx as usize).and_then(|e| e.as_ref())
     }
 
     #[inline(always)] fn pop(&mut self) -> Value { unsafe { self.stack.pop().unwrap_unchecked() } }
@@ -74,9 +159,7 @@ impl VM {
             catch_stack: Vec::new(),
         });
 
-        loop {
-            let Some(top) = self.frames.len().checked_sub(1) else { break };
-
+        while let Some(top) = self.frames.len().checked_sub(1) {
             let frame = &self.frames[top];
             if frame.ip as usize >= frame.code.instructions.len() {
                 let r = self.stack.pop().unwrap_or(Value::nil());
@@ -94,7 +177,7 @@ impl VM {
             match action {
                 Action::Next => self.frames[top].ip += 1,
                 Action::Jump(to) => self.frames[top].ip = to,
-                Action::Return | Action::Halt => {
+                Action::Return => {
                     let r = self.stack.pop().unwrap_or(Value::nil());
                     self.frames.pop();
                     if self.frames.is_empty() { return r; }
@@ -156,23 +239,23 @@ impl VM {
                 Action::Next
             }
             OP_ADD => { let b = self.pop(); let a = self.pop(); self.push(a.add(b, &self.arena)); Action::Next }
-            OP_SUB => { let b = self.pop(); let a = self.pop(); self.push(a.sub(b)); Action::Next }
+            OP_SUB => { let b = self.pop(); let a = self.pop(); self.push(a.sub_(b)); Action::Next }
             OP_MUL => { let b = self.pop(); let a = self.pop(); self.push(a.mul(b, &self.arena)); Action::Next }
-            OP_DIV => { let b = self.pop(); let a = self.pop(); self.push(a.div(b)); Action::Next }
+            OP_DIV => { let b = self.pop(); let a = self.pop(); self.push(a.div_(b)); Action::Next }
             OP_MOD => { let b = self.pop(); let a = self.pop(); self.push(a.mod_(b)); Action::Next }
-            OP_NEG => { let a = self.pop(); self.push(a.neg()); Action::Next }
-            OP_EQ  => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(a.eq(b))); Action::Next }
-            OP_NEQ => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(!a.eq(b))); Action::Next }
+            OP_NEG => { let a = self.pop(); self.push(a.neg_()); Action::Next }
+            OP_EQ  => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(a.eq_(b))); Action::Next }
+            OP_NEQ => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(!a.eq_(b))); Action::Next }
             OP_LT  => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(a.lt(b))); Action::Next }
             OP_GT  => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(a.gt(b))); Action::Next }
-            OP_LE  => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(a.lt(b) || a.eq(b))); Action::Next }
-            OP_GE  => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(a.gt(b) || a.eq(b))); Action::Next }
+            OP_LE  => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(a.lt(b) || a.eq_(b))); Action::Next }
+            OP_GE  => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(a.gt(b) || a.eq_(b))); Action::Next }
             OP_AND => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(a.is_truthy() && b.is_truthy())); Action::Next }
             OP_OR  => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(a.is_truthy() || b.is_truthy())); Action::Next }
-            OP_NOT => { let a = self.pop(); self.push(a.not()); Action::Next }
+            OP_NOT => { let a = self.pop(); self.push(a.not_()); Action::Next }
             OP_IN => {
                 let c = self.pop(); let item = self.pop();
-                let found = c.as_array().map(|a| a.iter().any(|v| v.eq(&item))).unwrap_or(false);
+                let found = c.as_array().map(|a| a.iter().any(|v| v.eq_(item))).unwrap_or(false);
                 self.push(Value::bool(found)); Action::Next
             }
             OP_JUMP => Action::Jump(i.a()),
@@ -192,14 +275,34 @@ impl VM {
                 let callee = self.pop();
 
                 if let Some(name) = callee.as_str() {
-                    // Check globals first (builtins + user functions)
+                    // 1. Check global builtins first
                     if let Some(&idx) = self.global_index.get(name) {
-                        let func = self.globals[idx as usize];
-                        if let Some(f) = func.as_func() {
-                            return self.enter_call(f.clone(), args);
+                        if let Some(Some(impl_)) = self.global_table.get(idx as usize) {
+                            let impl_copy = *impl_;
+                            let result = impl_copy.call(self, &args);
+                            self.push(result);
+                            return Action::Next;
+                        }
+                        // Check user-defined globals
+                        if (idx as usize) < self.globals.len() {
+                            let func = self.globals[idx as usize];
+                            if let Some(f) = func.as_func() {
+                                return self.enter_call(f.clone(), args);
+                            }
                         }
                     }
-                    // Fallback: search all globals by name
+                    // 2. Check domain methods (e.g. "io.read")
+                    if let Some(dot_pos) = name.find('.') {
+                        let domain = &name[..dot_pos];
+                        let method = &name[dot_pos + 1..];
+                        if let Some(impl_) = self.resolve_domain_method(domain, method) {
+                            let impl_copy = *impl_;
+                            let result = impl_copy.call(self, &args);
+                            self.push(result);
+                            return Action::Next;
+                        }
+                    }
+                    // 3. Fallback: search all globals by name
                     let found = self.globals.iter().find_map(|g| {
                         g.as_func().filter(|f| &*f.name == name).cloned()
                     });
@@ -335,7 +438,7 @@ impl VM {
                 let l = &self.frames[top].locals;
                 let a = unsafe { *l.get_unchecked(i.a() as usize) };
                 let b = unsafe { *l.get_unchecked(i.b() as usize) };
-                self.push(a.sub(b));
+                self.push(a.sub_(b));
                 Action::Next
             }
             OP_LT_LOCAL_LOCAL => {

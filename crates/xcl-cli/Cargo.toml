@@ -9,5 +9,12 @@ repository.workspace = true
 readme.workspace = true
 homepage.workspace = true
 
+[[bin]]
+name = "xcl"
+path = "src/main.rs"
+
 [dependencies]
 mimalloc.workspace = true
+xcl-std.workspace = true
+xcl-vm.workspace = true
+linkme.workspace = true

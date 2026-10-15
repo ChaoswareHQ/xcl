@@ -12,3 +12,8 @@ homepage.workspace = true
 [dependencies]
 xcl-macros.workspace = true
 xcl-vm.workspace = true
+linkme.workspace = true
+
+# [std.io]
+itoa.workspace = true
+ryu.workspace = true
