@@ -21,11 +21,21 @@ xcl-vm     = { path = "crates/xcl-vm" }
 # xcl-cli
 mimalloc = "0.1.52"
 
+# xcl-macros
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
+syn = { version = "3.0.9", features = ["full"] }
+
 # xcl-vm
 logos     = "0.16.1"
 smallvec  = "1.16.3"
 bumpalo   = "3.20.3"
 hashbrown = "0.17.1"
+linkme    = "0.3"
+
+# [std.io]
+itoa = "1.0.18"
+ryu = "1.0.23"
 
 [profile.release]
 opt-level = 3

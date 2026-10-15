@@ -3,4 +3,235 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-fn main() {}
+use std::env;
+use std::fs;
+use std::io::{self, Read};
+use std::process;
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Default, Debug)]
+struct CliOpts {
+    help:      bool,
+    version:   bool,
+    eval:      Option<String>,
+    quiet:     bool,
+    files:     Vec<String>,
+}
+
+fn parse_args<I>(iter: I) -> CliOpts
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut opts = CliOpts::default();
+    let mut args = iter.into_iter();
+
+    args.next();
+
+    while let Some(arg) = args.next() {
+        if opts.help {
+            continue;
+        }
+
+        if arg == "--" {
+            opts.files.extend(args.by_ref());
+            break;
+        }
+
+        if arg.starts_with("--") {
+            match arg.as_str() {
+                "--help"      => opts.help = true,
+                "--version"   => opts.version = true,
+                "--quiet" => opts.quiet = true,
+                "--eval" => {
+                    if let Some(val) = args.next() {
+                        opts.eval = Some(val);
+                    } else {
+                        eprintln!("xcl: error: --eval requires an argument");
+                        process::exit(1);
+                    }
+                }
+                unknown => {
+                    eprintln!("xcl: error: unknown option '{}'", unknown);
+                    process::exit(1);
+                }
+            }
+            continue;
+        }
+
+        if arg.starts_with("-") && arg.len() > 1 {
+            let chars: Vec<char> = arg[1..].chars().collect();
+            let mut i = 0;
+            while i < chars.len() {
+                let c = chars[i];
+                match c {
+                    'h' => opts.help = true,
+                    'v' => opts.version = true,
+                    'q' => opts.quiet = true,
+                    'e' => {
+                        let val = if i + 1 < chars.len() {
+                            chars[i + 1..].iter().collect::<String>()
+                        } else if let Some(next) = args.next() {
+                            next
+                        } else {
+                            eprintln!("xcl: error: -e requires an argument");
+                            process::exit(1);
+                        };
+                        opts.eval = Some(val);
+                        i += 1; // skip the value chars
+                    }
+                    unknown => {
+                        eprintln!("xcl: error: unknown option '-{}'", unknown);
+                        process::exit(1);
+                    }
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        opts.files.push(arg);
+    }
+
+    opts
+}
+
+fn print_help() {
+    println!(
+        "Usage: xcl [OPTIONS] [FILE]...
+
+Run XCL source files or evaluate expressions.
+
+Options:
+  -h, --help          Show this help message
+  -v, --version       Show version information
+  -e, --eval <EXPR>   Evaluate the given expression
+  -q, --quiet         Suppress result output
+  --                  End of options
+
+When no FILE or -e is given, reads from stdin.
+
+Examples:
+  xcl script.xcl
+  xcl -e 'print \"hello\"'
+  echo 'print 42' | xcl
+  xcl -q script.xcl
+"
+    );
+}
+
+fn print_version() {
+    println!("xcl {}", VERSION);
+}
+
+fn run_source(source: &str, quiet: bool) -> xcl_vm::Value {
+    let mut vm = xcl_std::new_vm();
+    let result = xcl_std::evaluate(source, &mut vm);
+
+    if !quiet {
+        // Print the result value if it's not nil/unit
+        if !result.is_nil() {
+            print_value(result);
+        }
+    }
+    result
+}
+
+fn print_value(v: xcl_vm::Value) {
+    if let Some(s) = v.as_str() {
+        println!("{}", s);
+    } else if v.is_int() {
+        println!("{}", v.as_i48());
+    } else if v.is_float() {
+        println!("{}", v.as_f64());
+    } else if v.is_bool() {
+        println!("{}", v.as_bool());
+    } else if let Some(map) = v.as_map() {
+        println!("{{");
+        for (k, val) in map {
+            print!("  {}: ", k);
+            print_value(*val);
+        }
+        println!("}}");
+    } else if let Some(arr) = v.as_array() {
+        print!("[");
+        for (i, item) in arr.iter().enumerate() {
+            if i > 0 {
+                print!(", ");
+            }
+            print_value(*item);
+        }
+        println!("]");
+    } else if v.is_nil() {
+        println!("none");
+    } else {
+        println!("<value>");
+    }
+}
+
+fn main() {
+    let opts = parse_args(env::args());
+
+    match (opts.help, opts.version) {
+        (true, _) => {
+            print_help();
+            process::exit(0);
+        }
+        (_, true) => {
+            print_version();
+            process::exit(0);
+        }
+        _ => {}
+    }
+
+    // Mode 1: -e expression
+    if let Some(expr) = &opts.eval {
+        let result = run_source(expr, opts.quiet);
+        // Exit with non-zero if result is an Err Result
+        check_result_exit(result);
+        return;
+    }
+
+    // Mode 2: Run file(s)
+    if !opts.files.is_empty() {
+        for file in &opts.files {
+            match fs::read_to_string(file) {
+                Ok(source) => {
+                    let result = run_source(&source, opts.quiet);
+                    check_result_exit(result);
+                }
+                Err(e) => {
+                    eprintln!("xcl: error: cannot read '{}': {}", file, e);
+                    process::exit(1);
+                }
+            }
+        }
+        return;
+    }
+
+    // Mode 3: Read from stdin (REPL-like — just evaluate)
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input).unwrap_or_else(|e| {
+        eprintln!("xcl: error: cannot read stdin: {}", e);
+        process::exit(1);
+    });
+
+    if input.is_empty() {
+        return;
+    }
+
+    let result = run_source(&input, opts.quiet);
+    check_result_exit(result);
+}
+
+/// If the last result is an Err Result, exit with code 1.
+fn check_result_exit(result: xcl_vm::Value) {
+    if let Some(map) = result.as_map()
+        && let Some(tag) = map.get("tag")
+        && tag.as_str() == Some("Err")
+    {
+        let msg = map.get("message").and_then(|v| v.as_str()).unwrap_or("unknown error");
+        eprintln!("xcl: runtime error: {}", msg);
+        process::exit(1);
+    }
+}

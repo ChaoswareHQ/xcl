@@ -151,13 +151,13 @@ impl Compiler {
     }
 
     fn try_fuse_load_load(&mut self, second: u32) -> bool {
-        if let Some(prev) = self.code.last().copied() {
-            if prev.op() == OP_LOAD_LOCAL {
-                let a = prev.a();
-                self.code.pop();
-                self.emit(Instr::make(OP_LOAD_LOCAL_LOAD_LOCAL, a, second as u16, 0));
-                return true;
-            }
+        if let Some(prev) = self.code.last().copied()
+            && prev.op() == OP_LOAD_LOCAL
+        {
+            let a = prev.a();
+            self.code.pop();
+            self.emit(Instr::make(OP_LOAD_LOCAL_LOAD_LOCAL, a, second as u16, 0));
+            return true;
         }
         false
     }
@@ -306,7 +306,17 @@ impl Compiler {
             }
 
             AstNode::Call { callee, args, .. } => {
-                if let AstNode::Ident { name, .. } = callee.as_ref() {
+                // Check if callee is a domain method like "io.read"
+                if let AstNode::FieldAccess { target, field, .. } = callee.as_ref() {
+                    if let AstNode::Ident { name, .. } = target.as_ref() {
+                        // If the target is a simple identifier, treat it as a domain call
+                        let full_name = format!("{}.{}", name, field);
+                        let i = self.intern(&full_name);
+                        self.emit(Instr::a1(OP_PUSH_STR, i));
+                    } else {
+                        self.node(callee);
+                    }
+                } else if let AstNode::Ident { name, .. } = callee.as_ref() {
                     let i = self.intern(name);
                     self.emit(Instr::a1(OP_PUSH_STR, i));
                 } else {
@@ -345,10 +355,10 @@ impl Compiler {
             }
 
             AstNode::BinaryOp { left, op, right, .. } => {
-                if matches!(op, BinaryOperator::Add) {
-                    if self.try_fuse_add_local_local() {
-                        return;
-                    }
+                if matches!(op, BinaryOperator::Add)
+                    && self.try_fuse_add_local_local()
+                {
+                    return;
                 }
                 self.node(left);
                 self.node(right);

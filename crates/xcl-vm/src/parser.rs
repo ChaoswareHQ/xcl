@@ -5,12 +5,12 @@ use crate::lexer::{Token, TokenWithText, extract_string};
 struct Parser<'a> {
     tokens: &'a [TokenWithText],
     pos: usize,
-    file: &'a str,
+    source: &'a str,
 }
 
 impl<'a> Parser<'a> {
-    fn new(tokens: &'a [TokenWithText], file: &'a str) -> Self {
-        Self { tokens, pos: 0, file }
+    fn new(tokens: &'a [TokenWithText], source: &'a str) -> Self {
+        Self { tokens, pos: 0, source }
     }
 
     #[inline] fn current(&self) -> Option<&TokenWithText> { self.tokens.get(self.pos) }
@@ -77,8 +77,26 @@ impl<'a> Parser<'a> {
 
     #[inline]
     fn lookahead_fn_def(&self) -> bool {
-        if !matches!(self.tokens.get(self.pos + 1).map(|t| &t.token), Some(Token::LParen)) { return false; }
-        matches!(self.tokens.get(self.pos + 2).map(|t| &t.token), Some(Token::Ident) | Some(Token::RParen))
+        // Must be: name( ... ) { or name( ... ) ->
+        // We scan forward past the parens to check for a block or return type.
+        if !matches!(self.tokens.get(self.pos + 1).map(|t| &t.token), Some(Token::LParen)) {
+            return false;
+        }
+        // Find the matching closing paren
+        let mut depth = 1;
+        let mut i = self.pos + 2;
+        while i < self.tokens.len() && depth > 0 {
+            match self.tokens[i].token {
+                Token::LParen => depth += 1,
+                Token::RParen => depth -= 1,
+                _ => {}
+            }
+            if depth > 0 { i += 1; }
+        }
+        if depth != 0 { return false; }
+        // After the closing paren, expect { or ->
+        matches!(self.tokens.get(i).map(|t| &t.token),
+            Some(Token::LBrace) | Some(Token::RArrow))
     }
 
     #[inline]
@@ -501,6 +519,19 @@ impl<'a> Parser<'a> {
                     e = AstNode::Index { span: self.span(), target: Box::new(e), index: Box::new(idx) };
                 }
                 Some(Token::LParen) => {
+                    // If there's a newline between the previous token and this `(`,
+                    // treat the `(` as starting a new statement, not a call postfix.
+                    if self.pos > 0 {
+                        let prev = &self.tokens[self.pos - 1];
+                        let gap_start = prev.byte_offset + prev.text.len();
+                        let gap_end = self.current().map(|t| t.byte_offset).unwrap_or(gap_start);
+                        if gap_end > gap_start {
+                            let gap = &self.source[gap_start..gap_end.min(self.source.len())];
+                            if gap.contains('\n') {
+                                break;
+                            }
+                        }
+                    }
                     self.consume();
                     let mut args = Vec::new();
                     while !self.at(Token::RParen) && !self.at_eof() {
@@ -513,6 +544,35 @@ impl<'a> Parser<'a> {
                 _ => break,
             }
         }
+
+        // Space-separated call after a bare dotted path.
+        // Only apply when the previous token was an identifier — that means the
+        // chain ended with `.ident`, not with `)` from a parenthesized group.
+        let prev_is_ident = self.pos > 0 && matches!(
+            self.tokens[self.pos - 1].token,
+            Token::IdentPlain | Token::Ident
+        );
+
+        if prev_is_ident
+            && matches!(e, AstNode::FieldAccess { .. })
+            && self.starts_positional_arg() {
+            let mut args = Vec::new();
+            while self.starts_positional_arg() {
+                args.push(self.call_arg());
+            }
+            while self.at(Token::Comma) {
+                self.consume();
+                if self.starts_positional_arg() {
+                    args.push(self.call_arg());
+                }
+            }
+            e = AstNode::Call {
+                span: self.span(),
+                callee: Box::new(e),
+                args,
+            };
+        }
+
         e
     }
 
@@ -654,8 +714,29 @@ impl<'a> Parser<'a> {
                 | Token::Int | Token::Float | Token::IntHex | Token::IntBin | Token::IntOct
                 | Token::String | Token::RawString | Token::MultiLineString
                 | Token::True | Token::False | Token::None_
-                | Token::LBracket | Token::LBrace
-                | Token::Sub | Token::Not | Token::Bang),
+                | Token::LBracket | Token::LBrace | Token::LParen),
+        }
+    }
+
+    /// Like `looks_like_arg`, but excludes `{` because after a field access
+    /// a `{` is a block start (e.g. `if $x.y { ... }`), not a dict literal arg.
+    #[inline]
+    fn starts_positional_arg(&self) -> bool {
+        match self.current().map(|t| &t.token) {
+            None => false,
+            Some(Token::Ident) => {
+                !matches!(self.tokens.get(self.pos + 1).map(|t| &t.token),
+                    Some(Token::Assign) | Some(Token::Semi) | Some(Token::Colon)
+                    | Some(Token::CoalesceAssign) | Some(Token::AddAssign)
+                    | Some(Token::SubAssign) | Some(Token::MulAssign) | Some(Token::DivAssign))
+            }
+            Some(t) => matches!(t,
+                Token::Arr | Token::Str | Token::Fn | Token::Dict
+                | Token::Bool | Token::Any
+                | Token::Int | Token::Float | Token::IntHex | Token::IntBin | Token::IntOct
+                | Token::String | Token::RawString | Token::MultiLineString
+                | Token::True | Token::False | Token::None_
+                | Token::LBracket),
         }
     }
 
@@ -673,6 +754,6 @@ impl<'a> Parser<'a> {
     }
 }
 
-pub fn parse(tokens: &[TokenWithText], file: &str) -> Vec<AstNode> {
-    Parser::new(tokens, file).program()
+pub fn parse(tokens: &[TokenWithText], source: &str) -> Vec<AstNode> {
+    Parser::new(tokens, source).program()
 }

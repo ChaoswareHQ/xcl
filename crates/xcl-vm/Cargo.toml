@@ -14,3 +14,4 @@ logos.workspace = true
 bumpalo.workspace = true
 smallvec.workspace = true
 hashbrown.workspace = true
+linkme.workspace = true
