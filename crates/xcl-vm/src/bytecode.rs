@@ -75,11 +75,7 @@ pub const OP_FOR_RANGE_NEXT:  u8 = 45;
 
 pub const OP_LOAD_LAMBDA:     u8 = 46;
 
-pub const OP_TRY_START:       u8 = 47;
-pub const OP_TRY_END:         u8 = 48;
-pub const OP_THROW:           u8 = 49;
-pub const OP_CATCH:           u8 = 50;
-pub const OP_COALESCE:        u8 = 51;
+pub const OP_COALESCE:        u8 = 47;
 
 /// Type test: check if a value is of a given type (by tag field or type index)
 pub const OP_TYPE_TEST:         u8 = 52;
@@ -210,7 +206,6 @@ impl Compiler {
                 self.emit(Instr::none(OP_RETURN));
             }
             AstNode::Break { .. } | AstNode::Continue { .. } => {}
-            AstNode::Throw { value, .. } => { self.node(value); self.emit(Instr::none(OP_THROW)); }
 
             AstNode::If { condition, then_branch, else_branch, .. } => {
                 self.node(condition);
@@ -271,27 +266,6 @@ impl Compiler {
                 self.emit(Instr::a1(OP_JUMP, start));
                 let end = self.ip();
                 self.patch_jump(j, end);
-            }
-
-            AstNode::Try { body, catch_body, catch_var, .. } => {
-                let cj = self.ip();
-                self.emit(Instr::a1(OP_TRY_START, 0));
-                for s in body { self.node(s); }
-                self.emit(Instr::none(OP_TRY_END));
-                let skip = self.ip();
-                self.emit(Instr::a1(OP_JUMP, 0));
-                let target = self.ip();
-                self.patch_jump(cj, target);
-                self.emit(Instr::none(OP_CATCH));
-                if let Some(c) = catch_body {
-                    if let Some(name) = catch_var {
-                        let slot = self.local(name);
-                        self.emit(Instr::a1(OP_STORE_LOCAL, slot));
-                    }
-                    for s in c { self.node(s); }
-                }
-                let end = self.ip();
-                self.patch_jump(skip, end);
             }
 
             AstNode::FunctionDef { body, name, params, .. } => {
@@ -452,18 +426,30 @@ impl Compiler {
                 self.emit(Instr::a2(OP_CALL, 2, 0));
             }
 
-            AstNode::Lambda { params, body, .. } => {
+            AstNode::Lambda { params, body, implicit_it, .. } => {
                 let mut sub = Compiler::new();
+                // If implicit_it is true, add "it" as the first parameter
+                if *implicit_it {
+                    sub.local("it");
+                }
                 for p in params { sub.local(p); }
                 sub.node(body);
                 sub.emit(Instr::none(OP_RETURN));
                 sub.emit(Instr::none(OP_HALT));
 
                 let bc = sub.compile(&[]);
+                // Build params list with implicit "it" prepended if needed
+                let all_params = if *implicit_it {
+                    let mut p = vec!["it".to_string()];
+                    p.extend(params.clone());
+                    p
+                } else {
+                    params.clone()
+                };
                 let f = FuncValue {
                     name: "lambda".into(),
                     bytecode: Some(Arc::new(bc)),
-                    params: params.clone(),
+                    params: all_params,
                     closure_captures: Vec::new(),
                     closure_env: Vec::new(),
                 };

@@ -50,7 +50,6 @@ struct Frame {
     range_cur: i64,
     range_end: i64,
     stack_base: u32,
-    catch_stack: Vec<(u32, u32)>,
     /// Deferred closures to run when this frame returns (LIFO order).
     defer_stack: Vec<Value>,
 }
@@ -197,7 +196,6 @@ impl VM {
             range_cur: 0,
             range_end: 0,
             stack_base: 0,
-            catch_stack: Vec::new(),
             defer_stack: Vec::new(),
         });
 
@@ -584,21 +582,6 @@ impl VM {
                 let r = self.pop(); let l = self.pop();
                 self.push(if l.is_nil() { r } else { l }); Action::Next
             }
-            OP_TRY_START => {
-                let depth = self.stack.len() as u32;
-                self.frames[top].catch_stack.push((i.a(), depth));
-                Action::Next
-            }
-            OP_TRY_END => { self.frames[top].catch_stack.pop(); Action::Next }
-            OP_THROW => {
-                let f = &mut self.frames[top];
-                if let Some((target, _)) = f.catch_stack.last().copied() {
-                    f.ip = target;
-                    Action::Next
-                } else { Action::Return }
-            }
-            OP_CATCH => Action::Next,
-
             OP_LOAD_LOCAL_LOAD_LOCAL => {
                 let l = &self.frames[top].locals;
                 let a = unsafe { *l.get_unchecked(i.a() as usize) };
@@ -666,7 +649,6 @@ impl VM {
             range_cur: 0,
             range_end: 0,
             stack_base: base,
-            catch_stack: Vec::new(),
             defer_stack: Vec::new(),
         });
         Action::PushFrame
@@ -710,7 +692,6 @@ impl VM {
             range_cur: 0,
             range_end: 0,
             stack_base,
-            catch_stack: Vec::new(),
             defer_stack: Vec::new(),
         });
 
@@ -886,10 +867,6 @@ fn opcode_name(op: u8) -> String {
         OP_FOR_RANGE_NEXT => "OP_FOR_RANGE_NEXT".to_string(),
         OP_LOAD_LAMBDA => "OP_LOAD_LAMBDA".to_string(),
         OP_COALESCE => "OP_COALESCE".to_string(),
-        OP_TRY_START => "OP_TRY_START".to_string(),
-        OP_TRY_END => "OP_TRY_END".to_string(),
-        OP_THROW => "OP_THROW".to_string(),
-        OP_CATCH => "OP_CATCH".to_string(),
         OP_LOAD_LOCAL_LOAD_LOCAL => "OP_LL_LL".to_string(),
         OP_ADD_LOCAL_LOCAL => "OP_ADD_LL".to_string(),
         OP_SUB_LOCAL_LOCAL => "OP_SUB_LL".to_string(),

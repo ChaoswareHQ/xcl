@@ -188,9 +188,6 @@ fn format_operand_a(op: u8, a: u32, bc: &Bytecode) -> String {
                 format!("{}", a)
             }
         }
-        OP_TRY_START => {
-            format!("{}", a)
-        }
         _ => {
             if a != 0 {
                 format!("{}", a)
@@ -277,10 +274,6 @@ fn opcode_name(op: u8) -> &'static str {
         OP_FOR_RANGE_START           => "OP_FOR_RANGE_START",
         OP_FOR_RANGE_NEXT            => "OP_FOR_RANGE_NEXT",
         OP_LOAD_LAMBDA               => "OP_LOAD_LAMBDA",
-        OP_TRY_START                 => "OP_TRY_START",
-        OP_TRY_END                   => "OP_TRY_END",
-        OP_THROW                     => "OP_THROW",
-        OP_CATCH                     => "OP_CATCH",
         OP_COALESCE                  => "OP_COALESCE",
         OP_TYPE_TEST                 => "OP_TYPE_TEST",
         // Superinstructions

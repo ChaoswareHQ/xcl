@@ -13,6 +13,9 @@ homepage.workspace = true
 xcl-macros.workspace = true
 xcl-vm.workspace = true
 linkme.workspace = true
+glam.workspace = true
+num-complex.workspace = true
+rand.workspace = true
 
 # [std.io]
 itoa.workspace = true

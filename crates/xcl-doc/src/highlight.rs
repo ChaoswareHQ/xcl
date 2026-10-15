@@ -1,6 +1,6 @@
 const KEYWORDS: &[&str] = &[
     "if", "else", "for", "in", "while", "break", "continue",
-    "try", "catch", "return", "true", "false", "none",
+    "return", "true", "false", "none",
     "and", "or", "not", "is", "as",
 ];
 

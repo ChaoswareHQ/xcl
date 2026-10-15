@@ -19,10 +19,6 @@ pub enum Token {
     Break,
     #[token("continue")]
     Continue,
-    #[token("try")]
-    Try,
-    #[token("catch")]
-    Catch,
     #[token("return")]
     Return,
     #[token("true")]
@@ -43,14 +39,8 @@ pub enum Token {
     #[token("as")]
     As,
 
-    #[token("arr")]
-    Arr,
-    #[token("str")]
-    Str,
     #[token("fn")]
     Fn,
-    #[token("dict")]
-    Dict,
     #[token("bool")]
     Bool,
     #[token("any")]

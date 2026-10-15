@@ -59,10 +59,8 @@ impl<'a> Parser<'a> {
             Some(Token::If) => self.if_expr(),
             Some(Token::For) => self.for_expr(),
             Some(Token::While) => self.while_expr(),
-            Some(Token::Try) => self.try_expr(),
             Some(Token::Ident) if self.lookahead_assign() => self.assign(),
             Some(Token::IdentPlain) if self.lookahead_fn_def() => self.fn_def(),
-            Some(Token::IdentPlain) if self.lookahead_throw() => self.throw_expr(),
             // Type definition: `Name = { ... }` or `Name = | Variant1 { ... } | Variant2 { ... }`
             Some(Token::IdentPlain) if self.lookahead_type_def() => self.type_def(),
             // Impl block: `Name is Trait { ... }`
@@ -87,11 +85,14 @@ impl<'a> Parser<'a> {
         self.consume(); // consume "defer"
         // Parse the block { ... }
         let statements = self.block();
+        // Check if body references $it
+        let uses_it = contains_ident(&statements, "it");
         // Wrap in: defer( Lambda { params: [], body: Block { statements } } )
         let lambda = AstNode::Lambda {
             span: span.clone(),
             params: vec![],
             body: Box::new(AstNode::Block { span: span.clone(), statements }),
+            implicit_it: uses_it,
         };
         AstNode::Call {
             span: span.clone(),
@@ -264,11 +265,6 @@ impl<'a> Parser<'a> {
             Some(Token::LBrace) | Some(Token::RArrow))
     }
 
-    #[inline]
-    fn lookahead_throw(&self) -> bool {
-        self.current().map(|t| t.text == "throw").unwrap_or(false)
-    }
-
     fn assign(&mut self) -> AstNode {
         let span = self.span();
         let name = self.consume().text.trim_start_matches('$').to_string();
@@ -331,13 +327,6 @@ impl<'a> Parser<'a> {
         AstNode::Return { span, value }
     }
 
-    fn throw_expr(&mut self) -> AstNode {
-        let span = self.span();
-        self.consume();
-        let value = Box::new(self.expr());
-        AstNode::Throw { span, value }
-    }
-
     fn if_expr(&mut self) -> AstNode {
         let span = self.span();
         self.consume();
@@ -371,21 +360,6 @@ impl<'a> Parser<'a> {
         let condition = Box::new(self.expr());
         let body = self.block();
         AstNode::While { span, condition, body }
-    }
-
-    fn try_expr(&mut self) -> AstNode {
-        let span = self.span();
-        self.consume();
-        let body = self.block();
-        let (catch_var, catch_body) = if self.at(Token::Catch) {
-            self.consume();
-            let var_tok = self.consume();
-            let v = if var_tok.token == Token::Ident {
-                Some(var_tok.text.trim_start_matches('$').to_string())
-            } else { None };
-            (v, Some(self.block()))
-        } else { (None, None) };
-        AstNode::Try { span, body, catch_var, catch_body }
     }
 
     fn fn_def(&mut self) -> AstNode {
@@ -685,7 +659,7 @@ impl<'a> Parser<'a> {
         self.expect(Token::RParen);
         self.expect(Token::Arrow);
         let body = Box::new(self.expr());
-        AstNode::Lambda { span, params, body }
+        AstNode::Lambda { span, params, body, implicit_it: false }
     }
 
     fn postfix(&mut self) -> AstNode {
@@ -891,10 +865,13 @@ impl<'a> Parser<'a> {
                         statements.push(self.statement());
                     }
                     self.expect(Token::RBrace);
+                    // Check if body references $it
+                    let uses_it = contains_ident(&statements, "it");
                     AstNode::Lambda {
                         span: span.clone(),
                         params: vec![],
                         body: Box::new(AstNode::Block { span, statements }),
+                        implicit_it: uses_it,
                     }
                 }
             }
@@ -932,7 +909,7 @@ impl<'a> Parser<'a> {
                     | Some(Token::Dot) | Some(Token::LBracket))
             }
             Some(t) => matches!(t,
-                Token::Arr | Token::Str | Token::Fn | Token::Dict
+                Token::Fn
                 | Token::Bool | Token::Any
                 | Token::Int | Token::Float | Token::IntHex | Token::IntBin | Token::IntOct
                 | Token::String | Token::RawString | Token::MultiLineString
@@ -960,8 +937,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Like `looks_like_arg`, but excludes `{` because after a field access
-    /// a `{` is a block start (e.g. `if $x.y { ... }`), not a dict literal arg.
+    /// Like `looks_like_arg`, but excludes `{` after control-flow keywords
+    /// (e.g. `if $x { ... }`). After a dotted path or $-ident call, `{` is a block-lambda arg.
     #[inline]
     fn starts_positional_arg(&self) -> bool {
         match self.current().map(|t| &t.token) {
@@ -973,12 +950,12 @@ impl<'a> Parser<'a> {
                     | Some(Token::SubAssign) | Some(Token::MulAssign) | Some(Token::DivAssign))
             }
             Some(t) => matches!(t,
-                Token::Arr | Token::Str | Token::Fn | Token::Dict
+                Token::Fn
                 | Token::Bool | Token::Any
                 | Token::Int | Token::Float | Token::IntHex | Token::IntBin | Token::IntOct
                 | Token::String | Token::RawString | Token::MultiLineString
                 | Token::True | Token::False | Token::None_
-                | Token::LBracket | Token::LParen),
+                | Token::LBracket | Token::LBrace | Token::LParen),
         }
     }
 
@@ -998,4 +975,57 @@ impl<'a> Parser<'a> {
 
 pub fn parse(tokens: &[TokenWithText], source: &str) -> Vec<AstNode> {
     Parser::new(tokens, source).program()
+}
+
+/// Recursively check if any AstNode in a list references an identifier with the given name.
+fn contains_ident(nodes: &[AstNode], name: &str) -> bool {
+    for node in nodes {
+        if node_has_ident(node, name) { return true; }
+    }
+    false
+}
+
+fn node_has_ident(node: &AstNode, name: &str) -> bool {
+    match node {
+        AstNode::Ident { name: n, .. } if n == name => true,
+        AstNode::Assign { value, .. } => node_has_ident(value, name),
+        AstNode::Return { value, .. } => value.as_ref().map_or(false, |v| node_has_ident(v, name)),
+        AstNode::If { condition, then_branch, else_branch, .. } => {
+            node_has_ident(condition, name)
+                || then_branch.iter().any(|n| node_has_ident(n, name))
+                || else_branch.as_ref().map_or(false, |b| b.iter().any(|n| node_has_ident(n, name)))
+        }
+        AstNode::For { iterable, body, .. } => {
+            node_has_ident(iterable, name) || body.iter().any(|n| node_has_ident(n, name))
+        }
+        AstNode::While { condition, body, .. } => {
+            node_has_ident(condition, name) || body.iter().any(|n| node_has_ident(n, name))
+        }
+        AstNode::Lambda { body, .. } => node_has_ident(body, name),
+        AstNode::Call { callee, args, .. } => {
+            node_has_ident(callee, name) || args.iter().any(|a| node_has_ident(&a.value, name))
+        }
+        AstNode::BinaryOp { left, right, .. } => {
+            node_has_ident(left, name) || node_has_ident(right, name)
+        }
+        AstNode::UnaryOp { operand, .. } => node_has_ident(operand, name),
+        AstNode::ArrayLit { elements, .. } => elements.iter().any(|e| node_has_ident(e, name)),
+        AstNode::DictLit { entries, .. } => entries.iter().any(|(_, v)| node_has_ident(v, name)),
+        AstNode::Index { target, index, .. } => {
+            node_has_ident(target, name) || node_has_ident(index, name)
+        }
+        AstNode::FieldAccess { target, .. } => node_has_ident(target, name),
+        AstNode::Range { start, end, .. } => {
+            start.as_ref().map_or(false, |s| node_has_ident(s, name))
+                || end.as_ref().map_or(false, |e| node_has_ident(e, name))
+        }
+        AstNode::Block { statements, .. } => statements.iter().any(|n| node_has_ident(n, name)),
+        AstNode::Pipeline { input, stages, .. } => {
+            node_has_ident(input, name)
+                || stages.iter().any(|s| s.arg.as_ref().map_or(false, |a| node_has_ident(a, name)))
+        }
+        AstNode::TypeTest { value, .. } => node_has_ident(value, name),
+        // Literals and other nodes don't contain identifiers
+        _ => false,
+    }
 }

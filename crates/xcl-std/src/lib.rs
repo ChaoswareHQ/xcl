@@ -1,9 +1,13 @@
+pub mod arr;
 pub mod defer;
+pub mod dict_ops;
 pub mod error;
 pub mod io;
 pub mod input;
 pub mod output;
 pub mod result;
+pub mod str_ops;
+pub mod math;
 
 use xcl_vm::{VM, Value};
 
@@ -514,5 +518,226 @@ defer { print "cleaned" }
 print "main"
 "#, &mut vm);
         assert!(r.is_nil());
+    }
+
+    // ── implicit $it tests ──
+
+    #[test]
+    fn implicit_it_block_lambda() {
+        // `{ $it * 2 }` creates a 1-param closure with implicit "it"
+        let mut vm = new_vm();
+        let r = evaluate(r#"$f = { $it * 2 }; $f 21"#, &mut vm);
+        assert_eq!(r.as_i48(), 42);
+    }
+
+    #[test]
+    fn implicit_it_arr_map() {
+        // `arr.map $a { $it + 1 }` — block-lambda with implicit $it
+        let mut vm = new_vm();
+        let r = evaluate(r#"$a = [1; 2; 3]; arr.map $a { $it + 1 }"#, &mut vm);
+        let arr = r.as_array().expect("result should be an array");
+        assert_eq!(arr[0].as_i48(), 2);
+        assert_eq!(arr[1].as_i48(), 3);
+        assert_eq!(arr[2].as_i48(), 4);
+    }
+
+    #[test]
+    fn implicit_it_arr_filter() {
+        // `arr.filter $a { $it > 1 }` — implicit $it in filter
+        let mut vm = new_vm();
+        let r = evaluate(r#"$a = [1; 2; 3; 4]; arr.filter $a { $it > 2 }"#, &mut vm);
+        let arr = r.as_array().expect("result should be an array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0].as_i48(), 3);
+        assert_eq!(arr[1].as_i48(), 4);
+    }
+
+    #[test]
+    fn implicit_it_defer() {
+        // `defer { $it }` — defer with implicit $it (no-op since defer passes no args)
+        let mut vm = new_vm();
+        let r = evaluate(r#"
+$x = 0
+defer { $x = 99 }
+print "done"
+"#, &mut vm);
+        assert!(r.is_nil());
+    }
+
+    #[test]
+    fn implicit_it_without_usage() {
+        // `{ 42 }` without $it should NOT add implicit param; call with ()
+        let mut vm = new_vm();
+        let r = evaluate(r#"$f = { 42 }; $f ()"#, &mut vm);
+        assert_eq!(r.as_i48(), 42);
+    }
+
+    #[test]
+    fn implicit_it_nested_call() {
+        // `$it` inside a call within block-lambda
+        let mut vm = new_vm();
+        let r = evaluate(r#"$a = [1; 2; 3]; arr.map $a { math.abs $it }"#, &mut vm);
+        let arr = r.as_array().expect("result should be an array");
+        assert_eq!(arr[0].as_f64(), 1.0);
+        assert_eq!(arr[1].as_f64(), 2.0);
+        assert_eq!(arr[2].as_f64(), 3.0);
+    }
+
+    // ── array tests ──
+
+    #[test]
+    fn arr_map_doubles() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"$a = [1; 2; 3]; $f = (($x) => $x * 2); arr.map $a $f"#, &mut vm);
+        let arr = r.as_array().expect("result should be an array");
+        assert_eq!(arr[0].as_i48(), 2);
+        assert_eq!(arr[1].as_i48(), 4);
+        assert_eq!(arr[2].as_i48(), 6);
+    }
+
+    #[test]
+    fn arr_filter_positives() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"$a = [-1; 2; -3; 4]; $f = (($x) => $x > 0); arr.filter $a $f"#, &mut vm);
+        let arr = r.as_array().expect("result should be an array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0].as_i48(), 2);
+        assert_eq!(arr[1].as_i48(), 4);
+    }
+
+    #[test]
+    fn arr_reduce_sum() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"$a = [1; 2; 3; 4]; $f = (($acc, $x) => $acc + $x); arr.reduce $a 0 $f"#, &mut vm);
+        assert_eq!(r.as_i48(), 10);
+    }
+
+    #[test]
+    fn arr_sort_ascending() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"$a = [3; 1; 4; 1; 5]; arr.sort $a"#, &mut vm);
+        let arr = r.as_array().expect("result should be an array");
+        assert_eq!(arr[0].as_i48(), 1);
+        assert_eq!(arr[1].as_i48(), 1);
+        assert_eq!(arr[2].as_i48(), 3);
+        assert_eq!(arr[3].as_i48(), 4);
+        assert_eq!(arr[4].as_i48(), 5);
+    }
+
+    #[test]
+    fn arr_sum() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"$a = [1; 2; 3; 4]; arr.sum $a"#, &mut vm);
+        assert_eq!(r.as_f64(), 10.0);
+    }
+
+    #[test]
+    fn arr_contains() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"$a = [1; 2; 3]; arr.contains $a 2"#, &mut vm);
+        assert_eq!(r.as_bool(), true);
+    }
+
+    #[test]
+    fn arr_first_last() {
+        let mut vm = new_vm();
+        let r1 = evaluate(r#"$a = [10; 20; 30]; arr.first $a"#, &mut vm);
+        assert_eq!(r1.as_i48(), 10);
+        let r2 = evaluate(r#"$a = [10; 20; 30]; arr.last $a"#, &mut vm);
+        assert_eq!(r2.as_i48(), 30);
+    }
+
+    #[test]
+    fn arr_unique() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"$a = [1; 2; 2; 3; 3; 3]; arr.unique $a"#, &mut vm);
+        let arr = r.as_array().expect("result should be an array");
+        assert_eq!(arr.len(), 3);
+    }
+
+    #[test]
+    fn arr_reverse() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"$a = [1; 2; 3]; arr.reverse $a"#, &mut vm);
+        let arr = r.as_array().expect("result should be an array");
+        assert_eq!(arr[0].as_i48(), 3);
+        assert_eq!(arr[2].as_i48(), 1);
+    }
+
+    // ── string tests ──
+
+    #[test]
+    fn str_upper() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"str.upper "hello""#, &mut vm);
+        assert_eq!(r.as_str(), Some("HELLO"));
+    }
+
+    #[test]
+    fn str_lower() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"str.lower "HELLO""#, &mut vm);
+        assert_eq!(r.as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn str_split() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"str.split "a,b,c" ",""#, &mut vm);
+        let arr = r.as_array().expect("result should be an array");
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0].as_str(), Some("a"));
+    }
+
+    #[test]
+    fn str_starts_with() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"str.starts_with "hello" "hel""#, &mut vm);
+        assert_eq!(r.as_bool(), true);
+    }
+
+    #[test]
+    fn str_replace() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"str.replace "hello world" "world" "xcl""#, &mut vm);
+        assert_eq!(r.as_str(), Some("hello xcl"));
+    }
+
+    #[test]
+    fn str_len() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"str.len "hello""#, &mut vm);
+        assert_eq!(r.as_i48(), 5);
+    }
+
+    // ── dict tests ──
+
+    #[test]
+    fn dict_keys() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"$d = { a: 1, b: 2 }; dict.keys $d"#, &mut vm);
+        let arr = r.as_array().expect("result should be an array");
+        assert_eq!(arr.len(), 2);
+    }
+
+    #[test]
+    fn dict_get() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"$d = { a: 42 }; dict.get $d "a""#, &mut vm);
+        assert_eq!(r.as_i48(), 42);
+    }
+
+    #[test]
+    fn dict_has() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"$d = { a: 1 }; dict.has $d "a""#, &mut vm);
+        assert_eq!(r.as_bool(), true);
+    }
+
+    #[test]
+    fn dict_len() {
+        let mut vm = new_vm();
+        let r = evaluate(r#"$d = { a: 1, b: 2, c: 3 }; dict.len $d"#, &mut vm);
+        assert_eq!(r.as_i48(), 3);
     }
 }

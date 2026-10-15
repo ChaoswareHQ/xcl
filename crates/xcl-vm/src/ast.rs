@@ -6,15 +6,13 @@ pub enum AstNode {
     Return { span: Span, value: Option<Box<AstNode>> },
     Break { span: Span },
     Continue { span: Span },
-    Throw { span: Span, value: Box<AstNode> },
 
     If { span: Span, condition: Box<AstNode>, then_branch: Vec<AstNode>, else_branch: Option<Vec<AstNode>> },
     For { span: Span, variable: String, iterable: Box<AstNode>, body: Vec<AstNode> },
     While { span: Span, condition: Box<AstNode>, body: Vec<AstNode> },
-    Try { span: Span, body: Vec<AstNode>, catch_var: Option<String>, catch_body: Option<Vec<AstNode>> },
 
     FunctionDef { span: Span, name: String, params: Vec<Param>, return_type: Option<String>, body: Vec<AstNode> },
-    Lambda { span: Span, params: Vec<String>, body: Box<AstNode> },
+    Lambda { span: Span, params: Vec<String>, body: Box<AstNode>, implicit_it: bool },
     Call { span: Span, callee: Box<AstNode>, args: Vec<CallArg> },
 
     Ident { span: Span, name: String },
