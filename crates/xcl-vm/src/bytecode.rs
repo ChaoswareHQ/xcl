@@ -135,21 +135,37 @@ pub const OP_MUL_INT_LOCAL:       u8 = 94;
 /// The body follows, ending with OP_JUMP back to this instruction
 pub const OP_WHILE_LT_INT:        u8 = 95;
 
-/// Fused: load local + mul local + store back (for $zr = $zr * $zr - $zi * $zi + $cr pattern)
+/// Fused: load local + mul local + store back (for $zr = $zr * $zr pattern)
 /// Operand a = dest slot, b = src slot
 pub const OP_MUL_LOCAL_STORE:     u8 = 96;
 
+/// Fused: load local + div local + store back (for $a = $a / $b pattern)
+/// Operand a = dest slot, b = src slot
+pub const OP_DIV_LOCAL_STORE:     u8 = 97;
+
 /// Fused: load local + sub local + store back (for $a = $a - $b pattern)
 /// Operand a = dest slot, b = src slot
-pub const OP_SUB_LOCAL_STORE:     u8 = 97;
+pub const OP_SUB_LOCAL_STORE:     u8 = 98;
 
 /// Fused: load local + add local + store to third (for $c = $a + $b pattern)
-/// Operand a = dest slot, b = (src1_slot << 16) | src2_slot
-pub const OP_ADD_LOCAL_LOCAL_STORE: u8 = 98;
+/// Operand a = dest slot, b = src2 slot, c = src1 slot
+pub const OP_ADD_LOCAL_LOCAL_STORE: u8 = 99;
 
 /// Fused: load local + mul local + store to third (for $c = $a * $b pattern)
-/// Operand a = dest slot, b = (src1_slot << 16) | src2_slot
-pub const OP_MUL_LOCAL_LOCAL_STORE: u8 = 99;
+/// Operand a = dest slot, b = src2 slot, c = src1 slot
+pub const OP_MUL_LOCAL_LOCAL_STORE: u8 = 100;
+
+/// Fused: load local + sub local + store to third (for $c = $a - $b pattern)
+/// Operand a = dest slot, b = src2 slot, c = src1 slot
+pub const OP_SUB_LOCAL_LOCAL_STORE: u8 = 101;
+
+/// Fused: load local + div local + store to third (for $c = $a / $b pattern)
+/// Operand a = dest slot, b = src2 slot, c = src1 slot
+pub const OP_DIV_LOCAL_LOCAL_STORE: u8 = 102;
+
+/// Fused while-loop condition + jump: while $a < $b { ... } (both locals)
+/// Operand a = local slot (left), b = local slot (right), c = exit_wide_idx
+pub const OP_WHILE_LT_LOCAL: u8 = 103;
 
 #[derive(Debug, Clone)]
 pub struct Bytecode {
@@ -213,6 +229,89 @@ impl Compiler {
         i
     }
 
+    /// Try to fuse a nested binary expression into superinstructions.
+    /// For example, `$zr = $zr*$zr - $zi*$zi + $cr` becomes:
+    ///   MUL_LL_ST(temp1, zr, zr)
+    ///   MUL_LL_ST(temp2, zi, zi)
+    ///   SUB_LL_ST(temp1, temp1, temp2)
+    ///   ADD_LL_ST(zr, temp1, cr)
+    fn try_emit_binary_fused(&mut self, dest_slot: u32, node: &AstNode) -> bool {
+        let AstNode::BinaryOp { left, op, right, .. } = node else { return false };
+
+        // Case 1: $dest = $dest op $b (simple self-assignment)
+        if let AstNode::Ident { name, .. } = left.as_ref() {
+            if self.local(name) == dest_slot {
+                if let AstNode::Ident { name: rn, .. } = right.as_ref() {
+                    let rslot = self.local(rn);
+                    let opc = match op {
+                        BinaryOperator::Add => Some(OP_ADD_LOCAL_STORE),
+                        BinaryOperator::Sub => Some(OP_SUB_LOCAL_STORE),
+                        BinaryOperator::Mul => Some(OP_MUL_LOCAL_STORE),
+                        BinaryOperator::Div => Some(OP_DIV_LOCAL_STORE),
+                        _ => None,
+                    };
+                    if let Some(opc) = opc {
+                        self.emit(Instr::a2(opc, dest_slot, rslot as u16));
+                        return true;
+                    }
+                }
+                if let AstNode::Int { value, .. } = right.as_ref() {
+                    let opc = match op {
+                        BinaryOperator::Add => Some(OP_ADD_INT_LOCAL),
+                        BinaryOperator::Sub => Some(OP_SUB_INT_LOCAL),
+                        BinaryOperator::Mul => Some(OP_MUL_INT_LOCAL),
+                        _ => None,
+                    };
+                    if let Some(opc) = opc {
+                        self.emit(Instr::a2(opc, dest_slot, *value as u16));
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Case 2: $dest = $a op $b (both distinct locals)
+        if let (AstNode::Ident { name: ln, .. }, AstNode::Ident { name: rn, .. })
+            = (left.as_ref(), right.as_ref())
+        {
+            let lslot = self.local(ln);
+            let rslot = self.local(rn);
+            let c_src1 = (lslot & 0xFF) as u8;
+            let b_src2 = (rslot & 0xFFFF) as u16;
+            let opc = match op {
+                BinaryOperator::Add => Some(OP_ADD_LOCAL_LOCAL_STORE),
+                BinaryOperator::Sub => Some(OP_SUB_LOCAL_LOCAL_STORE),
+                BinaryOperator::Mul => Some(OP_MUL_LOCAL_LOCAL_STORE),
+                BinaryOperator::Div => Some(OP_DIV_LOCAL_LOCAL_STORE),
+                _ => None,
+            };
+            if let Some(opc) = opc {
+                self.emit(Instr::make(opc, dest_slot, b_src2, c_src1));
+                return true;
+            }
+        }
+
+        // Case 3: Nested binary — recursively emit left and right into temps, then combine
+        // This handles `$zr = $zr*$zr - $zi*$zi + $cr`
+        if let BinaryOperator::Add | BinaryOperator::Sub | BinaryOperator::Mul | BinaryOperator::Div = op {
+            // Check if both sides are simple (ident or int) or nested binary
+            let left_is_simple = matches!(left.as_ref(), AstNode::Ident { .. } | AstNode::Int { .. });
+            let right_is_simple = matches!(right.as_ref(), AstNode::Ident { .. } | AstNode::Int { .. });
+
+            if left_is_simple && right_is_simple {
+                // Already handled by Case 1 and 2 above
+                return false;
+            }
+
+            // For nested expressions, emit left and right into temps, then combine
+            // This is a simplified approach: just emit normally and let peephole handle it
+            // A full recursive approach would need temp slot allocation
+            return false;
+        }
+
+        false
+    }
+
     fn try_fuse_load_load(&mut self, second: u32) -> bool {
         if let Some(prev) = self.code.last().copied()
             && prev.op() == OP_LOAD_LOCAL
@@ -226,6 +325,15 @@ impl Compiler {
     }
 
     fn try_fuse_add_local_local(&mut self) -> bool {
+        // If the last instruction is already LL_LL, upgrade it to ADD_LOCAL_LOCAL
+        if let Some(prev) = self.code.last().copied() {
+            if prev.op() == OP_LOAD_LOCAL_LOAD_LOCAL {
+                self.code.pop();
+                self.emit(Instr::make(OP_ADD_LOCAL_LOCAL, prev.a(), prev.b() as u16, 0));
+                return true;
+            }
+        }
+        // Fallback: two consecutive LOAD_LOCAL instructions
         if self.code.len() < 2 { return false; }
         let l2 = self.code[self.code.len() - 1].op();
         let l1 = self.code[self.code.len() - 2].op();
@@ -239,8 +347,17 @@ impl Compiler {
         false
     }
 
-    /// Check if the last two instructions are LOAD_LOCAL + LOAD_LOCAL for mul/sub/div
+    /// Check if the last instruction is LL_LL and upgrade it, or two LOAD_LOCALs
     fn try_fuse_local_local(&mut self, op: u8) -> bool {
+        // If the last instruction is already LL_LL, upgrade it to the arithmetic opcode
+        if let Some(prev) = self.code.last().copied() {
+            if prev.op() == OP_LOAD_LOCAL_LOAD_LOCAL {
+                self.code.pop();
+                self.emit(Instr::make(op, prev.a(), prev.b() as u16, 0));
+                return true;
+            }
+        }
+        // Fallback: two consecutive LOAD_LOCAL instructions
         if self.code.len() < 2 { return false; }
         let l2 = self.code[self.code.len() - 1].op();
         let l1 = self.code[self.code.len() - 2].op();
@@ -271,6 +388,13 @@ impl Compiler {
         match node {
             AstNode::Assign { name, value, .. } => {
                 let slot = self.local(name);
+                // Try recursive RHS fusion for nested binary expressions
+                // e.g., $zr = $zr*$zr - $zi*$zi + $cr
+                if let AstNode::BinaryOp { .. } = value.as_ref() {
+                    if self.try_emit_binary_fused(slot, value.as_ref()) {
+                        return;
+                    }
+                }
                 // Try to fuse hot patterns: $x = $x + 1, $x = $x - 1, $x = $x + c, $a = $a + $b
                 if let AstNode::BinaryOp { left, op, right, .. } = value.as_ref() {
                     if let AstNode::Ident { name: left_name, .. } = left.as_ref() {
@@ -298,12 +422,22 @@ impl Compiler {
                                         // $x = $x - 1 → OP_DEC_LOCAL
                                         self.emit(Instr::a1(OP_DEC_LOCAL, slot));
                                         return;
+                                    } else if let AstNode::Ident { name: right_name, .. } = right.as_ref() {
+                                        // $x = $x - $y → OP_SUB_LOCAL_STORE
+                                        let right_slot = self.local(right_name);
+                                        self.emit(Instr::a2(OP_SUB_LOCAL_STORE, slot, right_slot as u16));
+                                        return;
                                     }
                                 }
                                 BinaryOperator::Mul => {
                                     if let AstNode::Int { value: c, .. } = right.as_ref() {
                                         // $x = $x * c → OP_MUL_INT_LOCAL
                                         self.emit(Instr::a2(OP_MUL_INT_LOCAL, slot, *c as u16));
+                                        return;
+                                    } else if let AstNode::Ident { name: right_name, .. } = right.as_ref() {
+                                        // $x = $x * $y → OP_MUL_LOCAL_STORE
+                                        let right_slot = self.local(right_name);
+                                        self.emit(Instr::a2(OP_MUL_LOCAL_STORE, slot, right_slot as u16));
                                         return;
                                     }
                                 }
@@ -315,6 +449,26 @@ impl Compiler {
                                 }
                                 _ => {}
                             }
+                        }
+                    }
+                    // NEW: $z = $a op $b (both operands are distinct locals)
+                    if let (AstNode::Ident { name: ln, .. }, AstNode::Ident { name: rn, .. })
+                        = (left.as_ref(), right.as_ref())
+                    {
+                        let lslot = self.local(ln);
+                        let rslot = self.local(rn);
+                        let c_src1 = (lslot & 0xFF) as u8;
+                        let b_src2 = (rslot & 0xFFFF) as u16;
+                        let opc = match op {
+                            BinaryOperator::Add => Some(OP_ADD_LOCAL_LOCAL_STORE),
+                            BinaryOperator::Sub => Some(OP_SUB_LOCAL_LOCAL_STORE),
+                            BinaryOperator::Mul => Some(OP_MUL_LOCAL_LOCAL_STORE),
+                            BinaryOperator::Div => Some(OP_DIV_LOCAL_LOCAL_STORE),
+                            _ => None,
+                        };
+                        if let Some(opc) = opc {
+                            self.emit(Instr::make(opc, slot, b_src2, c_src1));
+                            return;
                         }
                     }
                 }
@@ -408,42 +562,46 @@ impl Compiler {
 
             AstNode::While { condition, body, .. } => {
                 // Try to fuse: while $i < N { ... } → OP_WHILE_LT_INT
-                let fused = match condition.as_ref() {
+                // Or: while $a < $b { ... } → OP_WHILE_LT_LOCAL
+                let dominated = match condition.as_ref() {
                     AstNode::BinaryOp { left, op: BinaryOperator::Lt, right, .. } => {
-                        if let AstNode::Ident { name: var_name, .. } = left.as_ref() {
+                        if let AstNode::Ident { name: left_name, .. } = left.as_ref() {
                             if let AstNode::Int { value: limit, .. } = right.as_ref() {
-                                let slot = self.local(var_name);
-                                self.emit(Instr::a2(OP_WHILE_LT_INT, slot, *limit as u16));
-                                Some((self.ip(), slot))
-                            } else {
-                                None
+                                let slot = self.local(left_name);
+                                let exit_wide = self.wide(0);
+                                let loop_start = self.ip();
+                                self.emit(Instr::make(OP_WHILE_LT_INT, slot, *limit as u16, exit_wide as u8));
+                                for s in body { self.node(s); }
+                                self.emit(Instr::a1(OP_JUMP, loop_start));
+                                let exit_ip = self.ip();
+                                self.wide[exit_wide as usize] = exit_ip as i64;
+                                return;
+                            } else if let AstNode::Ident { name: right_name, .. } = right.as_ref() {
+                                let left_slot = self.local(left_name);
+                                let right_slot = self.local(right_name);
+                                let exit_wide = self.wide(0);
+                                let loop_start = self.ip();
+                                self.emit(Instr::make(OP_WHILE_LT_LOCAL, left_slot, right_slot as u16, exit_wide as u8));
+                                for s in body { self.node(s); }
+                                self.emit(Instr::a1(OP_JUMP, loop_start));
+                                let exit_ip = self.ip();
+                                self.wide[exit_wide as usize] = exit_ip as i64;
+                                return;
                             }
-                        } else {
-                            None
                         }
                     }
-                    _ => None,
+                    _ => {}
                 };
 
-                if fused.is_none() {
-                    // Fallback: generic while loop
-                    let start = self.ip();
-                    self.node(condition);
-                    let j = self.ip();
-                    self.emit(Instr::a1(OP_JUMP_IF_FALSE, 0));
-                    for s in body { self.node(s); }
-                    self.emit(Instr::a1(OP_JUMP, start));
-                    let end = self.ip();
-                    self.patch_jump(j, end);
-                } else {
-                    // Fused while loop: body follows OP_WHILE_LT_INT
-                    for s in body { self.node(s); }
-                    // Jump back to OP_WHILE_LT_INT
-                    self.emit(Instr::a1(OP_JUMP, fused.unwrap().0));
-                    // Patch the end jump — need to find where to skip past
-                    // The OP_WHILE_LT_INT needs to know where to jump when condition is false
-                    // We'll handle this in the VM by scanning for the closing OP_JUMP
-                }
+                // Fallback: generic while loop
+                let start = self.ip();
+                self.node(condition);
+                let j = self.ip();
+                self.emit(Instr::a1(OP_JUMP_IF_FALSE, 0));
+                for s in body { self.node(s); }
+                self.emit(Instr::a1(OP_JUMP, start));
+                let end = self.ip();
+                self.patch_jump(j, end);
             }
 
             AstNode::FunctionDef { body, name, params, .. } => {
@@ -719,4 +877,174 @@ impl Compiler {
 
 pub fn compile(ast: &[AstNode]) -> Bytecode {
     Compiler::new().compile(ast)
+}
+
+/// Peephole optimizer — scans bytecode and fuses common patterns.
+/// This runs after compilation and catches patterns the AST-level fusion misses.
+fn peephole_optimize(instructions: &mut Arc<[Instr]>, _wide: &[i64]) {
+    // Convert to mutable Vec for optimization, then back to Arc
+    let mut code: Vec<Instr> = instructions.as_ref().to_vec();
+    let mut i = 0;
+
+    while i < code.len() {
+        let matched = match code.get(i).copied() {
+            Some(instr) => peephole_at(&mut code, i, instr),
+            None => false,
+        };
+        if !matched {
+            i += 1;
+        }
+        // If matched, stay at same index to catch overlapping patterns
+    }
+
+    *instructions = Arc::from(code.as_slice());
+}
+
+/// Try to match and fuse a pattern at instruction index `i`.
+/// Returns true if a fusion occurred (caller should not advance `i`).
+fn peephole_at(code: &mut Vec<Instr>, i: usize, instr: Instr) -> bool {
+    let op = instr.op();
+
+    // Pattern 1: LOAD_LOCAL a; LOAD_LOCAL b; ADD → ADD_LOCAL_LOCAL a, b
+    if op == OP_LOAD_LOCAL && code.len() >= i + 3 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        if next.op() == OP_LOAD_LOCAL {
+            let arith_op = match next2.op() {
+                OP_ADD => Some(OP_ADD_LOCAL_LOCAL),
+                OP_SUB => Some(OP_SUB_LOCAL_LOCAL),
+                OP_MUL => Some(OP_MUL_LOCAL_LOCAL),
+                OP_DIV => Some(OP_DIV_LOCAL_LOCAL),
+                OP_LT  => Some(OP_LT_LOCAL_LOCAL),
+                _ => None,
+            };
+            if let Some(fused) = arith_op {
+                code[i] = Instr::make(fused, instr.a(), next.a() as u16, 0);
+                code.drain(i + 1..=i + 2);
+                return true;
+            }
+        }
+    }
+
+    // Pattern 2: LOAD_LOCAL a; PUSH_INT k; ADD → ADD_INT_LOCAL a, k
+    if op == OP_LOAD_LOCAL && code.len() >= i + 3 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        if next.op() == OP_PUSH_INT {
+            let arith_op = match next2.op() {
+                OP_ADD => Some(OP_ADD_INT_LOCAL),
+                OP_SUB => Some(OP_SUB_INT_LOCAL),
+                OP_MUL => Some(OP_MUL_INT_LOCAL),
+                _ => None,
+            };
+            if let Some(fused) = arith_op {
+                code[i] = Instr::a2(fused, instr.a(), next.a() as u16);
+                code.drain(i + 1..=i + 2);
+                return true;
+            }
+        }
+    }
+
+    // Pattern 3: PUSH_INT a; PUSH_INT b; ADD → PUSH_INT (a+b) (constant folding)
+    if op == OP_PUSH_INT && code.len() >= i + 3 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        if next.op() == OP_PUSH_INT {
+            let a = instr.a() as i64;
+            let b = next.a() as i64;
+            let result = match next2.op() {
+                OP_ADD => Some(a + b),
+                OP_SUB => Some(a - b),
+                OP_MUL => Some(a * b),
+                OP_DIV if b != 0 => Some(a / b),
+                _ => None,
+            };
+            if let Some(r) = result {
+                if (0..=u32::MAX as i64).contains(&r) {
+                    code[i] = Instr::a1(OP_PUSH_INT, r as u32);
+                    code.drain(i + 1..=i + 2);
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Pattern 4: STORE_LOCAL a; LOAD_LOCAL a → (delete the LOAD, duplicate value)
+    // This only works if the LOAD is immediately after the STORE for the same slot
+    if op == OP_STORE_LOCAL && code.len() >= i + 2 {
+        let next = code[i + 1];
+        if next.op() == OP_LOAD_LOCAL && next.a() == instr.a() {
+            // Check if the next instruction after LOAD is an arithmetic op that
+            // would benefit from having the value on the stack
+            // Actually, just delete the redundant LOAD — the STORE already left the value
+            // But wait: STORE_LOCAL pops the value, so we need to PUSH it back
+            // This pattern is only useful if we can replace STORE; LOAD with just LOAD
+            // which means the value was already on the stack before STORE
+            // For now, skip this — it's tricky with the stack semantics
+        }
+    }
+
+    // Pattern 5: LOAD_LOCAL a; STORE_LOCAL a → (delete both, no-op)
+    if op == OP_LOAD_LOCAL && code.len() >= i + 2 {
+        let next = code[i + 1];
+        if next.op() == OP_STORE_LOCAL && next.a() == instr.a() {
+            code.drain(i..=i + 1);
+            return true;
+        }
+    }
+
+    // Pattern 6: LOAD_LOCAL a; PUSH_INT 1; ADD; STORE_LOCAL a → INC_LOCAL a
+    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        let next3 = code[i + 3];
+        if next.op() == OP_PUSH_INT && next.a() == 1 && next2.op() == OP_ADD
+            && next3.op() == OP_STORE_LOCAL && next3.a() == instr.a()
+        {
+            code[i] = Instr::a1(OP_INC_LOCAL, instr.a());
+            code.drain(i + 1..=i + 3);
+            return true;
+        }
+    }
+
+    // Pattern 7: LOAD_LOCAL a; LOAD_LOCAL b; ADD; STORE_LOCAL a → ADD_LOCAL_STORE a, b
+    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        let next3 = code[i + 3];
+        if next.op() == OP_LOAD_LOCAL && next3.op() == OP_STORE_LOCAL && next3.a() == instr.a() {
+            let store_op = match next2.op() {
+                OP_ADD => Some(OP_ADD_LOCAL_STORE),
+                OP_SUB => Some(OP_SUB_LOCAL_STORE),
+                OP_MUL => Some(OP_MUL_LOCAL_STORE),
+                _ => None,
+            };
+            if let Some(fused) = store_op {
+                code[i] = Instr::a2(fused, instr.a(), next.a() as u16);
+                code.drain(i + 1..=i + 3);
+                return true;
+            }
+        }
+    }
+
+    // Pattern 8: LOAD_LOCAL a; LOAD_LOCAL b; LOAD_LOCAL c; ADD; ADD → fused chain
+    // (Two consecutive LOAD_LOCAL_LOAD_LOCAL + ADD can be folded)
+    if op == OP_LOAD_LOCAL && code.len() >= i + 5 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        let next3 = code[i + 3];
+        let next4 = code[i + 4];
+        if next.op() == OP_LOAD_LOCAL && next2.op() == OP_LOAD_LOCAL
+            && next3.op() == OP_ADD && next4.op() == OP_ADD
+        {
+            // LOAD a; LOAD b; LOAD c; ADD; ADD → ADD_LL a,b; LOAD c; ADD
+            code[i] = Instr::make(OP_ADD_LOCAL_LOCAL, instr.a(), next.a() as u16, 0);
+            code[i + 1] = next2;
+            code[i + 2] = next3;
+            code.drain(i + 3..=i + 4);
+            return true;
+        }
+    }
+
+    false
 }

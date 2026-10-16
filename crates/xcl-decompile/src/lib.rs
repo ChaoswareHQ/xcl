@@ -107,7 +107,7 @@ fn decompile_instruction(out: &mut String, instr: &Instr, ip: usize, bc: &Byteco
     // Format operand a based on opcode
     let a_str = format_operand_a(op, a, b, bc);
     let b_str = format_operand_b(op, b, bc);
-    let c_str = if c != 0 { format!("{}", c) } else { String::new() };
+    let c_str = format_operand_c(op, c, bc);
 
     let op_name = opcode_name(op);
     let args = match (a_str.as_str(), b_str.as_str(), c_str.as_str()) {
@@ -208,11 +208,17 @@ fn format_operand_a(op: u8, a: u32, b: u16, bc: &Bytecode) -> String {
             let a_name = bc.local_names.get(a as usize).map(|s| s.as_ref()).unwrap_or("?");
             format!("{} ({}) < {}", a, a_name, b as i32 as i64)
         }
-        OP_SUB_LOCAL_STORE => {
+        OP_WHILE_LT_LOCAL => {
+            let a_name = bc.local_names.get(a as usize).map(|s| s.as_ref()).unwrap_or("?");
+            let b_name = bc.local_names.get(b as usize).map(|s| s.as_ref()).unwrap_or("?");
+            format!("{} ({}) < {} ({})", a, a_name, b, b_name)
+        }
+        OP_SUB_LOCAL_STORE | OP_DIV_LOCAL_STORE => {
             let a_name = bc.local_names.get(a as usize).map(|s| s.as_ref()).unwrap_or("?");
             format!("{} ({})", a, a_name)
         }
-        OP_ADD_LOCAL_LOCAL_STORE | OP_MUL_LOCAL_LOCAL_STORE => {
+        OP_ADD_LOCAL_LOCAL_STORE | OP_MUL_LOCAL_LOCAL_STORE
+        | OP_SUB_LOCAL_LOCAL_STORE | OP_DIV_LOCAL_LOCAL_STORE => {
             let a_name = bc.local_names.get(a as usize).map(|s| s.as_ref()).unwrap_or("?");
             format!("{} ({})", a, a_name)
         }
@@ -271,13 +277,12 @@ fn format_operand_b(op: u8, b: u16, bc: &Bytecode) -> String {
             let b_name = bc.local_names.get(b as usize).map(|s| s.as_ref()).unwrap_or("?");
             format!("{} ({})", b, b_name)
         }
-        OP_ADD_LOCAL_LOCAL_STORE | OP_MUL_LOCAL_LOCAL_STORE => {
-            let b_val = b as u32;
-            let src1 = (b_val >> 16) as usize;
-            let src2 = (b_val & 0xFFFF) as usize;
-            let n1 = bc.local_names.get(src1).map(|s| s.as_ref()).unwrap_or("?");
+        OP_ADD_LOCAL_LOCAL_STORE | OP_MUL_LOCAL_LOCAL_STORE
+        | OP_SUB_LOCAL_LOCAL_STORE | OP_DIV_LOCAL_LOCAL_STORE => {
+            // b = src2 slot index
+            let src2 = b as usize;
             let n2 = bc.local_names.get(src2).map(|s| s.as_ref()).unwrap_or("?");
-            format!("{} ({}) {} ({})", src1, n1, src2, n2)
+            format!("{} ({})", src2, n2)
         }
         OP_MUL_LOCAL_STORE => {
             let b_name = bc.local_names.get(b as usize).map(|s| s.as_ref()).unwrap_or("?");
@@ -289,6 +294,26 @@ fn format_operand_b(op: u8, b: u16, bc: &Bytecode) -> String {
         _ => {
             if b != 0 {
                 format!("{}", b)
+            } else {
+                String::new()
+            }
+        }
+    }
+}
+
+/// Format operand c based on the opcode context.
+fn format_operand_c(op: u8, c: u8, bc: &Bytecode) -> String {
+    match op {
+        // c = src1 slot index for 3-operand store opcodes
+        OP_ADD_LOCAL_LOCAL_STORE | OP_MUL_LOCAL_LOCAL_STORE
+        | OP_SUB_LOCAL_LOCAL_STORE | OP_DIV_LOCAL_LOCAL_STORE => {
+            let src1 = c as usize;
+            let n1 = bc.local_names.get(src1).map(|s| s.as_ref()).unwrap_or("?");
+            format!("{} ({})", src1, n1)
+        }
+        _ => {
+            if c != 0 {
+                format!("{}", c)
             } else {
                 String::new()
             }
@@ -375,10 +400,14 @@ fn opcode_name(op: u8) -> &'static str {
         OP_SUB_INT_LOCAL             => "OP_SUB_INT_LOCAL",
         OP_MUL_INT_LOCAL             => "OP_MUL_INT_LOCAL",
         OP_WHILE_LT_INT              => "OP_WHILE_LT_INT",
+        OP_WHILE_LT_LOCAL            => "OP_WHILE_LT_LOCAL",
         OP_MUL_LOCAL_STORE           => "OP_MUL_LOCAL_STORE",
+        OP_DIV_LOCAL_STORE           => "OP_DIV_LOCAL_STORE",
         OP_SUB_LOCAL_STORE           => "OP_SUB_LOCAL_STORE",
         OP_ADD_LOCAL_LOCAL_STORE     => "OP_ADD_LOCAL_LOCAL_STORE",
         OP_MUL_LOCAL_LOCAL_STORE     => "OP_MUL_LOCAL_LOCAL_STORE",
+        OP_SUB_LOCAL_LOCAL_STORE     => "OP_SUB_LOCAL_LOCAL_STORE",
+        OP_DIV_LOCAL_LOCAL_STORE     => "OP_DIV_LOCAL_LOCAL_STORE",
         _                            => "OP_UNKNOWN",
     }
 }

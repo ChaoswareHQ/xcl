@@ -884,32 +884,21 @@ impl VM {
             }
 
             // ── WHILE_LT_INT: while $a < b { body } (single-opcode while-loop) ──
-            // Operand a = local slot, b = int constant
-            // If locals[a] < b, continue to body. Otherwise, skip past body.
+            // Operand a = local slot, b = int constant, c = exit_wide_idx
+            // If locals[a] < b, continue to body. Otherwise, jump to exit_ip from wide[c].
             OP_WHILE_LT_INT => {
                 let f = &mut self.frames[top];
                 let slot = i.a() as usize;
                 let limit = i.b() as i32 as i64;
+                let exit_wide_idx = i.c() as usize;
                 let v = unsafe { *f.locals.get_unchecked(slot) };
                 let val = if v.is_int() { v.as_i48() } else { v.as_int() };
                 if val < limit {
-                    // Continue to loop body
                     Action::Next
                 } else {
-                    // Skip past body — find the closing OP_JUMP
-                    let loop_ip = f.ip;
-                    f.ip += 1;
-                    let code = &f.code.instructions;
-                    let mut scan = f.ip as usize;
-                    while scan < code.len() {
-                        let instr = unsafe { *code.get_unchecked(scan) };
-                        if instr.op() == OP_JUMP && instr.a() == loop_ip {
-                            f.ip = (scan + 1) as u32;
-                            return Action::Jump(f.ip);
-                        }
-                        scan += 1;
-                    }
-                    Action::Next
+                    let exit_ip = f.code.wide_operands[exit_wide_idx] as u32;
+                    f.ip = exit_ip;
+                    Action::Jump(exit_ip)
                 }
             }
 
@@ -931,13 +920,30 @@ impl VM {
                 Action::Next
             }
 
+            // ── DIV_LOCAL_STORE: $a = $a / $b ──
+            OP_DIV_LOCAL_STORE => {
+                let l = &mut self.frames[top].locals;
+                let dest = i.a() as usize;
+                let src = i.b() as usize;
+                let a = unsafe { *l.get_unchecked(dest) };
+                let b = unsafe { *l.get_unchecked(src) };
+                if a.is_int() && b.is_int() {
+                    let r = a.as_i48().checked_div(b.as_i48()).unwrap_or_else(|| {
+                        (a.as_i48() as f64 / b.as_i48() as f64) as i64
+                    });
+                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
+                } else {
+                    unsafe { *l.get_unchecked_mut(dest) = a.div_(b); }
+                }
+                Action::Next
+            }
+
             // ── ADD_LOCAL_LOCAL_STORE: $c = $a + $b ──
             OP_ADD_LOCAL_LOCAL_STORE => {
                 let l = &mut self.frames[top].locals;
                 let dest = i.a() as usize;
-                let b_val = i.b() as u32;
-                let src1 = (b_val >> 16) as usize;
-                let src2 = (b_val & 0xFFFF) as usize;
+                let src1 = i.c() as usize;
+                let src2 = i.b() as usize;
                 let a = unsafe { *l.get_unchecked(src1) };
                 let b = unsafe { *l.get_unchecked(src2) };
                 if a.is_int() && b.is_int() {
@@ -955,9 +961,8 @@ impl VM {
             OP_MUL_LOCAL_LOCAL_STORE => {
                 let l = &mut self.frames[top].locals;
                 let dest = i.a() as usize;
-                let b_val = i.b() as u32;
-                let src1 = (b_val >> 16) as usize;
-                let src2 = (b_val & 0xFFFF) as usize;
+                let src1 = i.c() as usize;
+                let src2 = i.b() as usize;
                 let a = unsafe { *l.get_unchecked(src1) };
                 let b = unsafe { *l.get_unchecked(src2) };
                 if a.is_int() && b.is_int() {
@@ -987,6 +992,70 @@ impl VM {
                     unsafe { *l.get_unchecked_mut(dest) = a.mul(b, &self.arena); }
                 }
                 Action::Next
+            }
+
+            // ── SUB_LOCAL_LOCAL_STORE: $c = $a - $b ──
+            OP_SUB_LOCAL_LOCAL_STORE => {
+                let l = &mut self.frames[top].locals;
+                let dest = i.a() as usize;
+                let src1 = i.c() as usize;
+                let src2 = i.b() as usize;
+                let a = unsafe { *l.get_unchecked(src1) };
+                let b = unsafe { *l.get_unchecked(src2) };
+                if a.is_int() && b.is_int() {
+                    let r = a.as_i48().checked_sub(b.as_i48()).unwrap_or_else(|| {
+                        (a.as_i48() as f64 - b.as_i48() as f64) as i64
+                    });
+                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
+                } else {
+                    unsafe { *l.get_unchecked_mut(dest) = a.sub_(b); }
+                }
+                Action::Next
+            }
+
+            // ── DIV_LOCAL_LOCAL_STORE: $c = $a / $b ──
+            OP_DIV_LOCAL_LOCAL_STORE => {
+                let l = &mut self.frames[top].locals;
+                let dest = i.a() as usize;
+                let src1 = i.c() as usize;
+                let src2 = i.b() as usize;
+                let a = unsafe { *l.get_unchecked(src1) };
+                let b = unsafe { *l.get_unchecked(src2) };
+                if a.is_int() && b.is_int() {
+                    let r = a.as_i48().checked_div(b.as_i48()).unwrap_or_else(|| {
+                        (a.as_i48() as f64 / b.as_i48() as f64) as i64
+                    });
+                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
+                } else {
+                    unsafe { *l.get_unchecked_mut(dest) = a.div_(b); }
+                }
+                Action::Next
+            }
+
+            // ── WHILE_LT_LOCAL: while $a < $b { ... } (both locals) ──
+            // Operand a = left slot, b = right slot, c = exit_wide_idx
+            OP_WHILE_LT_LOCAL => {
+                let f = &mut self.frames[top];
+                let l = &f.locals;
+                let left = i.a() as usize;
+                let right = i.b() as usize;
+                let exit_wide_idx = i.c() as usize;
+                let a = unsafe { *l.get_unchecked(left) };
+                let b = unsafe { *l.get_unchecked(right) };
+                let cond = if a.is_int() && b.is_int() {
+                    a.as_i48() < b.as_i48()
+                } else if a.is_float() && b.is_float() {
+                    a.as_f64() < b.as_f64()
+                } else {
+                    false
+                };
+                if cond {
+                    Action::Next
+                } else {
+                    let exit_ip = f.code.wide_operands[exit_wide_idx] as u32;
+                    f.ip = exit_ip;
+                    Action::Jump(exit_ip)
+                }
             }
 
             _ => Action::Next,
@@ -1247,9 +1316,13 @@ fn opcode_name(op: u8) -> String {
         OP_MUL_INT_LOCAL => "OP_MUL_INT_L".to_string(),
         OP_WHILE_LT_INT => "OP_WHILE_LT".to_string(),
         OP_MUL_LOCAL_STORE => "OP_MUL_L_ST".to_string(),
+        OP_DIV_LOCAL_STORE => "OP_DIV_L_ST".to_string(),
         OP_SUB_LOCAL_STORE => "OP_SUB_L_ST".to_string(),
         OP_ADD_LOCAL_LOCAL_STORE => "OP_ADD_LL_ST".to_string(),
         OP_MUL_LOCAL_LOCAL_STORE => "OP_MUL_LL_ST".to_string(),
+        OP_SUB_LOCAL_LOCAL_STORE => "OP_SUB_LL_ST".to_string(),
+        OP_DIV_LOCAL_LOCAL_STORE => "OP_DIV_LL_ST".to_string(),
+        OP_WHILE_LT_LOCAL => "OP_WHILE_LT_L".to_string(),
         _ => format!("0x{:02X}", op),
     }
 }
