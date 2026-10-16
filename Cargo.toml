@@ -16,7 +16,7 @@ homepage     = "https://chaoswarehq.com"
 [workspace.dependencies]
 xcl-decompile = { path = "crates/xcl-decompile" }
 xcl-macros = { path = "crates/xcl-macros" }
-xcl-std    = { path = "crates/xcl-std" }
+xcl-plugins = { path = "crates/xcl-plugins" }
 xcl-vm     = { path = "crates/xcl-vm" }
 
 # xcl-cli

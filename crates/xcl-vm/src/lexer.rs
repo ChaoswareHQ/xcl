@@ -1,3 +1,10 @@
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
+#[cfg(not(feature = "std"))]
+use alloc::string::ToString;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use crate::span::Span;
 use logos::Logos;
 
@@ -158,15 +165,53 @@ pub struct TokenWithText {
     pub byte_offset: usize,
 }
 
+/// Precomputed line-start offsets for O(1) offset-to-line conversion.
+/// Built once during lexing to avoid O(n) per-token scanning.
+struct LineMap {
+    offsets: Vec<usize>,
+}
+
+impl LineMap {
+    #[inline]
+    fn new(source: &str) -> Self {
+        let mut offsets = Vec::with_capacity(source.len() / 40 + 1);
+        offsets.push(0);
+        for (i, ch) in source.char_indices() {
+            if ch == '\n' {
+                let next = i + 1;
+                if next < source.len() {
+                    offsets.push(next);
+                }
+            }
+        }
+        Self { offsets }
+    }
+
+    /// Convert byte offset to (line, col) in O(log n) time using binary search.
+    #[inline]
+    fn offset_to_line_col(&self, offset: usize) -> (u32, u32) {
+        // Binary search for the line
+        let line = match self.offsets.binary_search(&offset) {
+            Ok(0) | Err(0) => 1u32,
+            Ok(i) | Err(i) => (i + 1) as u32,
+        };
+        // Column is offset minus the start of the line
+        let line_start = *self.offsets.get((line - 1) as usize).unwrap_or(&0);
+        let col = (offset - line_start + 1) as u32;
+        (line, col)
+    }
+}
+
 #[inline]
 pub fn lex(source: &str, file: &str) -> Vec<TokenWithText> {
+    let line_map = LineMap::new(source);
     let mut lexer = Token::lexer(source);
     let mut tokens = Vec::with_capacity(source.len() / 6);
 
     while let Some(tok) = lexer.next() {
         let sp = lexer.span();
         let (start, end) = (sp.start, sp.end);
-        let (line, col) = offset_to_line_col(source, start);
+        let (line, col) = line_map.offset_to_line_col(start);
         let diag_span = Span::new(file.to_string(), line, col);
 
         let Ok(token) = tok else { continue };
@@ -180,24 +225,6 @@ pub fn lex(source: &str, file: &str) -> Vec<TokenWithText> {
     }
 
     tokens
-}
-
-#[inline]
-fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
-    let mut line = 1;
-    let mut col = 1;
-    for (i, ch) in source.char_indices() {
-        if i >= offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-    }
-    (line, col)
 }
 
 #[inline]

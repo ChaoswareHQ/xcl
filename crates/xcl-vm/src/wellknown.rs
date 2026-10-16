@@ -1,6 +1,6 @@
 /// Marker struct that records the names of well-known types and constructors.
 ///
-/// Starts with all slots `None` on a bare VM. `xcl-std` fills them in at
+/// Starts with all slots `None` on a bare VM. `xcl-plugins` fills them in at
 /// registration time so the compiler and VM can recognize `Ok`/`Err`/`Result`
 /// by name without `xcl-vm` knowing about `Result` at compile time.
 #[derive(Default, Clone, Copy)]

@@ -116,7 +116,7 @@ pub fn build_tree(model: &DocModel) -> serde_json::Value {
     }
 
     json!({
-        "name": "xcl-std",
+        "name": "xcl-plugins",
         "type": "root",
         "children": children
     })

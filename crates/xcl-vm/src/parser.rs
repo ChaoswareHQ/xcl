@@ -1,3 +1,16 @@
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
+use alloc::format;
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
+#[cfg(not(feature = "std"))]
+use alloc::string::ToString;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::vec;
+
 use crate::span::Span;
 use crate::ast::{AstNode, BinaryOperator, UnaryOperator, Param, CallArg, PipelineStage, TypeKind, SumVariant, TypeField};
 use crate::lexer::{Token, TokenWithText, extract_string};

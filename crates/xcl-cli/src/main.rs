@@ -129,8 +129,8 @@ fn print_version() {
 }
 
 fn run_source(source: &str, quiet: bool) -> xcl_vm::Value {
-    let mut vm = xcl_std::new_vm();
-    let result = xcl_std::evaluate(source, &mut vm);
+    let mut vm = xcl_plugins::new_vm();
+    let result = xcl_plugins::evaluate(source, &mut vm);
 
     if !quiet {
         // Print the result value if it's not nil/unit

@@ -20,7 +20,7 @@ cargo run --release -- -e 'io.print "hello" 42'
 |---|---|
 | `xcl-vm` | Core VM: lexer, parser, bytecode compiler, and runtime |
 | `xcl-macros` | Procedural macros: `#[xcl_fn]` for native functions, `#[xcl_type]` for type descriptors |
-| `xcl-std` | Standard library: `io.*` functions, `Ok`/`Err` constructors, `print`, `format`, `input` |
+| `xcl-plugins` | Plugin library: `io.*` functions, `Ok`/`Err` constructors, `print`, `format`, `input` |
 | `xcl-cli` | Command-line interface |
 | `xcl-doc` | Documentation generator — reads macro metadata and produces an HTML site |
 

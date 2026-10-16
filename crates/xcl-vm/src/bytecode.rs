@@ -1,4 +1,18 @@
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
+use alloc::format;
+#[cfg(not(feature = "std"))]
+use alloc::string::ToString;
+#[cfg(not(feature = "std"))]
+use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::vec;
+#[cfg(feature = "std")]
 use std::sync::Arc;
+
 use crate::ast::{AstNode, BinaryOperator, UnaryOperator, TypeKind};
 use crate::value::FuncValue;
 
@@ -374,13 +388,18 @@ impl Compiler {
     fn compile(&mut self, ast: &[AstNode]) -> Bytecode {
         for n in ast { self.node(n); }
         self.emit(Instr::none(OP_HALT));
+        
+        // Run peephole optimizer to fuse common patterns
+        let mut code: Vec<Instr> = core::mem::take(&mut self.code);
+        peephole_optimize_once(&mut code, &self.wide);
+        
         Bytecode {
-            instructions: std::mem::take(&mut self.code).into(),
-            wide_operands: std::mem::take(&mut self.wide).into(),
-            string_table: std::mem::take(&mut self.strings).into(),
-            local_names: std::mem::take(&mut self.locals).into(),
-            user_functions: std::mem::take(&mut self.functions),
-            closures: std::mem::take(&mut self.closures),
+            instructions: code.into(),
+            wide_operands: core::mem::take(&mut self.wide).into(),
+            string_table: core::mem::take(&mut self.strings).into(),
+            local_names: core::mem::take(&mut self.locals).into(),
+            user_functions: core::mem::take(&mut self.functions),
+            closures: core::mem::take(&mut self.closures),
         }
     }
 
@@ -563,7 +582,7 @@ impl Compiler {
             AstNode::While { condition, body, .. } => {
                 // Try to fuse: while $i < N { ... } → OP_WHILE_LT_INT
                 // Or: while $a < $b { ... } → OP_WHILE_LT_LOCAL
-                let dominated = match condition.as_ref() {
+                match condition.as_ref() {
                     AstNode::BinaryOp { left, op: BinaryOperator::Lt, right, .. } => {
                         if let AstNode::Ident { name: left_name, .. } = left.as_ref() {
                             if let AstNode::Int { value: limit, .. } = right.as_ref() {
@@ -881,14 +900,12 @@ pub fn compile(ast: &[AstNode]) -> Bytecode {
 
 /// Peephole optimizer — scans bytecode and fuses common patterns.
 /// This runs after compilation and catches patterns the AST-level fusion misses.
-fn peephole_optimize(instructions: &mut Arc<[Instr]>, _wide: &[i64]) {
-    // Convert to mutable Vec for optimization, then back to Arc
-    let mut code: Vec<Instr> = instructions.as_ref().to_vec();
+fn peephole_optimize_once(code: &mut Vec<Instr>, _wide: &[i64]) {
     let mut i = 0;
 
     while i < code.len() {
         let matched = match code.get(i).copied() {
-            Some(instr) => peephole_at(&mut code, i, instr),
+            Some(instr) => peephole_at(code, i, instr),
             None => false,
         };
         if !matched {
@@ -896,12 +913,11 @@ fn peephole_optimize(instructions: &mut Arc<[Instr]>, _wide: &[i64]) {
         }
         // If matched, stay at same index to catch overlapping patterns
     }
-
-    *instructions = Arc::from(code.as_slice());
 }
 
 /// Try to match and fuse a pattern at instruction index `i`.
 /// Returns true if a fusion occurred (caller should not advance `i`).
+#[inline]
 fn peephole_at(code: &mut Vec<Instr>, i: usize, instr: Instr) -> bool {
     let op = instr.op();
 

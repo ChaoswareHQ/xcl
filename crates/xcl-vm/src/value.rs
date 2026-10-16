@@ -7,8 +7,34 @@
 //! NaN-boxing keeps Value at exactly 8 bytes (one machine word), which is optimal
 //! for cache performance. Type checks use bit masking which modern CPUs handle well.
 
+#[cfg(feature = "std")]
 use std::collections::HashMap;
+#[cfg(not(feature = "std"))]
+use hashbrown::HashMap;
+
+#[cfg(feature = "std")]
 use std::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::sync::Arc;
+
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::format;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::string::String;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::string::ToString;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::vec;
 
 const QNAN: u64 = 0x7FF8_0000_0000_0000;
 const TAG_MASK: u64 = 0x000F_0000_0000_0000;
@@ -39,21 +65,28 @@ pub const VARIANT_ERR:     u8 = 1;
 pub const VARIANT_DEFAULT: u8 = 0;
 
 /// Header for all heap-allocated XCL values.
-#[repr(C)]
-pub struct HeapHeader { pub kind: u8, pub flags: u8, pub _pad: [u8; 6] }
+/// Packed layout: kind + flags + subtype + variant in first 8 bytes.
+/// This eliminates padding and allows storing subtype/variant directly in the header.
+#[repr(C, packed)]
+pub struct HeapHeader {
+    pub kind:    u8,
+    pub flags:   u8,
+    pub subtype: u16,
+    pub variant: u8,
+}
 
 #[repr(C)]
 pub struct HeapStr   { pub header: HeapHeader, pub data: String }
+
 #[repr(C)]
 pub struct HeapArray { pub header: HeapHeader, pub data: Vec<Value> }
+
 #[repr(C)]
 pub struct HeapMap   {
-    pub header:  HeapHeader,
-    pub subtype: u16,
-    pub variant: u8,
-    pub _pad:    [u8; 5],
-    pub data:    HashMap<String, Value>,
+    pub header: HeapHeader,
+    pub data:   HashMap<String, Value>,
 }
+
 #[repr(C)]
 pub struct HeapFunc  { pub header: HeapHeader, pub data: FuncValue }
 
@@ -68,7 +101,11 @@ pub struct HeapHandle {
 #[derive(Debug)]
 pub enum HandleKind {
     /// An open file with its path stored for re-opening.
+    #[cfg(feature = "std")]
     File { file: std::fs::File, path: String },
+    /// An open file descriptor (raw OS handle) — no_std fallback.
+    #[cfg(not(feature = "std"))]
+    File { fd: RawPtr, path: String },
     /// Standard input stream.
     Stdin,
     /// Standard output stream.
@@ -76,7 +113,11 @@ pub enum HandleKind {
     /// Standard error stream.
     Stderr,
     /// A spawned child process.
+    #[cfg(feature = "std")]
     Process { child: std::process::Child, pid: u32 },
+    /// A spawned child process (raw OS handle) — no_std fallback.
+    #[cfg(not(feature = "std"))]
+    Process { handle: RawPtr, pid: u32 },
 }
 
 #[repr(transparent)]
@@ -104,7 +145,7 @@ impl Value {
     #[inline(always)]
     pub fn from_str(s: String, arena: &bumpalo::Bump) -> Self {
         let obj = arena.alloc(HeapStr {
-            header: HeapHeader { kind: KIND_STR, flags: 0, _pad: [0; 6] },
+            header: HeapHeader { kind: KIND_STR, flags: 0, subtype: SUBTYPE_NONE, variant: VARIANT_DEFAULT },
             data: s,
         });
         Value(TAG_PTR | ((obj as *const HeapStr as u64) & PAYLOAD))
@@ -113,7 +154,7 @@ impl Value {
     #[inline(always)]
     pub fn from_array(elements: Vec<Value>, arena: &bumpalo::Bump) -> Self {
         let obj = arena.alloc(HeapArray {
-            header: HeapHeader { kind: KIND_ARRAY, flags: 0, _pad: [0; 6] },
+            header: HeapHeader { kind: KIND_ARRAY, flags: 0, subtype: SUBTYPE_NONE, variant: VARIANT_DEFAULT },
             data: elements,
         });
         Value(TAG_PTR | ((obj as *const HeapArray as u64) & PAYLOAD))
@@ -122,10 +163,7 @@ impl Value {
     #[inline(always)]
     pub fn from_map(m: HashMap<String, Value>, arena: &bumpalo::Bump) -> Self {
         let obj = arena.alloc(HeapMap {
-            header:  HeapHeader { kind: KIND_MAP, flags: 0, _pad: [0; 6] },
-            subtype: SUBTYPE_NONE,
-            variant: VARIANT_DEFAULT,
-            _pad:    [0; 5],
+            header: HeapHeader { kind: KIND_MAP, flags: 0, subtype: SUBTYPE_NONE, variant: VARIANT_DEFAULT },
             data:    m,
         });
         Value(TAG_PTR | ((obj as *const HeapMap as u64) & PAYLOAD))
@@ -134,7 +172,7 @@ impl Value {
     #[inline(always)]
     pub fn from_func(f: FuncValue, arena: &bumpalo::Bump) -> Self {
         let obj = arena.alloc(HeapFunc {
-            header: HeapHeader { kind: KIND_FUNC, flags: 0, _pad: [0; 6] },
+            header: HeapHeader { kind: KIND_FUNC, flags: 0, subtype: SUBTYPE_NONE, variant: VARIANT_DEFAULT },
             data: f,
         });
         Value(TAG_PTR | ((obj as *const HeapFunc as u64) & PAYLOAD))
@@ -190,7 +228,7 @@ impl Value {
     pub fn map_subtype(self) -> Option<u16> {
         if self.heap_kind() == Some(KIND_MAP) {
             let ptr = self.as_ptr::<HeapMap>();
-            Some(unsafe { (*ptr).subtype })
+            Some(unsafe { (*ptr).header.subtype })
         } else { None }
     }
 
@@ -199,7 +237,7 @@ impl Value {
     pub fn map_variant(self) -> Option<u8> {
         if self.heap_kind() == Some(KIND_MAP) {
             let ptr = self.as_ptr::<HeapMap>();
-            Some(unsafe { (*ptr).variant })
+            Some(unsafe { (*ptr).header.variant })
         } else { None }
     }
 
@@ -383,7 +421,7 @@ impl Value {
 
     pub fn from_handle(h: HandleKind) -> Self {
         let obj = Box::leak(Box::new(HeapHandle {
-            header: HeapHeader { kind: KIND_HANDLE, flags: 0, _pad: [0; 6] },
+            header: HeapHeader { kind: KIND_HANDLE, flags: 0, subtype: SUBTYPE_NONE, variant: VARIANT_DEFAULT },
             data:   Some(h),
         }));
         Value(TAG_PTR | ((obj as *const HeapHandle as u64) & PAYLOAD))
@@ -411,7 +449,7 @@ impl Value {
 
     pub fn from_str_boxed(s: String) -> Self {
         let obj = Box::leak(Box::new(HeapStr {
-            header: HeapHeader { kind: KIND_STR, flags: 0, _pad: [0; 6] },
+            header: HeapHeader { kind: KIND_STR, flags: 0, subtype: SUBTYPE_NONE, variant: VARIANT_DEFAULT },
             data: s,
         }));
         Value(TAG_PTR | ((obj as *const HeapStr as u64) & PAYLOAD))
@@ -419,7 +457,7 @@ impl Value {
 
     pub fn from_array_boxed(elements: Vec<Value>) -> Self {
         let obj = Box::leak(Box::new(HeapArray {
-            header: HeapHeader { kind: KIND_ARRAY, flags: 0, _pad: [0; 6] },
+            header: HeapHeader { kind: KIND_ARRAY, flags: 0, subtype: SUBTYPE_NONE, variant: VARIANT_DEFAULT },
             data: elements,
         }));
         Value(TAG_PTR | ((obj as *const HeapArray as u64) & PAYLOAD))
@@ -432,10 +470,7 @@ impl Value {
     /// Create a heap map with subtype/variant, leaked to static lifetime.
     pub fn from_map_boxed_typed_v(m: HashMap<String, Value>, subtype: u16, variant: u8) -> Self {
         let obj = Box::leak(Box::new(HeapMap {
-            header: HeapHeader { kind: KIND_MAP, flags: 0, _pad: [0; 6] },
-            subtype,
-            variant,
-            _pad: [0; 5],
+            header: HeapHeader { kind: KIND_MAP, flags: 0, subtype, variant },
             data: m,
         }));
         Value(TAG_PTR | ((obj as *const HeapMap as u64) & PAYLOAD))
@@ -446,8 +481,8 @@ impl Value {
     pub fn bool_(b: bool) -> Self { Value::bool(b) }
 }
 
-impl std::fmt::Debug for Value {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for Value {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.as_string())
     }
 }
@@ -547,7 +582,7 @@ pub struct NativeEntry {
     pub arg_desc: &'static [(&'static str, &'static str)],
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct RawPtr(pub *const ());
 
 unsafe impl Sync for RawPtr {}
@@ -563,7 +598,7 @@ pub struct NamedParam {
 pub enum NativeKind { Pure, Ctx }
 
 pub type BuiltinFn    = fn(&[Value]) -> Value;
-pub type BuiltinCtxFn = fn(&mut DomainCtx) -> Value;
+pub type BuiltinCtxFn = fn(&mut DomainCtx<'_>) -> Value;
 
 #[derive(Clone, Copy)]
 pub enum BuiltinImpl {

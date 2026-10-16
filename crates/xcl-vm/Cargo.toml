@@ -10,7 +10,8 @@ readme = "README.md"
 homepage.workspace = true
 
 [features]
-default = []
+default = ["std"]
+std = []
 opcode-stats = []
 
 [dependencies]

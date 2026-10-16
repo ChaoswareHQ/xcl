@@ -1,5 +1,5 @@
 use crate::value::Value;
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 pub fn split_named_args<'a>(
     args:  &'a [Value],

@@ -1,4 +1,30 @@
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::format;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::string::String;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::string::ToString;
+#[cfg(not(feature = "std"))]
+use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::vec;
+#[cfg(feature = "std")]
 use std::sync::Arc;
+
+#[cfg(feature = "std")]
+use std::collections::HashMap;
+#[cfg(not(feature = "std"))]
+use hashbrown::HashMap;
+
 use bumpalo::Bump;
 use smallvec::SmallVec;
 use crate::bytecode::*;
@@ -70,7 +96,7 @@ impl OpcodeCounter {
             .enumerate()
             .filter_map(|(i, &c)| if c > 0 { Some((i as u8, c)) } else { None })
             .collect();
-        pairs.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
+        pairs.sort_by_key(|&(_, c)| core::cmp::Reverse(c));
         pairs.truncate(n);
         pairs
     }
@@ -78,33 +104,34 @@ impl OpcodeCounter {
 
 enum Action { Next, Jump(u32), Return, PushFrame }
 
-struct Frame {
+pub(crate) struct Frame {
     code: Arc<Bytecode>,
     locals: SmallVec<[Value; 16]>,
     ip: u32,
-    iter: Vec<Value>,
+    /// SmallVec avoids heap allocation for small iterators (≤8 elements inline).
+    iter: SmallVec<[Value; 8]>,
     iter_idx: u32,
     range_cur: i64,
     range_end: i64,
     stack_base: u32,
     /// Deferred closures to run when this frame returns (LIFO order).
-    defer_stack: Vec<Value>,
+    defer_stack: SmallVec<[Value; 4]>,
 }
 
 pub struct DomainSlot {
     pub name:    Box<str>,
     pub methods: Vec<Option<BuiltinImpl>>,
-    pub index:   hashbrown::HashMap<Box<str>, u32>,
+    pub index:   HashMap<Box<str>, u32>,
 }
 
 pub struct VM {
     pub stack: Vec<Value>,
     globals: Vec<Value>,
-    global_index: hashbrown::HashMap<Box<str>, u32>,
+    global_index: HashMap<Box<str>, u32>,
     pub global_table: Vec<Option<BuiltinImpl>>,
-    pub domain_index: hashbrown::HashMap<Box<str>, u32>,
+    pub domain_index: HashMap<Box<str>, u32>,
     pub domain_table: Vec<DomainSlot>,
-    pub type_index:   hashbrown::HashMap<Box<str>, &'static TypeDescriptor>,
+    pub type_index:   HashMap<Box<str>, &'static TypeDescriptor>,
     pub arena: Bump,
     pub well_known: crate::wellknown::WellKnown,
     pub(crate) frames: Vec<Frame>,
@@ -137,7 +164,7 @@ impl VM {
     }
 
     /// Fill in the well-known type/constructor names.
-    /// Called by `xcl-std` after its own registration.
+    /// Called by `xcl-plugins` after its own registration.
     pub fn set_well_known(&mut self, wk: crate::wellknown::WellKnown) {
         self.well_known = wk;
     }
@@ -154,11 +181,11 @@ impl VM {
         for entry in NATIVE_REGISTRY.iter() {
             let impl_ = match entry.kind {
                 NativeKind::Pure => {
-                    let f: crate::value::BuiltinFn = unsafe { std::mem::transmute(entry.ptr.0) };
+                    let f: crate::value::BuiltinFn = unsafe { core::mem::transmute(entry.ptr.0) };
                     BuiltinImpl::Pure(f)
                 }
                 NativeKind::Ctx => {
-                    let f: crate::value::BuiltinCtxFn = unsafe { std::mem::transmute(entry.ptr.0) };
+                    let f: crate::value::BuiltinCtxFn = unsafe { core::mem::transmute(entry.ptr.0) };
                     BuiltinImpl::Ctx(f)
                 }
             };
@@ -169,7 +196,7 @@ impl VM {
                     self.domain_table.push(DomainSlot {
                         name: domain.into(),
                         methods: Vec::new(),
-                        index: hashbrown::HashMap::new(),
+                        index: HashMap::new(),
                     });
                     idx
                 });
@@ -228,12 +255,12 @@ impl VM {
             code: Arc::new(bc.clone()),
             locals,
             ip: 0,
-            iter: Vec::new(),
+            iter: SmallVec::new(),
             iter_idx: 0,
             range_cur: 0,
             range_end: 0,
             stack_base: 0,
-            defer_stack: Vec::new(),
+            defer_stack: SmallVec::new(),
         });
 
         while let Some(top) = self.frames.len().checked_sub(1) {
@@ -241,7 +268,7 @@ impl VM {
             if frame.ip as usize >= frame.code.instructions.len() {
                 // Run deferred closures before returning
                 if let Some(frame) = self.frames.last_mut() {
-                    let mut stack = std::mem::take(&mut frame.defer_stack);
+                    let mut stack = core::mem::take(&mut frame.defer_stack);
                     stack.reverse();
                     for closure in stack {
                         let _ = self.call_value(closure, &[]);
@@ -265,7 +292,7 @@ impl VM {
                 Action::Return => {
                     // Run deferred closures before returning
                     if let Some(frame) = self.frames.last_mut() {
-                        let mut stack = std::mem::take(&mut frame.defer_stack);
+                        let mut stack = core::mem::take(&mut frame.defer_stack);
                         stack.reverse();
                         for closure in stack {
                             let _ = self.call_value(closure, &[]);
@@ -597,7 +624,7 @@ impl VM {
             }
             OP_MAKE_DICT => {
                 let n = i.a() as usize;
-                let mut m = std::collections::HashMap::with_capacity(n);
+                let mut m = HashMap::with_capacity(n);
                 for _ in 0..n {
                     let v = self.pop();
                     let k = self.pop();
@@ -1010,12 +1037,12 @@ impl VM {
             code: Arc::clone(bc),
             locals,
             ip: 0,
-            iter: Vec::new(),
+            iter: SmallVec::new(),
             iter_idx: 0,
             range_cur: 0,
             range_end: 0,
             stack_base: base,
-            defer_stack: Vec::new(),
+            defer_stack: SmallVec::new(),
         });
         Action::PushFrame
     }
@@ -1034,7 +1061,7 @@ impl VM {
         };
 
         // Save and replace closures table so OP_LOAD_LAMBDA works for nested closures
-        let saved_closures = std::mem::replace(&mut self.closures, bc.closures.clone());
+        let saved_closures = core::mem::replace(&mut self.closures, bc.closures.clone());
 
         // Prepare locals: params first (matching how enter_call does it)
         let n = bc.local_names.len().max(func_ref.params.len());
@@ -1053,12 +1080,12 @@ impl VM {
             code: Arc::clone(&bc),
             locals,
             ip: 0,
-            iter: Vec::new(),
+            iter: SmallVec::new(),
             iter_idx: 0,
             range_cur: 0,
             range_end: 0,
             stack_base,
-            defer_stack: Vec::new(),
+            defer_stack: SmallVec::new(),
         });
 
         // Run the VM dispatch loop until the frame we just pushed returns
@@ -1081,7 +1108,7 @@ impl VM {
             if frame.ip as usize >= frame.code.instructions.len() {
                 // Run deferred closures before returning
                 if let Some(frame) = self.frames.last_mut() {
-                    let mut stack = std::mem::take(&mut frame.defer_stack);
+                    let mut stack = core::mem::take(&mut frame.defer_stack);
                     stack.reverse();
                     for closure in stack {
                         let _ = self.call_value(closure, &[]);
@@ -1112,7 +1139,7 @@ impl VM {
                 Action::Return => {
                     // Run deferred closures before returning
                     if let Some(frame) = self.frames.last_mut() {
-                        let mut stack = std::mem::take(&mut frame.defer_stack);
+                        let mut stack = core::mem::take(&mut frame.defer_stack);
                         stack.reverse();
                         for closure in stack {
                             let _ = self.call_value(closure, &[]);
@@ -1145,8 +1172,8 @@ impl VM {
     /// Returns the opcode dispatch counts as a HashMap<opcode, count>.
     /// Only available when the `opcode-stats` feature is enabled.
     #[cfg(feature = "opcode-stats")]
-    pub fn opcode_counts(&self) -> std::collections::HashMap<u8, u64> {
-        let mut map = std::collections::HashMap::new();
+    pub fn opcode_counts(&self) -> HashMap<u8, u64> {
+        let mut map = HashMap::new();
         for (op, &count) in self.opcode_counter.counts.iter().enumerate() {
             if count > 0 {
                 map.insert(op as u8, count);

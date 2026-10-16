@@ -33,21 +33,21 @@ struct ParsedDoc {
 /// A primitive type entry: (name, summary, description, examples, notes)
 type PrimitiveEntry = (&'static str, &'static str, &'static str, &'static [&'static str], &'static [&'static str]);
 
-/// Extract doc comments from Rust source files in xcl-std.
+/// Extract doc comments from Rust source files in xcl-plugins.
 ///
-/// Walks the xcl-std source directory, reads each `.rs` file, and extracts
+/// Walks the xcl-plugins source directory, reads each `.rs` file, and extracts
 /// `///` doc comments that immediately precede `#[xcl_fn]` or `#[xcl_type]` attributes.
 /// Returns a map from the function/type name to the full parsed documentation.
 fn extract_rust_doc_comments() -> HashMap<String, ParsedDoc> {
     let mut comments = HashMap::new();
 
-    // Path to xcl-std source — use the environment variable or default path
+    // Path to xcl-plugins source — use the environment variable or default path
     let std_src = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
         .unwrap_or(Path::new("."))
         .join("crates")
-        .join("xcl-std")
+        .join("xcl-plugins")
         .join("src");
 
     if !std_src.is_dir() {
@@ -322,9 +322,9 @@ fn extract_attr_name(attr: &str, key: &str) -> Option<String> {
 }
 
 pub fn collect_std() -> DocModel {
-    // Force-link xcl-std so its linkme entries are not stripped by the linker.
+    // Force-link xcl-plugins so its linkme entries are not stripped by the linker.
     // Without this, NATIVE_REGISTRY and TYPE_REGISTRY will be empty.
-    let _ = xcl_std::new_vm();
+    let _ = xcl_plugins::new_vm();
 
     // Extract doc comments from Rust source files
     let rust_docs = extract_rust_doc_comments();
