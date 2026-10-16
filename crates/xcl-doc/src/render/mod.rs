@@ -4,6 +4,7 @@ pub mod native;
 pub mod type_;
 pub mod all;
 pub mod search;
+pub mod tree;
 
 use std::fmt::Write;
 use crate::model::DocModel;

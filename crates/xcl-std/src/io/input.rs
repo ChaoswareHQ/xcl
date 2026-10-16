@@ -129,10 +129,10 @@ fn emit_prompt(prompt: &str) {
     if prompt.is_empty() {
         return;
     }
-    crate::output::with_out(|w| {
+    super::output::with_out(|w| {
         let _ = w.write_str(prompt);
     });
-    crate::output::flush_out();
+    super::output::flush_out();
 }
 
 /// Read input from standard input, with optional type conversion.

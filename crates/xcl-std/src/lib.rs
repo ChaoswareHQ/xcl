@@ -1,13 +1,40 @@
-pub mod arr;
-pub mod defer;
-pub mod dict_ops;
-pub mod error;
+//! XCL Standard Library
+//!
+//! Organized into clean, composable modules:
+//!
+//! Low-level layers:
+//! - **sys/** — OS & kernel interface: syscalls, process, thread, signal, time, fs, socket, env
+//! - **ffi/** — Foreign function interface: C types, callbacks, libloading, bindings
+//! - **mem/** — Memory primitives: allocators, arenas, raw pointers, layout, pin
+//! - **cpu/** — CPU primitives: atomics, fences, SIMD, assembly, cache
+//! - **abi/** — Calling conventions, layout, symbols
+//!
+//! Standard layers:
+//! - **core/** — Foundational types: error, result, traits, util
+//! - **collections/** — Arrays, dictionaries, defer
+//! - **text/** — String operations
+//! - **io/** — Local I/O: files, stdin, stdout
+//! - **encoding/** — Format conversion: JSON, YAML, TOML, XML, CSV, hex
+//! - **math/** — Math: complex, matrix, quaternion, vector, scalar
+//! - **transport/** — Raw byte movement: HTTP, DNS
+//! - **protocol/** — Application protocols: FTP, SMTP, IMAP, POP3, CDP, MCP
+//! - **lang/** — XCL language support
+//! - **translate/** — Polyglot transpiler: XCL ↔ Java/Rust/Python via IR
+//! - **plugin/** — Plugin system
+//! - **util/** — Cross-platform utilities: OS, env, path, time
+
+pub mod core;
+pub mod collections;
+pub mod text;
 pub mod io;
-pub mod input;
-pub mod output;
-pub mod result;
-pub mod str_ops;
+pub mod encoding;
 pub mod math;
+pub mod transport;
+pub mod protocol;
+pub mod lang;
+pub mod translate;
+pub mod plugin;
+pub mod util;
 
 use xcl_vm::{VM, Value};
 
@@ -21,7 +48,7 @@ pub fn new_vm() -> VM {
 /// Evaluate XCL source code using the provided VM.
 pub fn evaluate(source: &str, vm: &mut VM) -> Value {
     let result = xcl_vm::evaluate(source, vm);
-    output::flush_out();
+    io::output::flush_out();
     result
 }
 

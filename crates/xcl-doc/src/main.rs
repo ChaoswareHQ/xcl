@@ -76,6 +76,7 @@ fn write_docs(root: &PathBuf, model: &model::DocModel) -> Result<()> {
     // Index
     fs::write(root.join("index.html"), render::index::render(model))?;
     fs::write(root.join("all.html"), render::all::render(model))?;
+    fs::write(root.join("tree.html"), render::tree::render(model))?;
 
     // Domains — one page each
     for d in &model.domains {

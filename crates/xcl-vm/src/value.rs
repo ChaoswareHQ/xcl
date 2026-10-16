@@ -75,6 +75,8 @@ pub enum HandleKind {
     Stdout,
     /// Standard error stream.
     Stderr,
+    /// A spawned child process.
+    Process { child: std::process::Child, pid: u32 },
 }
 
 #[repr(transparent)]

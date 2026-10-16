@@ -4,6 +4,43 @@ use smallvec::SmallVec;
 use crate::bytecode::*;
 use crate::value::{Value, BuiltinImpl, TypeDescriptor};
 
+// ── Helper functions for integer arithmetic with overflow fallback ──
+
+#[inline(always)]
+fn checked_add_overflow(a: i64, b: i64) -> i64 {
+    a.checked_add(b).unwrap_or_else(|| (a as f64 + b as f64) as i64)
+}
+
+#[inline(always)]
+fn checked_sub_overflow(a: i64, b: i64) -> i64 {
+    a.checked_sub(b).unwrap_or_else(|| (a as f64 - b as f64) as i64)
+}
+
+#[inline(always)]
+fn checked_mul_overflow(a: i64, b: i64) -> i64 {
+    a.checked_mul(b).unwrap_or_else(|| (a as f64 * b as f64) as i64)
+}
+
+#[inline(always)]
+fn checked_div_overflow(a: i64, b: i64) -> i64 {
+    a.checked_div(b).unwrap_or_else(|| (a as f64 / b as f64) as i64)
+}
+
+// ── Macros to reduce dispatch boilerplate ──
+// Since Rust macros cannot expand to match arms directly, we use nested match
+// patterns with guard clauses in the dispatch method.
+
+#[cfg(feature = "opcode-stats")]
+/// Generate opcode_name match from a list of opcode => display_name pairs.
+macro_rules! opcode_names {
+    ( $op:expr, $( $opcode:ident => $name:expr ),+ $(,)? ) => {
+        match $op {
+            $( $opcode => $name.to_string(), )+
+            _ => format!("0x{:02X}", $op),
+        }
+    };
+}
+
 /// Tracks opcode dispatch frequency for profiling.
 /// Gated behind `cfg(feature = "opcode-stats")` for zero overhead in normal builds.
 #[cfg(feature = "opcode-stats")]
@@ -296,21 +333,58 @@ impl VM {
                 if (i.a() as usize) < self.globals.len() { self.globals[i.a() as usize] = v; }
                 Action::Next
             }
-            OP_ADD => { let b = self.pop(); let a = self.pop(); self.push(a.add(b, &self.arena)); Action::Next }
-            OP_SUB => { let b = self.pop(); let a = self.pop(); self.push(a.sub_(b)); Action::Next }
-            OP_MUL => { let b = self.pop(); let a = self.pop(); self.push(a.mul(b, &self.arena)); Action::Next }
-            OP_DIV => { let b = self.pop(); let a = self.pop(); self.push(a.div_(b)); Action::Next }
-            OP_MOD => { let b = self.pop(); let a = self.pop(); self.push(a.mod_(b)); Action::Next }
             OP_NEG => { let a = self.pop(); self.push(a.neg_()); Action::Next }
-            OP_EQ  => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(a.eq_(b))); Action::Next }
-            OP_NEQ => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(!a.eq_(b))); Action::Next }
-            OP_LT  => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(a.lt(b))); Action::Next }
-            OP_GT  => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(a.gt(b))); Action::Next }
-            OP_LE  => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(a.lt(b) || a.eq_(b))); Action::Next }
-            OP_GE  => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(a.gt(b) || a.eq_(b))); Action::Next }
-            OP_AND => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(a.is_truthy() && b.is_truthy())); Action::Next }
-            OP_OR  => { let b = self.pop(); let a = self.pop(); self.push(Value::bool(a.is_truthy() || b.is_truthy())); Action::Next }
             OP_NOT => { let a = self.pop(); self.push(a.not_()); Action::Next }
+            op if [OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD].contains(&op) => {
+                return match op {
+                    OP_ADD => {
+                        let b = self.pop();
+                        let a = self.pop();
+                        self.push(a.add(b, &self.arena));
+                        Action::Next
+                    }
+                    OP_MUL => {
+                        let b = self.pop();
+                        let a = self.pop();
+                        self.push(a.mul(b, &self.arena));
+                        Action::Next
+                    }
+                    OP_SUB => {
+                        let b = self.pop();
+                        let a = self.pop();
+                        self.push(a.sub_(b));
+                        Action::Next
+                    }
+                    OP_DIV => {
+                        let b = self.pop();
+                        let a = self.pop();
+                        self.push(a.div_(b));
+                        Action::Next
+                    }
+                    OP_MOD => {
+                        let b = self.pop();
+                        let a = self.pop();
+                        self.push(a.mod_(b));
+                        Action::Next
+                    }
+                    _ => Action::Next,
+                };
+            }
+            op if [OP_EQ, OP_NEQ, OP_LT, OP_GT, OP_LE, OP_GE, OP_AND, OP_OR].contains(&op) => {
+                let b = self.pop();
+                let a = self.pop();
+                return match op {
+                    OP_EQ => { self.push(Value::bool(a.eq_(b))); Action::Next }
+                    OP_NEQ => { self.push(Value::bool(!a.eq_(b))); Action::Next }
+                    OP_LT => { self.push(Value::bool(a.lt(b))); Action::Next }
+                    OP_GT => { self.push(Value::bool(a.gt(b))); Action::Next }
+                    OP_LE => { self.push(Value::bool(a.lt(b) || a.eq_(b))); Action::Next }
+                    OP_GE => { self.push(Value::bool(a.gt(b) || a.eq_(b))); Action::Next }
+                    OP_AND => { self.push(Value::bool(a.is_truthy() && b.is_truthy())); Action::Next }
+                    OP_OR => { self.push(Value::bool(a.is_truthy() || b.is_truthy())); Action::Next }
+                    _ => Action::Next,
+                };
+            }
             OP_IN => {
                 let c = self.pop(); let item = self.pop();
                 let found = c.as_array().map(|a| a.iter().any(|v| v.eq_(item))).unwrap_or(false);
@@ -589,27 +663,6 @@ impl VM {
                 self.push(a); self.push(b);
                 Action::Next
             }
-            OP_ADD_LOCAL_LOCAL => {
-                let l = &self.frames[top].locals;
-                let a = unsafe { *l.get_unchecked(i.a() as usize) };
-                let b = unsafe { *l.get_unchecked(i.b() as usize) };
-                self.push(a.add(b, &self.arena));
-                Action::Next
-            }
-            OP_SUB_LOCAL_LOCAL => {
-                let l = &self.frames[top].locals;
-                let a = unsafe { *l.get_unchecked(i.a() as usize) };
-                let b = unsafe { *l.get_unchecked(i.b() as usize) };
-                self.push(a.sub_(b));
-                Action::Next
-            }
-            OP_LT_LOCAL_LOCAL => {
-                let l = &self.frames[top].locals;
-                let a = unsafe { *l.get_unchecked(i.a() as usize) };
-                let b = unsafe { *l.get_unchecked(i.b() as usize) };
-                self.push(Value::bool(a.lt(b)));
-                Action::Next
-            }
             OP_LOAD_LOCAL_PUSH_INT => {
                 let v = unsafe { *self.frames[top].locals.get_unchecked(i.a() as usize) };
                 self.push(v);
@@ -623,116 +676,101 @@ impl VM {
             }
 
             // ── Integer-specialized arithmetic ──
-            OP_ADD_INT => {
-                let b = self.pop(); let a = self.pop();
+            op if [OP_ADD_INT, OP_SUB_INT, OP_MUL_INT].contains(&op) => {
+                let b = self.pop();
+                let a = self.pop();
                 if a.is_int() && b.is_int() {
-                    let r = a.as_i48().checked_add(b.as_i48()).unwrap_or_else(|| {
-                        (a.as_i48() as f64 + b.as_i48() as f64) as i64
-                    });
+                    let r = match op {
+                        OP_ADD_INT => checked_add_overflow(a.as_i48(), b.as_i48()),
+                        OP_SUB_INT => checked_sub_overflow(a.as_i48(), b.as_i48()),
+                        OP_MUL_INT => checked_mul_overflow(a.as_i48(), b.as_i48()),
+                        _ => 0,
+                    };
                     self.push(Value::from_i48(r));
                 } else {
-                    self.push(a.add(b, &self.arena));
+                    return match op {
+                        OP_ADD_INT => {
+                            self.push(a.add(b, &self.arena));
+                            Action::Next
+                        }
+                        OP_SUB_INT => {
+                            self.push(a.sub_(b));
+                            Action::Next
+                        }
+                        OP_MUL_INT => {
+                            self.push(a.mul(b, &self.arena));
+                            Action::Next
+                        }
+                        _ => Action::Next,
+                    };
                 }
                 Action::Next
             }
-            OP_SUB_INT => {
-                let b = self.pop(); let a = self.pop();
-                if a.is_int() && b.is_int() {
-                    let r = a.as_i48().checked_sub(b.as_i48()).unwrap_or_else(|| {
-                        (a.as_i48() as f64 - b.as_i48() as f64) as i64
-                    });
-                    self.push(Value::from_i48(r));
-                } else {
-                    self.push(a.sub_(b));
-                }
-                Action::Next
-            }
-            OP_MUL_INT => {
-                let b = self.pop(); let a = self.pop();
-                if a.is_int() && b.is_int() {
-                    let r = a.as_i48().checked_mul(b.as_i48()).unwrap_or_else(|| {
-                        (a.as_i48() as f64 * b.as_i48() as f64) as i64
-                    });
-                    self.push(Value::from_i48(r));
-                } else {
-                    self.push(a.mul(b, &self.arena));
-                }
-                Action::Next
-            }
-            OP_LT_INT => {
-                let b = self.pop(); let a = self.pop();
-                let r = if a.is_int() && b.is_int() {
-                    a.as_i48() < b.as_i48()
-                } else {
-                    a.lt(b)
-                };
-                self.push(Value::bool(r));
-                Action::Next
-            }
-            OP_GT_INT => {
-                let b = self.pop(); let a = self.pop();
-                let r = if a.is_int() && b.is_int() {
-                    a.as_i48() > b.as_i48()
-                } else {
-                    a.gt(b)
-                };
-                self.push(Value::bool(r));
-                Action::Next
-            }
-            OP_EQ_INT => {
-                let b = self.pop(); let a = self.pop();
-                let r = if a.is_int() && b.is_int() {
-                    a.as_i48() == b.as_i48()
-                } else {
-                    a.eq_(b)
+            op if [OP_LT_INT, OP_GT_INT, OP_EQ_INT].contains(&op) => {
+                let b = self.pop();
+                let a = self.pop();
+                let r = match op {
+                    OP_LT_INT => if a.is_int() && b.is_int() {
+                        a.as_i48() < b.as_i48()
+                    } else {
+                        a.lt(b)
+                    },
+                    OP_GT_INT => if a.is_int() && b.is_int() {
+                        a.as_i48() > b.as_i48()
+                    } else {
+                        a.gt(b)
+                    },
+                    OP_EQ_INT => if a.is_int() && b.is_int() {
+                        a.as_i48() == b.as_i48()
+                    } else {
+                        a.eq_(b)
+                    },
+                    _ => false,
                 };
                 self.push(Value::bool(r));
                 Action::Next
             }
 
-            // ── Superinstructions ──
-            OP_INC_LOCAL => {
+            // ── INC/DEC_LOCAL: $x = $x + 1 / $x - 1 ──
+            op if [OP_INC_LOCAL, OP_DEC_LOCAL].contains(&op) => {
                 let l = &mut self.frames[top].locals;
                 let idx = i.a() as usize;
                 let v = unsafe { *l.get_unchecked(idx) };
                 if v.is_int() {
-                    let r = v.as_i48().checked_add(1).unwrap_or(v.as_i48());
+                    let r = match op {
+                        OP_INC_LOCAL => v.as_i48().checked_add(1).unwrap_or(v.as_i48()),
+                        OP_DEC_LOCAL => v.as_i48().checked_sub(1).unwrap_or(v.as_i48()),
+                        _ => 0,
+                    };
                     unsafe { *l.get_unchecked_mut(idx) = Value::from_i48(r); }
                 } else {
-                    let r = v.add(Value::from_i48(1), &self.arena);
-                    unsafe { *l.get_unchecked_mut(idx) = r; }
+                    unsafe {
+                        *l.get_unchecked_mut(idx) = match op {
+                            OP_INC_LOCAL => v.add(Value::from_i48(1), &self.arena),
+                            OP_DEC_LOCAL => v.sub_(Value::from_i48(1)),
+                            _ => Value::nil(),
+                        };
+                    }
                 }
                 Action::Next
             }
-            OP_DEC_LOCAL => {
-                let l = &mut self.frames[top].locals;
-                let idx = i.a() as usize;
-                let v = unsafe { *l.get_unchecked(idx) };
-                if v.is_int() {
-                    let r = v.as_i48().checked_sub(1).unwrap_or(v.as_i48());
-                    unsafe { *l.get_unchecked_mut(idx) = Value::from_i48(r); }
-                } else {
-                    let r = v.sub_(Value::from_i48(1));
-                    unsafe { *l.get_unchecked_mut(idx) = r; }
+            // ── Local-local binary ops: push(a op b) where a and b are locals ──
+            op if [OP_ADD_LOCAL_LOCAL, OP_SUB_LOCAL_LOCAL, OP_MUL_LOCAL_LOCAL, OP_DIV_LOCAL_LOCAL, OP_LT_LOCAL_LOCAL].contains(&op) => {
+                let l = &self.frames[top].locals;
+                let a = unsafe { *l.get_unchecked(i.a() as usize) };
+                let b = unsafe { *l.get_unchecked(i.b() as usize) };
+                match op {
+                    OP_ADD_LOCAL_LOCAL => self.push(a.add(b, &self.arena)),
+                    OP_SUB_LOCAL_LOCAL => self.push(a.sub_(b)),
+                    OP_MUL_LOCAL_LOCAL => self.push(a.mul(b, &self.arena)),
+                    OP_DIV_LOCAL_LOCAL => self.push(a.div_(b)),
+                    OP_LT_LOCAL_LOCAL => self.push(Value::bool(a.lt(b))),
+                    _ => {},
                 }
                 Action::Next
             }
-            OP_MUL_LOCAL_LOCAL => {
-                let l = &self.frames[top].locals;
-                let a = unsafe { *l.get_unchecked(i.a() as usize) };
-                let b = unsafe { *l.get_unchecked(i.b() as usize) };
-                self.push(a.mul(b, &self.arena));
-                Action::Next
-            }
-            OP_DIV_LOCAL_LOCAL => {
-                let l = &self.frames[top].locals;
-                let a = unsafe { *l.get_unchecked(i.a() as usize) };
-                let b = unsafe { *l.get_unchecked(i.b() as usize) };
-                self.push(a.div_(b));
-                Action::Next
-            }
+            // ── ADD_INT_STORE_LOCAL: $dest = $src + c (three operands) ──
             OP_ADD_INT_STORE_LOCAL => {
-                // a = dest slot, b = source slot, c = int constant (as u16)
                 let l = &mut self.frames[top].locals;
                 let dest = i.a() as usize;
                 let src = i.b() as usize;
@@ -747,8 +785,8 @@ impl VM {
                 }
                 Action::Next
             }
+            // ── INC_LOCAL_INT: $x = $x + c ──
             OP_INC_LOCAL_INT => {
-                // a = local slot, b = int constant
                 let l = &mut self.frames[top].locals;
                 let idx = i.a() as usize;
                 let c = i.b() as i64;
@@ -816,72 +854,63 @@ impl VM {
                 }
             }
 
-            // ── ADD_INT_LOCAL: $x = $x + c ──
-            OP_ADD_INT_LOCAL => {
+            // ── Int-constant local arithmetic: $x = $x op c ──
+            op if [OP_ADD_INT_LOCAL, OP_SUB_INT_LOCAL, OP_MUL_INT_LOCAL].contains(&op) => {
                 let l = &mut self.frames[top].locals;
                 let idx = i.a() as usize;
                 let c = i.b() as i64;
                 let v = unsafe { *l.get_unchecked(idx) };
                 if v.is_int() {
-                    let r = v.as_i48().checked_add(c).unwrap_or(v.as_i48());
+                    let r = match op {
+                        OP_ADD_INT_LOCAL => v.as_i48().checked_add(c).unwrap_or(v.as_i48()),
+                        OP_SUB_INT_LOCAL => v.as_i48().checked_sub(c).unwrap_or(v.as_i48()),
+                        OP_MUL_INT_LOCAL => v.as_i48().checked_mul(c).unwrap_or(v.as_i48()),
+                        _ => 0,
+                    };
                     unsafe { *l.get_unchecked_mut(idx) = Value::from_i48(r); }
                 } else {
-                    let r = v.add(Value::from_i48(c), &self.arena);
-                    unsafe { *l.get_unchecked_mut(idx) = r; }
+                    unsafe {
+                        *l.get_unchecked_mut(idx) = match op {
+                            OP_ADD_INT_LOCAL => v.add(Value::from_i48(c), &self.arena),
+                            OP_SUB_INT_LOCAL => v.sub_(Value::from_i48(c)),
+                            OP_MUL_INT_LOCAL => v.mul(Value::from_i48(c), &self.arena),
+                            _ => Value::nil(),
+                        };
+                    }
                 }
                 Action::Next
             }
 
-            // ── ADD_LOCAL_STORE: $a = $a + $b (direct local-to-local add) ──
-            OP_ADD_LOCAL_STORE => {
+            // ── Two-operand local store: dest = dest op src ──
+            op if [OP_ADD_LOCAL_STORE, OP_SUB_LOCAL_STORE, OP_MUL_LOCAL_STORE, OP_DIV_LOCAL_STORE].contains(&op) => {
                 let l = &mut self.frames[top].locals;
                 let dest = i.a() as usize;
                 let src = i.b() as usize;
                 let a = unsafe { *l.get_unchecked(dest) };
                 let b = unsafe { *l.get_unchecked(src) };
-                // Fast integer path
                 if a.is_int() && b.is_int() {
-                    let r = a.as_i48().checked_add(b.as_i48()).unwrap_or_else(|| {
-                        (a.as_i48() as f64 + b.as_i48() as f64) as i64
-                    });
+                    let r = match op {
+                        OP_ADD_LOCAL_STORE => checked_add_overflow(a.as_i48(), b.as_i48()),
+                        OP_SUB_LOCAL_STORE => checked_sub_overflow(a.as_i48(), b.as_i48()),
+                        OP_MUL_LOCAL_STORE => checked_mul_overflow(a.as_i48(), b.as_i48()),
+                        OP_DIV_LOCAL_STORE => checked_div_overflow(a.as_i48(), b.as_i48()),
+                        _ => 0,
+                    };
                     unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
                 } else {
-                    unsafe { *l.get_unchecked_mut(dest) = a.add(b, &self.arena); }
+                    unsafe {
+                        *l.get_unchecked_mut(dest) = match op {
+                            OP_ADD_LOCAL_STORE => a.add(b, &self.arena),
+                            OP_SUB_LOCAL_STORE => a.sub_(b),
+                            OP_MUL_LOCAL_STORE => a.mul(b, &self.arena),
+                            OP_DIV_LOCAL_STORE => a.div_(b),
+                            _ => Value::nil(),
+                        };
+                    }
                 }
                 Action::Next
             }
 
-            // ── SUB_INT_LOCAL: $x = $x - c ──
-            OP_SUB_INT_LOCAL => {
-                let l = &mut self.frames[top].locals;
-                let idx = i.a() as usize;
-                let c = i.b() as i64;
-                let v = unsafe { *l.get_unchecked(idx) };
-                if v.is_int() {
-                    let r = v.as_i48().checked_sub(c).unwrap_or(v.as_i48());
-                    unsafe { *l.get_unchecked_mut(idx) = Value::from_i48(r); }
-                } else {
-                    let r = v.sub_(Value::from_i48(c));
-                    unsafe { *l.get_unchecked_mut(idx) = r; }
-                }
-                Action::Next
-            }
-
-            // ── MUL_INT_LOCAL: $x = $x * c ──
-            OP_MUL_INT_LOCAL => {
-                let l = &mut self.frames[top].locals;
-                let idx = i.a() as usize;
-                let c = i.b() as i64;
-                let v = unsafe { *l.get_unchecked(idx) };
-                if v.is_int() {
-                    let r = v.as_i48().checked_mul(c).unwrap_or(v.as_i48());
-                    unsafe { *l.get_unchecked_mut(idx) = Value::from_i48(r); }
-                } else {
-                    let r = v.mul(Value::from_i48(c), &self.arena);
-                    unsafe { *l.get_unchecked_mut(idx) = r; }
-                }
-                Action::Next
-            }
 
             // ── WHILE_LT_INT: while $a < b { body } (single-opcode while-loop) ──
             // Operand a = local slot, b = int constant, c = exit_wide_idx
@@ -902,44 +931,8 @@ impl VM {
                 }
             }
 
-            // ── SUB_LOCAL_STORE: $a = $a - $b ──
-            OP_SUB_LOCAL_STORE => {
-                let l = &mut self.frames[top].locals;
-                let dest = i.a() as usize;
-                let src = i.b() as usize;
-                let a = unsafe { *l.get_unchecked(dest) };
-                let b = unsafe { *l.get_unchecked(src) };
-                if a.is_int() && b.is_int() {
-                    let r = a.as_i48().checked_sub(b.as_i48()).unwrap_or_else(|| {
-                        (a.as_i48() as f64 - b.as_i48() as f64) as i64
-                    });
-                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
-                } else {
-                    unsafe { *l.get_unchecked_mut(dest) = a.sub_(b); }
-                }
-                Action::Next
-            }
-
-            // ── DIV_LOCAL_STORE: $a = $a / $b ──
-            OP_DIV_LOCAL_STORE => {
-                let l = &mut self.frames[top].locals;
-                let dest = i.a() as usize;
-                let src = i.b() as usize;
-                let a = unsafe { *l.get_unchecked(dest) };
-                let b = unsafe { *l.get_unchecked(src) };
-                if a.is_int() && b.is_int() {
-                    let r = a.as_i48().checked_div(b.as_i48()).unwrap_or_else(|| {
-                        (a.as_i48() as f64 / b.as_i48() as f64) as i64
-                    });
-                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
-                } else {
-                    unsafe { *l.get_unchecked_mut(dest) = a.div_(b); }
-                }
-                Action::Next
-            }
-
-            // ── ADD_LOCAL_LOCAL_STORE: $c = $a + $b ──
-            OP_ADD_LOCAL_LOCAL_STORE => {
+            // ── Three-operand local store: dest = src1 op src2 ──
+            op if [OP_ADD_LOCAL_LOCAL_STORE, OP_SUB_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_LOCAL_STORE, OP_DIV_LOCAL_LOCAL_STORE].contains(&op) => {
                 let l = &mut self.frames[top].locals;
                 let dest = i.a() as usize;
                 let src1 = i.c() as usize;
@@ -947,87 +940,24 @@ impl VM {
                 let a = unsafe { *l.get_unchecked(src1) };
                 let b = unsafe { *l.get_unchecked(src2) };
                 if a.is_int() && b.is_int() {
-                    let r = a.as_i48().checked_add(b.as_i48()).unwrap_or_else(|| {
-                        (a.as_i48() as f64 + b.as_i48() as f64) as i64
-                    });
+                    let r = match op {
+                        OP_ADD_LOCAL_LOCAL_STORE => checked_add_overflow(a.as_i48(), b.as_i48()),
+                        OP_SUB_LOCAL_LOCAL_STORE => checked_sub_overflow(a.as_i48(), b.as_i48()),
+                        OP_MUL_LOCAL_LOCAL_STORE => checked_mul_overflow(a.as_i48(), b.as_i48()),
+                        OP_DIV_LOCAL_LOCAL_STORE => checked_div_overflow(a.as_i48(), b.as_i48()),
+                        _ => 0,
+                    };
                     unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
                 } else {
-                    unsafe { *l.get_unchecked_mut(dest) = a.add(b, &self.arena); }
-                }
-                Action::Next
-            }
-
-            // ── MUL_LOCAL_LOCAL_STORE: $c = $a * $b ──
-            OP_MUL_LOCAL_LOCAL_STORE => {
-                let l = &mut self.frames[top].locals;
-                let dest = i.a() as usize;
-                let src1 = i.c() as usize;
-                let src2 = i.b() as usize;
-                let a = unsafe { *l.get_unchecked(src1) };
-                let b = unsafe { *l.get_unchecked(src2) };
-                if a.is_int() && b.is_int() {
-                    let r = a.as_i48().checked_mul(b.as_i48()).unwrap_or_else(|| {
-                        (a.as_i48() as f64 * b.as_i48() as f64) as i64
-                    });
-                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
-                } else {
-                    unsafe { *l.get_unchecked_mut(dest) = a.mul(b, &self.arena); }
-                }
-                Action::Next
-            }
-
-            // ── MUL_LOCAL_STORE: $a = $a * $b (direct local-to-local mul) ──
-            OP_MUL_LOCAL_STORE => {
-                let l = &mut self.frames[top].locals;
-                let dest = i.a() as usize;
-                let src = i.b() as usize;
-                let a = unsafe { *l.get_unchecked(dest) };
-                let b = unsafe { *l.get_unchecked(src) };
-                if a.is_int() && b.is_int() {
-                    let r = a.as_i48().checked_mul(b.as_i48()).unwrap_or_else(|| {
-                        (a.as_i48() as f64 * b.as_i48() as f64) as i64
-                    });
-                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
-                } else {
-                    unsafe { *l.get_unchecked_mut(dest) = a.mul(b, &self.arena); }
-                }
-                Action::Next
-            }
-
-            // ── SUB_LOCAL_LOCAL_STORE: $c = $a - $b ──
-            OP_SUB_LOCAL_LOCAL_STORE => {
-                let l = &mut self.frames[top].locals;
-                let dest = i.a() as usize;
-                let src1 = i.c() as usize;
-                let src2 = i.b() as usize;
-                let a = unsafe { *l.get_unchecked(src1) };
-                let b = unsafe { *l.get_unchecked(src2) };
-                if a.is_int() && b.is_int() {
-                    let r = a.as_i48().checked_sub(b.as_i48()).unwrap_or_else(|| {
-                        (a.as_i48() as f64 - b.as_i48() as f64) as i64
-                    });
-                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
-                } else {
-                    unsafe { *l.get_unchecked_mut(dest) = a.sub_(b); }
-                }
-                Action::Next
-            }
-
-            // ── DIV_LOCAL_LOCAL_STORE: $c = $a / $b ──
-            OP_DIV_LOCAL_LOCAL_STORE => {
-                let l = &mut self.frames[top].locals;
-                let dest = i.a() as usize;
-                let src1 = i.c() as usize;
-                let src2 = i.b() as usize;
-                let a = unsafe { *l.get_unchecked(src1) };
-                let b = unsafe { *l.get_unchecked(src2) };
-                if a.is_int() && b.is_int() {
-                    let r = a.as_i48().checked_div(b.as_i48()).unwrap_or_else(|| {
-                        (a.as_i48() as f64 / b.as_i48() as f64) as i64
-                    });
-                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
-                } else {
-                    unsafe { *l.get_unchecked_mut(dest) = a.div_(b); }
+                    unsafe {
+                        *l.get_unchecked_mut(dest) = match op {
+                            OP_ADD_LOCAL_LOCAL_STORE => a.add(b, &self.arena),
+                            OP_SUB_LOCAL_LOCAL_STORE => a.sub_(b),
+                            OP_MUL_LOCAL_LOCAL_STORE => a.mul(b, &self.arena),
+                            OP_DIV_LOCAL_LOCAL_STORE => a.div_(b),
+                            _ => Value::nil(),
+                        };
+                    }
                 }
                 Action::Next
             }
@@ -1254,75 +1184,74 @@ impl VM {
 /// Returns a human-readable name for an opcode, or the hex value if unknown.
 #[cfg(feature = "opcode-stats")]
 fn opcode_name(op: u8) -> String {
-    match op {
-        OP_NOP => "OP_NOP".to_string(),
-        OP_PUSH_NIL => "OP_PUSH_NIL".to_string(),
-        OP_PUSH_TRUE => "OP_PUSH_TRUE".to_string(),
-        OP_PUSH_FALSE => "OP_PUSH_FALSE".to_string(),
-        OP_PUSH_INT => "OP_PUSH_INT".to_string(),
-        OP_PUSH_INT_WIDE => "OP_PUSH_INT_WIDE".to_string(),
-        OP_PUSH_FLOAT => "OP_PUSH_FLOAT".to_string(),
-        OP_PUSH_STR => "OP_PUSH_STR".to_string(),
-        OP_LOAD_LOCAL => "OP_LOAD_LOCAL".to_string(),
-        OP_STORE_LOCAL => "OP_STORE_LOCAL".to_string(),
-        OP_LOAD_GLOBAL => "OP_LOAD_GLOBAL".to_string(),
-        OP_STORE_GLOBAL => "OP_STORE_GLOBAL".to_string(),
-        OP_ADD => "OP_ADD".to_string(),
-        OP_SUB => "OP_SUB".to_string(),
-        OP_MUL => "OP_MUL".to_string(),
-        OP_DIV => "OP_DIV".to_string(),
-        OP_MOD => "OP_MOD".to_string(),
-        OP_NEG => "OP_NEG".to_string(),
-        OP_EQ => "OP_EQ".to_string(),
-        OP_NEQ => "OP_NEQ".to_string(),
-        OP_LT => "OP_LT".to_string(),
-        OP_GT => "OP_GT".to_string(),
-        OP_LE => "OP_LE".to_string(),
-        OP_GE => "OP_GE".to_string(),
-        OP_AND => "OP_AND".to_string(),
-        OP_OR => "OP_OR".to_string(),
-        OP_NOT => "OP_NOT".to_string(),
-        OP_IN => "OP_IN".to_string(),
-        OP_TYPE_TEST => "OP_TYPE_TEST".to_string(),
-        OP_JUMP => "OP_JUMP".to_string(),
-        OP_JUMP_IF_FALSE => "OP_JUMP_IF_FALSE".to_string(),
-        OP_JUMP_IF_NIL => "OP_JUMP_IF_NIL".to_string(),
-        OP_CALL => "OP_CALL".to_string(),
-        OP_CALL_METHOD => "OP_CALL_METHOD".to_string(),
-        OP_RETURN => "OP_RETURN".to_string(),
-        OP_HALT => "OP_HALT".to_string(),
-        OP_LEN => "OP_LEN".to_string(),
-        OP_GET_INDEX => "OP_GET_INDEX".to_string(),
-        OP_GET_FIELD => "OP_GET_FIELD".to_string(),
-        OP_MAKE_ARRAY => "OP_MAKE_ARRAY".to_string(),
-        OP_MAKE_DICT => "OP_MAKE_DICT".to_string(),
-        OP_ARRAY_PUSH => "OP_ARRAY_PUSH".to_string(),
-        OP_FOR_ITER_START => "OP_FOR_ITER_START".to_string(),
-        OP_FOR_ITER_NEXT => "OP_FOR_ITER_NEXT".to_string(),
-        OP_FOR_RANGE_START => "OP_FOR_RANGE_START".to_string(),
-        OP_FOR_RANGE_NEXT => "OP_FOR_RANGE_NEXT".to_string(),
-        OP_LOAD_LAMBDA => "OP_LOAD_LAMBDA".to_string(),
-        OP_COALESCE => "OP_COALESCE".to_string(),
-        OP_LOAD_LOCAL_LOAD_LOCAL => "OP_LL_LL".to_string(),
-        OP_ADD_LOCAL_LOCAL => "OP_ADD_LL".to_string(),
-        OP_SUB_LOCAL_LOCAL => "OP_SUB_LL".to_string(),
-        OP_LT_LOCAL_LOCAL => "OP_LT_LL".to_string(),
-        OP_LOAD_LOCAL_PUSH_INT => "OP_LL_PI".to_string(),
-        OP_LOAD_LOCAL_STORE_LOCAL => "OP_LL_SL".to_string(),
-        OP_FOR_NUMBER_LOOP => "OP_FOR_NUM_LP".to_string(),
-        OP_ADD_INT_LOCAL => "OP_ADD_INT_L".to_string(),
-        OP_ADD_LOCAL_STORE => "OP_ADD_L_ST".to_string(),
-        OP_SUB_INT_LOCAL => "OP_SUB_INT_L".to_string(),
-        OP_MUL_INT_LOCAL => "OP_MUL_INT_L".to_string(),
-        OP_WHILE_LT_INT => "OP_WHILE_LT".to_string(),
-        OP_MUL_LOCAL_STORE => "OP_MUL_L_ST".to_string(),
-        OP_DIV_LOCAL_STORE => "OP_DIV_L_ST".to_string(),
-        OP_SUB_LOCAL_STORE => "OP_SUB_L_ST".to_string(),
-        OP_ADD_LOCAL_LOCAL_STORE => "OP_ADD_LL_ST".to_string(),
-        OP_MUL_LOCAL_LOCAL_STORE => "OP_MUL_LL_ST".to_string(),
-        OP_SUB_LOCAL_LOCAL_STORE => "OP_SUB_LL_ST".to_string(),
-        OP_DIV_LOCAL_LOCAL_STORE => "OP_DIV_LL_ST".to_string(),
-        OP_WHILE_LT_LOCAL => "OP_WHILE_LT_L".to_string(),
-        _ => format!("0x{:02X}", op),
-    }
+    opcode_names!(op,
+        OP_NOP => "OP_NOP",
+        OP_PUSH_NIL => "OP_PUSH_NIL",
+        OP_PUSH_TRUE => "OP_PUSH_TRUE",
+        OP_PUSH_FALSE => "OP_PUSH_FALSE",
+        OP_PUSH_INT => "OP_PUSH_INT",
+        OP_PUSH_INT_WIDE => "OP_PUSH_INT_WIDE",
+        OP_PUSH_FLOAT => "OP_PUSH_FLOAT",
+        OP_PUSH_STR => "OP_PUSH_STR",
+        OP_LOAD_LOCAL => "OP_LOAD_LOCAL",
+        OP_STORE_LOCAL => "OP_STORE_LOCAL",
+        OP_LOAD_GLOBAL => "OP_LOAD_GLOBAL",
+        OP_STORE_GLOBAL => "OP_STORE_GLOBAL",
+        OP_ADD => "OP_ADD",
+        OP_SUB => "OP_SUB",
+        OP_MUL => "OP_MUL",
+        OP_DIV => "OP_DIV",
+        OP_MOD => "OP_MOD",
+        OP_NEG => "OP_NEG",
+        OP_EQ => "OP_EQ",
+        OP_NEQ => "OP_NEQ",
+        OP_LT => "OP_LT",
+        OP_GT => "OP_GT",
+        OP_LE => "OP_LE",
+        OP_GE => "OP_GE",
+        OP_AND => "OP_AND",
+        OP_OR => "OP_OR",
+        OP_NOT => "OP_NOT",
+        OP_IN => "OP_IN",
+        OP_TYPE_TEST => "OP_TYPE_TEST",
+        OP_JUMP => "OP_JUMP",
+        OP_JUMP_IF_FALSE => "OP_JUMP_IF_FALSE",
+        OP_JUMP_IF_NIL => "OP_JUMP_IF_NIL",
+        OP_CALL => "OP_CALL",
+        OP_CALL_METHOD => "OP_CALL_METHOD",
+        OP_RETURN => "OP_RETURN",
+        OP_HALT => "OP_HALT",
+        OP_LEN => "OP_LEN",
+        OP_GET_INDEX => "OP_GET_INDEX",
+        OP_GET_FIELD => "OP_GET_FIELD",
+        OP_MAKE_ARRAY => "OP_MAKE_ARRAY",
+        OP_MAKE_DICT => "OP_MAKE_DICT",
+        OP_ARRAY_PUSH => "OP_ARRAY_PUSH",
+        OP_FOR_ITER_START => "OP_FOR_ITER_START",
+        OP_FOR_ITER_NEXT => "OP_FOR_ITER_NEXT",
+        OP_FOR_RANGE_START => "OP_FOR_RANGE_START",
+        OP_FOR_RANGE_NEXT => "OP_FOR_RANGE_NEXT",
+        OP_LOAD_LAMBDA => "OP_LOAD_LAMBDA",
+        OP_COALESCE => "OP_COALESCE",
+        OP_LOAD_LOCAL_LOAD_LOCAL => "OP_LL_LL",
+        OP_ADD_LOCAL_LOCAL => "OP_ADD_LL",
+        OP_SUB_LOCAL_LOCAL => "OP_SUB_LL",
+        OP_LT_LOCAL_LOCAL => "OP_LT_LL",
+        OP_LOAD_LOCAL_PUSH_INT => "OP_LL_PI",
+        OP_LOAD_LOCAL_STORE_LOCAL => "OP_LL_SL",
+        OP_FOR_NUMBER_LOOP => "OP_FOR_NUM_LP",
+        OP_ADD_INT_LOCAL => "OP_ADD_INT_L",
+        OP_ADD_LOCAL_STORE => "OP_ADD_L_ST",
+        OP_SUB_INT_LOCAL => "OP_SUB_INT_L",
+        OP_MUL_INT_LOCAL => "OP_MUL_INT_L",
+        OP_WHILE_LT_INT => "OP_WHILE_LT",
+        OP_MUL_LOCAL_STORE => "OP_MUL_L_ST",
+        OP_DIV_LOCAL_STORE => "OP_DIV_L_ST",
+        OP_SUB_LOCAL_STORE => "OP_SUB_L_ST",
+        OP_ADD_LOCAL_LOCAL_STORE => "OP_ADD_LL_ST",
+        OP_MUL_LOCAL_LOCAL_STORE => "OP_MUL_LL_ST",
+        OP_SUB_LOCAL_LOCAL_STORE => "OP_SUB_LL_ST",
+        OP_DIV_LOCAL_LOCAL_STORE => "OP_DIV_LL_ST",
+        OP_WHILE_LT_LOCAL => "OP_WHILE_LT_L",
+    )
 }

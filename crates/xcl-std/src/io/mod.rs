@@ -1,7 +1,10 @@
 ﻿use std::io::{BufRead, Read, Write, Seek, SeekFrom};
 use xcl_macros::{xcl_fn, xcl_type};
 use xcl_vm::{Value, HandleKind, DomainCtx, errors::{universal, filesystem}};
-use crate::result::{ok_result, err_result};
+use crate::core::result::{ok_result, err_result};
+
+pub mod output;
+pub mod input;
 
 /// A handle to an open file.
 ///
@@ -1278,6 +1281,7 @@ pub fn io_is_tty(ctx: &mut DomainCtx) -> Value {
         HandleKind::Stdout => Value::bool_(std::io::IsTerminal::is_terminal(&std::io::stdout())),
         HandleKind::Stderr => Value::bool_(std::io::IsTerminal::is_terminal(&std::io::stderr())),
         HandleKind::File { .. } => Value::bool_(false),
+        HandleKind::Process { .. } => Value::bool_(false),
     }
 }
 

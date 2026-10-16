@@ -13,6 +13,7 @@ homepage.workspace = true
 xcl-macros.workspace = true
 xcl-vm.workspace = true
 linkme.workspace = true
+hashbrown.workspace = true
 glam.workspace = true
 num-complex.workspace = true
 rand.workspace = true
@@ -20,6 +21,23 @@ rand.workspace = true
 # [std.io]
 itoa.workspace = true
 ryu.workspace = true
+
+# [std.encoding] — JSON serialization for MCP and general use
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+
+# [std.net] — lightweight, secure HTTP client (synchronous, TLS via rustls by default)
+ureq = "3"
+
+# [std.sys, std.ffi, std.abi] — platform-specific FFI
+libc = "0.2"
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Win32_Storage_FileSystem",
+] }
 
 [dev-dependencies]
 criterion.workspace = true

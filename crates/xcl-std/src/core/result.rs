@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use xcl_macros::{xcl_fn, xcl_type};
 use xcl_vm::{Value, DomainCtx, SUBTYPE_RESULT, VARIANT_OK, VARIANT_ERR};
-use crate::error::{make_error, error_message};
+use super::error::{make_error, error_message};
 
 /// The Result type registered with the VM.
 #[xcl_type(
