@@ -220,7 +220,34 @@ pub fn emit_literal<C: EmitConfig>(lit: &IrLiteral) -> String {
     )
 }
 
+/// Re-indent every line of `text` by prepending `indent`.
+/// Trailing newlines are preserved; blank lines still get the indent.
+pub fn re_indent(text: &str, indent: &str) -> String {
+    let mut result = String::with_capacity(text.len() + indent.len() * text.len().saturating_div(20));
+    let mut lines = text.lines();
+
+    if let Some(first) = lines.next() {
+        result.push_str(indent);
+        result.push_str(first);
+    }
+
+    for line in lines {
+        result.push('\n');
+        result.push_str(indent);
+        result.push_str(line);
+    }
+
+    // Preserve trailing newline if the original had one
+    if text.ends_with('\n') {
+        result.push('\n');
+    }
+
+    result
+}
+
 /// Emit an IR node to a String (helper for collecting sub-expressions).
+/// The returned string has NO trailing newline and NO leading indent on the first line,
+/// so the caller can prepend the appropriate indent.
 pub fn emit_to_string<C: EmitConfig>(
     ir: &Ir,
     context: &mut EmitContext,
@@ -228,7 +255,8 @@ pub fn emit_to_string<C: EmitConfig>(
 ) -> Result<String, TranslateError> {
     let mut s = String::new();
     emit_node::<C>(ir, &mut s, context, indent_level)?;
-    Ok(s)
+    // Strip trailing whitespace so callers control newlines
+    Ok(s.trim_end().to_string())
 }
 
 /// Generic emit_node — shared by all backends.
@@ -276,17 +304,22 @@ pub fn emit_node<C: EmitConfig>(
 
         IrNode::If { cond, then, else_ } => {
             let cond_str = emit_to_string::<C>(cond, context, 0)?;
+            let inner_indent = "    ".repeat(indent_level + 1);
             let then_str = emit_to_string::<C>(then, context, indent_level + 1)?;
+            let then_indented = re_indent(&then_str, &inner_indent);
 
             if C::is_indent_based() {
-                output.push_str(&format!("{}if {}:\n{}", indent, cond_str, then_str));
+                output.push_str(&format!(
+                    "{}if {}:\n{}\n",
+                    indent, cond_str, then_indented
+                ));
             } else {
                 output.push_str(&format!(
                     "{}if ({}) {}\n{}\n{}{}\n",
                     indent,
                     cond_str,
                     C::block_open(),
-                    then_str,
+                    then_indented,
                     indent,
                     C::block_close()
                 ));
@@ -294,14 +327,18 @@ pub fn emit_node<C: EmitConfig>(
 
             if let Some(else_ir) = else_ {
                 let else_str = emit_to_string::<C>(else_ir, context, indent_level + 1)?;
+                let else_indented = re_indent(&else_str, &inner_indent);
                 if C::is_indent_based() {
-                    output.push_str(&format!("{}else:\n{}", indent, else_str));
+                    output.push_str(&format!(
+                        "{}else:\n{}\n",
+                        indent, else_indented
+                    ));
                 } else {
                     output.push_str(&format!(
                         "{}else {}\n{}\n{}{}\n",
                         indent,
                         C::block_open(),
-                        else_str,
+                        else_indented,
                         indent,
                         C::block_close()
                     ));
@@ -310,13 +347,15 @@ pub fn emit_node<C: EmitConfig>(
         }
 
         IrNode::Loop { body, cond } => {
+            let inner_indent = "    ".repeat(indent_level + 1);
             if let Some(cond_ir) = cond {
                 let cond_str = emit_to_string::<C>(cond_ir, context, 0)?;
                 let body_str = emit_to_string::<C>(body, context, indent_level + 1)?;
+                let body_indented = re_indent(&body_str, &inner_indent);
                 if C::is_indent_based() {
                     output.push_str(&format!(
                         "{}while {}:\n{}\n",
-                        indent, cond_str, body_str
+                        indent, cond_str, body_indented
                     ));
                 } else {
                     output.push_str(&format!(
@@ -324,23 +363,24 @@ pub fn emit_node<C: EmitConfig>(
                         indent,
                         cond_str,
                         C::block_open(),
-                        body_str,
+                        body_indented,
                         indent,
                         C::block_close()
                     ));
                 }
             } else {
                 let body_str = emit_to_string::<C>(body, context, indent_level + 1)?;
+                let body_indented = re_indent(&body_str, &inner_indent);
                 let true_literal = C::bool_true();
                 if C::is_indent_based() {
-                    output.push_str(&format!("{}while True:\n{}\n", indent, body_str));
+                    output.push_str(&format!("{}while True:\n{}\n", indent, body_indented));
                 } else {
                     output.push_str(&format!(
                         "{}while ({}) {}\n{}\n{}{}\n",
                         indent,
                         true_literal,
                         C::block_open(),
-                        body_str,
+                        body_indented,
                         indent,
                         C::block_close()
                     ));
@@ -350,10 +390,15 @@ pub fn emit_node<C: EmitConfig>(
 
         IrNode::Block(nodes) => {
             for node in nodes {
-                emit_node::<C>(node, output, context, indent_level)?;
-                if C::emit_newline_after_statement() {
-                    output.push('\n');
+                // Skip empty/nil-only statements to avoid emitting "NULL" for unparseable constructs
+                if matches!(&node.node, IrNode::Literal(IrLiteral::Nil)) {
+                    continue;
                 }
+                // Skip empty blocks
+                if matches!(&node.node, IrNode::Block(v) if v.is_empty()) {
+                    continue;
+                }
+                emit_node::<C>(node, output, context, indent_level)?;
             }
         }
 
@@ -376,6 +421,10 @@ pub fn emit_node<C: EmitConfig>(
             let type_name = C::map_type_for_let(ty);
             let var_name = C::convert_identifier(name);
 
+            // If the type is Any/void*, emit as an assignment instead of a declaration
+            // (handles this.field = value patterns from Java constructors/setters)
+            let is_assignment = type_name == "void*";
+
             let (mut_prefix, const_prefix) = if *mutable {
                 (C::mut_prefix(), "")
             } else {
@@ -386,6 +435,12 @@ pub fn emit_node<C: EmitConfig>(
                 output.push_str(&format!(
                     "{}{} = {}\n",
                     indent, var_name, value_str
+                ));
+            } else if is_assignment {
+                // Emit as assignment: field = value;
+                output.push_str(&format!(
+                    "{}{} = {}{}\n",
+                    indent, var_name, value_str, C::semicolon()
                 ));
             } else {
                 output.push_str(&format!(
@@ -463,7 +518,8 @@ pub fn emit_node<C: EmitConfig>(
 }
 
 /// Build the final output by wrapping the emitted body with imports, typedefs,
-/// and language-specific wrappers.
+/// and language-specific wrappers. The body is re-indented by one level so
+/// statements inside main()/class are properly indented.
 pub fn build_output<C: EmitConfig>(
     body: &str,
     context: &EmitContext,
@@ -476,11 +532,28 @@ pub fn build_output<C: EmitConfig>(
     // Emit typedefs
     C::emit_typedefs(&context.typedefs, &mut final_output);
 
-    // Emit wrapper start
-    C::emit_wrapper_start(&mut final_output);
+    // Emit wrapper start — capture it to check if there's an actual wrapper
+    let mut wrapper_start = String::new();
+    C::emit_wrapper_start(&mut wrapper_start);
 
-    // Emit body
-    final_output.push_str(body);
+    let trimmed = body.trim();
+    if !trimmed.is_empty() {
+        if !wrapper_start.is_empty() {
+            // There's a wrapper (main/class) — re-indent body by one level
+            final_output.push_str(&wrapper_start);
+            let wrapper_indent = "    ";
+            let indented_body = re_indent(trimmed, wrapper_indent);
+            final_output.push_str(&indented_body);
+            final_output.push('\n');
+        } else {
+            // No wrapper (e.g., Python) — emit body as-is
+            final_output.push_str(trimmed);
+            final_output.push('\n');
+        }
+    } else if !wrapper_start.is_empty() {
+        // Empty body but has wrapper
+        final_output.push_str(&wrapper_start);
+    }
 
     // Emit wrapper end
     C::emit_wrapper_end(&mut final_output);

@@ -93,13 +93,17 @@ impl EmitConfig for Java17Config {
             format!("{} {}", type_name, to_camel_case(pname))
         }).collect();
         let body_str = emitter::emit_to_string::<Java17Config>(body, context, indent_level + 1)?;
-        output.push_str(&format!("{}public {} {}({}) {{\n{}\n{}}}\n", indent, ret_type, method_name, params_str.join(", "), body_str, indent));
+        let inner_indent = "    ".repeat(indent_level + 1);
+        let body_indented = emitter::re_indent(&body_str, &inner_indent);
+        output.push_str(&format!("{}public {} {}({}) {{\n{}\n{}}}\n\n", indent, ret_type, method_name, params_str.join(", "), body_indented, indent));
         Ok(())
     }
     fn emit_defer(body: &Ir, output: &mut String, context: &mut EmitContext, indent_level: usize) -> Result<(), TranslateError> {
         let body_str = emitter::emit_to_string::<Java17Config>(body, context, indent_level + 1)?;
+        let inner_indent = "    ".repeat(indent_level + 1);
+        let body_indented = emitter::re_indent(&body_str, &inner_indent);
         let indent = "    ".repeat(indent_level);
-        output.push_str(&format!("{}try {{}} finally {{\n{}\n{}}}\n", indent, body_str, indent));
+        output.push_str(&format!("{}try {{}} finally {{\n{}\n{}}}\n", indent, body_indented, indent));
         Ok(())
     }
     fn emit_lambda(params: &[(String, IrType)], body: &Ir, output: &mut String, context: &mut EmitContext) -> Result<(), TranslateError> {
@@ -114,7 +118,9 @@ impl EmitConfig for Java17Config {
         output.push_str(&format!("{}switch ({}) {{\n", indent, value_str));
         for (pattern, _guards, body_ir) in arms {
             let body_str = emitter::emit_to_string::<Java17Config>(body_ir, context, indent_level + 1)?;
-            output.push_str(&format!("{}    case {} -> {{\n{}\n{}    }}\n", indent, pattern, body_str, indent));
+            let inner_indent = "    ".repeat(indent_level + 2);
+            let body_indented = emitter::re_indent(&body_str, &inner_indent);
+            output.push_str(&format!("{}    case {} -> {{\n{}\n{}    }}\n", indent, pattern, body_indented, indent));
         }
         output.push_str(&format!("{}}}\n", indent));
         Ok(())
@@ -128,8 +134,12 @@ impl EmitConfig for Java17Config {
         output.push(')');
         Ok(())
     }
-    fn emit_wrapper_start(output: &mut String) { output.push_str("public class Main {\n"); }
-    fn emit_wrapper_end(output: &mut String) { output.push_str("}\n"); }
+    fn emit_wrapper_start(output: &mut String) {
+        output.push_str("\npublic class Main {\n");
+    }
+    fn emit_wrapper_end(output: &mut String) {
+        output.push_str("}\n");
+    }
     fn emit_imports(imports: &[String], output: &mut String) {
         for import in imports { output.push_str(&format!("import {};\n", import)); }
         if !imports.is_empty() { output.push('\n'); }

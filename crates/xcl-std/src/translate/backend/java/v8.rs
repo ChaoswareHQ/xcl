@@ -149,9 +149,11 @@ impl EmitConfig for Java8Config {
             })
             .collect();
         let body_str = emitter::emit_to_string::<Java8Config>(body, context, indent_level + 1)?;
+        let inner_indent = "    ".repeat(indent_level + 1);
+        let body_indented = emitter::re_indent(&body_str, &inner_indent);
         output.push_str(&format!(
-            "{}public {} {}({}) {{\n{}\n{}}}\n",
-            indent, ret_type, method_name, params_str.join(", "), body_str, indent
+            "{}public {} {}({}) {{\n{}\n{}}}\n\n",
+            indent, ret_type, method_name, params_str.join(", "), body_indented, indent
         ));
         Ok(())
     }
@@ -163,10 +165,12 @@ impl EmitConfig for Java8Config {
         indent_level: usize,
     ) -> Result<(), TranslateError> {
         let body_str = emitter::emit_to_string::<Java8Config>(body, context, indent_level + 1)?;
+        let inner_indent = "    ".repeat(indent_level + 1);
+        let body_indented = emitter::re_indent(&body_str, &inner_indent);
         let indent = "    ".repeat(indent_level);
         output.push_str(&format!(
             "{}try {{}} finally {{\n{}\n{}}}\n",
-            indent, body_str, indent
+            indent, body_indented, indent
         ));
         Ok(())
     }
@@ -196,9 +200,11 @@ impl EmitConfig for Java8Config {
         output.push_str(&format!("{}switch ({}) {{\n", indent, value_str));
         for (pattern, _guards, body_ir) in arms {
             let body_str = emitter::emit_to_string::<Java8Config>(body_ir, context, indent_level + 1)?;
+            let inner_indent = "    ".repeat(indent_level + 2);
+            let body_indented = emitter::re_indent(&body_str, &inner_indent);
             output.push_str(&format!(
                 "{}    case {}:\n{}\n        break;\n",
-                indent, pattern, body_str
+                indent, pattern, body_indented
             ));
         }
         output.push_str(&format!("{}}}\n", indent));
@@ -222,7 +228,7 @@ impl EmitConfig for Java8Config {
     }
 
     fn emit_wrapper_start(output: &mut String) {
-        output.push_str("public class Main {\n");
+        output.push_str("\npublic class Main {\n");
     }
     fn emit_wrapper_end(output: &mut String) {
         output.push_str("}\n");

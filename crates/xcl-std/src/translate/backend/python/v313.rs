@@ -99,8 +99,10 @@ impl EmitConfig for Python313Config {
         let params_str: Vec<String> = params.iter().map(|(n, t)| format!("{}: {}", n, t)).collect();
         let ret_str = if *ret != IrType::Nil { format!(" -> {}", ret) } else { String::new() };
         let indent = "    ".repeat(indent_level);
+        let inner_indent = "    ".repeat(indent_level + 1);
         let body_str = emitter::emit_to_string::<Python313Config>(body, context, indent_level + 1)?;
-        output.push_str(&format!("{}def {}({}){}:\n{}\n", indent, name, params_str.join(", "), ret_str, body_str));
+        let body_indented = emitter::re_indent(&body_str, &inner_indent);
+        output.push_str(&format!("{}def {}({}){}:\n{}\n\n", indent, name, params_str.join(", "), ret_str, body_indented));
         Ok(())
     }
     fn emit_defer(body: &Ir, output: &mut String, context: &mut EmitContext, indent_level: usize) -> Result<(), TranslateError> {
@@ -120,9 +122,11 @@ impl EmitConfig for Python313Config {
         let indent = "    ".repeat(indent_level);
         output.push_str(&format!("{}match {}:", indent, value_str));
         for (pattern, _guards, body_ir) in arms {
-            let body_str = emitter::emit_to_string::<Python313Config>(body_ir, context, indent_level + 1)?;
+            let inner_indent = "    ".repeat(indent_level + 2);
+            let body_str = emitter::emit_to_string::<Python313Config>(body_ir, context, indent_level + 2)?;
+            let body_indented = emitter::re_indent(&body_str, &inner_indent);
             output.push_str(&format!("\n{}    case {}:", indent, pattern));
-            output.push_str(&format!("\n{}", body_str));
+            output.push_str(&format!("\n{}", body_indented));
         }
         Ok(())
     }

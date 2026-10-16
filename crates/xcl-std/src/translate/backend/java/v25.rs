@@ -157,10 +157,12 @@ impl EmitConfig for Java25Config {
             .collect();
 
         let body_str = emitter::emit_to_string::<Java25Config>(body, context, indent_level + 1)?;
+        let inner_indent = "    ".repeat(indent_level + 1);
+        let body_indented = emitter::re_indent(&body_str, &inner_indent);
 
         output.push_str(&format!(
-            "{}public {} {}({}) {{\n{}\n{}}}\n",
-            indent, ret_type, method_name, params_str.join(", "), body_str, indent
+            "{}public {} {}({}) {{\n{}\n{}}}\n\n",
+            indent, ret_type, method_name, params_str.join(", "), body_indented, indent
         ));
         Ok(())
     }
@@ -172,10 +174,12 @@ impl EmitConfig for Java25Config {
         indent_level: usize,
     ) -> Result<(), TranslateError> {
         let body_str = emitter::emit_to_string::<Java25Config>(body, context, indent_level + 1)?;
+        let inner_indent = "    ".repeat(indent_level + 1);
+        let body_indented = emitter::re_indent(&body_str, &inner_indent);
         let indent = "    ".repeat(indent_level);
         output.push_str(&format!(
             "{}try {{}} finally {{\n{}\n{}}}\n",
-            indent, body_str, indent
+            indent, body_indented, indent
         ));
         Ok(())
     }
@@ -207,9 +211,11 @@ impl EmitConfig for Java25Config {
         output.push_str(&format!("{}switch ({}) {{\n", indent, value_str));
         for (pattern, _guards, body_ir) in arms {
             let body_str = emitter::emit_to_string::<Java25Config>(body_ir, context, indent_level + 1)?;
+            let inner_indent = "    ".repeat(indent_level + 2);
+            let body_indented = emitter::re_indent(&body_str, &inner_indent);
             output.push_str(&format!(
                 "{}    case {} -> {{\n{}\n{}    }}\n",
-                indent, pattern, body_str, indent
+                indent, pattern, body_indented, indent
             ));
         }
         output.push_str(&format!("{}}}\n", indent));

@@ -90,13 +90,17 @@ impl EmitConfig for Rust2024Config {
             format!("{}: {}", pname, type_name)
         }).collect();
         let body_str = emitter::emit_to_string::<Rust2024Config>(body, context, indent_level + 1)?;
-        output.push_str(&format!("{}fn {}({}) -> {} {{\n{}\n{}}}\n", indent, name, params_str.join(", "), ret_type, body_str, indent));
+        let inner_indent = "    ".repeat(indent_level + 1);
+        let body_indented = emitter::re_indent(&body_str, &inner_indent);
+        output.push_str(&format!("{}fn {}({}) -> {} {{\n{}\n{}}}\n\n", indent, name, params_str.join(", "), ret_type, body_indented, indent));
         Ok(())
     }
     fn emit_defer(body: &Ir, output: &mut String, context: &mut EmitContext, indent_level: usize) -> Result<(), TranslateError> {
         let body_str = emitter::emit_to_string::<Rust2024Config>(body, context, indent_level + 1)?;
+        let inner_indent = "    ".repeat(indent_level + 1);
+        let body_indented = emitter::re_indent(&body_str, &inner_indent);
         let indent = "    ".repeat(indent_level);
-        output.push_str(&format!("{}defer {{\n{}\n{}}}\n", indent, body_str, indent));
+        output.push_str(&format!("{}defer {{\n{}\n{}}}\n", indent, body_indented, indent));
         Ok(())
     }
     fn emit_lambda(params: &[(String, IrType)], body: &Ir, output: &mut String, context: &mut EmitContext) -> Result<(), TranslateError> {
@@ -111,7 +115,9 @@ impl EmitConfig for Rust2024Config {
         output.push_str(&format!("{}match {} {{\n", indent, value_str));
         for (pattern, _guards, body_ir) in arms {
             let body_str = emitter::emit_to_string::<Rust2024Config>(body_ir, context, indent_level + 1)?;
-            output.push_str(&format!("{}    {} => {{\n{}\n{}    }},\n", indent, pattern, body_str, indent));
+            let inner_indent = "    ".repeat(indent_level + 2);
+            let body_indented = emitter::re_indent(&body_str, &inner_indent);
+            output.push_str(&format!("{}    {} => {{\n{}\n{}    }},\n", indent, pattern, body_indented, indent));
         }
         output.push_str(&format!("{}}}\n", indent));
         Ok(())

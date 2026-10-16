@@ -4,7 +4,7 @@
 
 use crate::translate::backend::{Backend, TranslateError};
 use crate::translate::emitter::{self, EmitConfig, EmitContext};
-use crate::translate::ir::node::{Ir, IrLiteral};
+use crate::translate::ir::node::{Ir, IrLiteral, IrNode};
 use crate::translate::ir::ops::Feature;
 use crate::translate::ir::types::IrType;
 use crate::translate::version::LangSpec;
@@ -37,12 +37,34 @@ impl Backend for C17 {
         }
     }
     fn emit(&self, ir: &[Ir]) -> Result<String, TranslateError> {
-        let mut body = String::new();
         let mut context = EmitContext::default();
+        let mut file_level = String::new();
+        let mut main_body = String::new();
         for node in ir {
-            emitter::emit_node::<C17Config>(node, &mut body, &mut context, 0)?;
+            match &node.node {
+                IrNode::Record { .. } | IrNode::Fn { .. } => {
+                    emitter::emit_node::<C17Config>(node, &mut file_level, &mut context, 0)?;
+                }
+                _ => {
+                    emitter::emit_node::<C17Config>(node, &mut main_body, &mut context, 0)?;
+                }
+            }
         }
-        Ok(emitter::build_output::<C17Config>(&body, &context))
+        let mut final_output = String::new();
+        C17Config::emit_imports(&context.imports, &mut final_output);
+        C17Config::emit_typedefs(&context.typedefs, &mut final_output);
+        if !file_level.trim().is_empty() {
+            final_output.push_str(file_level.trim());
+            final_output.push('\n');
+        }
+        let trimmed = main_body.trim();
+        if !trimmed.is_empty() {
+            final_output.push_str("int main(void) {\n");
+            let indented = emitter::re_indent(trimmed, "    ");
+            final_output.push_str(&indented);
+            final_output.push_str("\n    return 0;\n}\n");
+        }
+        Ok(C17Config::apply_idioms(&final_output))
     }
 }
 
@@ -71,7 +93,7 @@ impl EmitConfig for C17Config {
         let record_name = to_c_identifier(name, CVersion::C17);
         let fields_str: Vec<String> = fields.iter().map(|(fname, fty)| {
             let type_name = map_type(fty, &LangSpec::c("17")).unwrap_or_else(|| "int".to_string());
-            format!("    {} {},", type_name, to_c_identifier(fname, CVersion::C17))
+            format!("    {} {};", type_name, to_c_identifier(fname, CVersion::C17))
         }).collect();
         typedefs.push(format!("typedef struct {{\n{}\n}} {};\n", fields_str.join("\n"), record_name));
     }
@@ -88,12 +110,14 @@ impl EmitConfig for C17Config {
         let func_name = to_c_identifier(name, CVersion::C17);
         let ret_type = map_type(ret, &LangSpec::c("17")).unwrap_or_else(|| "void".to_string());
         let indent = "    ".repeat(indent_level);
+        let inner_indent = "    ".repeat(indent_level + 1);
         let params_str: Vec<String> = params.iter().map(|(pname, pty)| {
             let type_name = map_type(pty, &LangSpec::c("17")).unwrap_or_else(|| "int".to_string());
             format!("{} {}", type_name, to_c_identifier(pname, CVersion::C17))
         }).collect();
         let body_str = emitter::emit_to_string::<C17Config>(body, context, indent_level + 1)?;
-        output.push_str(&format!("{}{} {}({}) {{\n{}\n{}}}\n", indent, ret_type, func_name, params_str.join(", "), body_str, indent));
+        let body_indented = emitter::re_indent(&body_str, &inner_indent);
+        output.push_str(&format!("{}{} {}({}) {{\n{}\n{}}}\n\n", indent, ret_type, func_name, params_str.join(", "), body_indented, indent));
         Ok(())
     }
     fn emit_defer(body: &Ir, output: &mut String, context: &mut EmitContext, indent_level: usize) -> Result<(), TranslateError> {
@@ -128,8 +152,8 @@ impl EmitConfig for C17Config {
         let _ = (start, end);
         Ok(())
     }
-    fn emit_wrapper_start(output: &mut String) { output.push_str("int main(void) {\n"); }
-    fn emit_wrapper_end(output: &mut String) { output.push_str("\n    return 0;\n}\n"); }
+    fn emit_wrapper_start(output: &mut String) { output.push_str("\nint main(void) {\n"); }
+    fn emit_wrapper_end(output: &mut String) { output.push_str("    return 0;\n}\n"); }
     fn emit_imports(imports: &[String], output: &mut String) {
         let mut includes = imports.to_vec();
         includes.push("stdio.h".to_string());
