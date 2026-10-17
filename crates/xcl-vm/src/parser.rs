@@ -167,8 +167,6 @@ impl<'a> Parser<'a> {
         self.consume(); // consume "defer"
         // Parse the block { ... }
         let statements = self.block();
-        // Check if body references $it
-        let uses_it = contains_ident(&statements, "it");
         // Wrap in: defer( Lambda { params: [], body: Block { statements } } )
         let lambda = AstNode::Lambda {
             span: span.clone(),
@@ -177,7 +175,6 @@ impl<'a> Parser<'a> {
                 span: span.clone(),
                 statements,
             }),
-            implicit_it: uses_it,
         };
         AstNode::Call {
             span: span.clone(),
@@ -380,6 +377,28 @@ impl<'a> Parser<'a> {
         // Otherwise, it's a block-lambda.
         // `{ }` → empty block-lambda (returns nil)
         let mut i = self.pos;
+        while i < self.tokens.len() {
+            match self.tokens[i].token {
+                Token::RBrace => return false, // empty `{ }` → block-lambda
+                Token::Semi | Token::Comma => {
+                    i += 1;
+                    continue;
+                }
+                _ => {
+                    // Found the first meaningful token — check if next is `:`
+                    return matches!(self.tokens.get(i + 1).map(|t| &t.token), Some(Token::Colon));
+                }
+            }
+        }
+        false // reached EOF without `}` → block-lambda
+    }
+
+    #[inline]
+    fn lookahead_dict_literal_at(&self, brace_pos: usize) -> bool {
+        // brace_pos points AT the `{` token. Start scanning from brace_pos + 1.
+        // Find the first meaningful token. If it's followed by `:`, it's a dict literal.
+        // Otherwise, it's a block-lambda.
+        let mut i = brace_pos + 1;
         while i < self.tokens.len() {
             match self.tokens[i].token {
                 Token::RBrace => return false, // empty `{ }` → block-lambda
@@ -1109,7 +1128,6 @@ impl<'a> Parser<'a> {
             span,
             params,
             body,
-            implicit_it: false,
         }
     }
 
@@ -1135,55 +1153,6 @@ impl<'a> Parser<'a> {
                         target: Box::new(e),
                         index: Box::new(idx),
                     };
-                }
-                Some(Token::LParen) => {
-                    // If there's a newline between the previous token and this `(`,
-                    // treat the `(` as starting a new statement, not a call postfix.
-                    if self.pos > 0 {
-                        let prev = &self.tokens[self.pos - 1];
-                        let gap_start = prev.byte_offset + prev.text.len();
-                        let gap_end = self.current().map(|t| t.byte_offset).unwrap_or(gap_start);
-                        if gap_end > gap_start {
-                            let gap = &self.source[gap_start..gap_end.min(self.source.len())];
-                            if gap.contains('\n') {
-                                break;
-                            }
-                        }
-                    }
-                    self.consume();
-                    let mut args = Vec::new();
-                    while !self.at(Token::RParen) && !self.at_eof() {
-                        args.push(self.call_arg());
-                        if self.at(Token::Comma) {
-                            self.consume();
-                        }
-                    }
-                    self.expect(Token::RParen);
-                    e = AstNode::Call {
-                        span: self.span(),
-                        callee: Box::new(e),
-                        args,
-                    };
-                    // After parenthesized call, check for additional space-separated args
-                    // but only if they're on the same line (no newline between ) and next token)
-                    if self.starts_positional_arg() && !self.has_newline_before_current() {
-                        let AstNode::Call {
-                            callee,
-                            args: mut a,
-                            ..
-                        } = e
-                        else {
-                            unreachable!()
-                        };
-                        while self.starts_positional_arg() && !self.has_newline_before_current() {
-                            a.push(self.call_arg());
-                        }
-                        e = AstNode::Call {
-                            span: self.span(),
-                            callee,
-                            args: a,
-                        };
-                    }
                 }
                 _ => break,
             }
@@ -1418,13 +1387,10 @@ impl<'a> Parser<'a> {
                         statements.push(self.statement());
                     }
                     self.expect(Token::RBrace);
-                    // Check if body references $it
-                    let uses_it = contains_ident(&statements, "it");
                     AstNode::Lambda {
                         span: span.clone(),
                         params: vec![],
                         body: Box::new(AstNode::Block { span, statements }),
-                        implicit_it: uses_it,
                     }
                 }
             }
@@ -1469,6 +1435,11 @@ impl<'a> Parser<'a> {
                         | Some(Token::LBracket)
                 )
             }
+            Some(Token::LBrace) => {
+                // Allow { } as a block-lambda arg, but reject {key: val} dict literals
+                // Dict literals are never allowed as function arguments
+                !self.lookahead_dict_literal_at(self.pos)
+            }
             Some(t) => matches!(
                 t,
                 Token::Fn
@@ -1486,7 +1457,6 @@ impl<'a> Parser<'a> {
                     | Token::False
                     | Token::None_
                     | Token::LBracket
-                    | Token::LBrace
                     | Token::LParen
             ),
         }
@@ -1530,6 +1500,11 @@ impl<'a> Parser<'a> {
                     | Some(Token::MulAssign)
                     | Some(Token::DivAssign)
             ),
+            Some(Token::LBrace) => {
+                // Allow { } as a block-lambda arg, but reject {key: val} dict literals
+                // Dict literals are never allowed as function arguments
+                !self.lookahead_dict_literal_at(self.pos)
+            }
             Some(t) => matches!(
                 t,
                 Token::Fn
@@ -1547,7 +1522,6 @@ impl<'a> Parser<'a> {
                     | Token::False
                     | Token::None_
                     | Token::LBracket
-                    | Token::LBrace
                     | Token::LParen
             ),
         }
@@ -1600,68 +1574,4 @@ impl<'a> Parser<'a> {
 /// ```
 pub fn parse(tokens: &[TokenWithText], source: &str) -> Vec<AstNode> {
     Parser::new(tokens, source).program()
-}
-
-/// Recursively check if any AstNode in a list references an identifier with the given name.
-fn contains_ident(nodes: &[AstNode], name: &str) -> bool {
-    for node in nodes {
-        if node_has_ident(node, name) {
-            return true;
-        }
-    }
-    false
-}
-
-fn node_has_ident(node: &AstNode, name: &str) -> bool {
-    match node {
-        AstNode::Ident { name: n, .. } if n == name => true,
-        AstNode::Assign { value, .. } => node_has_ident(value, name),
-        AstNode::Return { value, .. } => value.as_ref().map_or(false, |v| node_has_ident(v, name)),
-        AstNode::If {
-            condition,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            node_has_ident(condition, name)
-                || then_branch.iter().any(|n| node_has_ident(n, name))
-                || else_branch
-                    .as_ref()
-                    .map_or(false, |b| b.iter().any(|n| node_has_ident(n, name)))
-        }
-        AstNode::For { iterable, body, .. } => {
-            node_has_ident(iterable, name) || body.iter().any(|n| node_has_ident(n, name))
-        }
-        AstNode::While {
-            condition, body, ..
-        } => node_has_ident(condition, name) || body.iter().any(|n| node_has_ident(n, name)),
-        AstNode::Lambda { body, .. } => node_has_ident(body, name),
-        AstNode::Call { callee, args, .. } => {
-            node_has_ident(callee, name) || args.iter().any(|a| node_has_ident(&a.value, name))
-        }
-        AstNode::BinaryOp { left, right, .. } => {
-            node_has_ident(left, name) || node_has_ident(right, name)
-        }
-        AstNode::UnaryOp { operand, .. } => node_has_ident(operand, name),
-        AstNode::ArrayLit { elements, .. } => elements.iter().any(|e| node_has_ident(e, name)),
-        AstNode::DictLit { entries, .. } => entries.iter().any(|(_, v)| node_has_ident(v, name)),
-        AstNode::Index { target, index, .. } => {
-            node_has_ident(target, name) || node_has_ident(index, name)
-        }
-        AstNode::FieldAccess { target, .. } => node_has_ident(target, name),
-        AstNode::Range { start, end, .. } => {
-            start.as_ref().map_or(false, |s| node_has_ident(s, name))
-                || end.as_ref().map_or(false, |e| node_has_ident(e, name))
-        }
-        AstNode::Block { statements, .. } => statements.iter().any(|n| node_has_ident(n, name)),
-        AstNode::Pipeline { input, stages, .. } => {
-            node_has_ident(input, name)
-                || stages
-                    .iter()
-                    .any(|s| s.arg.as_ref().map_or(false, |a| node_has_ident(a, name)))
-        }
-        AstNode::TypeTest { value, .. } => node_has_ident(value, name),
-        // Literals and other nodes don't contain identifiers
-        _ => false,
-    }
 }

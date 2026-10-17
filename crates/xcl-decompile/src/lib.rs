@@ -408,6 +408,12 @@ fn opcode_name(op: u8) -> &'static str {
         OP_MUL_LOCAL_LOCAL_STORE     => "OP_MUL_LOCAL_LOCAL_STORE",
         OP_SUB_LOCAL_LOCAL_STORE     => "OP_SUB_LOCAL_LOCAL_STORE",
         OP_DIV_LOCAL_LOCAL_STORE     => "OP_DIV_LOCAL_LOCAL_STORE",
+        OP_MATH_UNARY                => "OP_MATH_UNARY",
+        OP_GET_INDEX_LOCAL_LOCAL_STORE => "OP_GET_INDEX_LOCAL_LOCAL_STORE",
+        OP_GET_FIELD_LOCAL_STORE     => "OP_GET_FIELD_LOCAL_STORE",
+        OP_MOD_LOCAL_LOCAL_STORE     => "OP_MOD_LOCAL_LOCAL_STORE",
+        OP_LOAD_CONST_LOCAL          => "OP_LOAD_CONST_LOCAL",
+        OP_ARRAY_PUSH_LOCAL          => "OP_ARRAY_PUSH_LOCAL",
         _                            => "OP_UNKNOWN",
     }
 }

@@ -150,10 +150,15 @@ impl OpcodeCounter {
     }
 }
 
+/// Action the VM dispatch loop should take after executing an instruction.
 enum Action {
+    /// Advance to the next instruction.
     Next,
+    /// Jump to the given instruction pointer.
     Jump(u32),
+    /// Return from the current frame.
     Return,
+    /// Push the pending frame onto the frame stack.
     PushFrame,
 }
 
@@ -161,7 +166,6 @@ pub(crate) struct Frame {
     code: Arc<Bytecode>,
     locals: SmallVec<[Value; 16]>,
     ip: u32,
-    /// SmallVec avoids heap allocation for small iterators (≤8 elements inline).
     iter: SmallVec<[Value; 8]>,
     iter_idx: u32,
     range_cur: i64,
@@ -172,6 +176,7 @@ pub(crate) struct Frame {
 }
 
 /// A dispatch table slot containing all methods registered for a specific domain namespace.
+#[derive(Clone)]
 pub struct DomainSlot {
     /// Domain identifier name (e.g., `"fs"`, `"net"`, `"math"`).
     pub name: Box<str>,
@@ -179,6 +184,15 @@ pub struct DomainSlot {
     pub methods: Vec<Option<BuiltinImpl>>,
     /// Fast string-to-slot-id index mapping method names to offsets in `methods`.
     pub index: HashMap<Box<str>, u32>,
+}
+
+#[cfg(feature = "std")]
+struct CachedRegistry {
+    global_index: HashMap<Box<str>, u32>,
+    global_table: Vec<Option<BuiltinImpl>>,
+    domain_index: HashMap<Box<str>, u32>,
+    domain_table: Vec<DomainSlot>,
+    type_index: HashMap<Box<str>, &'static TypeDescriptor>,
 }
 
 /// The XCL Virtual Machine runtime instance.
@@ -203,6 +217,7 @@ pub struct VM {
     /// Registry of well-known constructor and type names (`Ok`, `Err`, `Result`).
     pub well_known: crate::wellknown::WellKnown,
     pub(crate) frames: Vec<Frame>,
+    /// Pending frame to be pushed onto the frame stack (used by OP_CALL).
     pending: Option<Frame>,
     closures: Vec<crate::value::FuncValue>,
     /// Stack-based context for domain blocks (e.g., `browser "brave" { ... }`).
@@ -240,7 +255,7 @@ impl VM {
             type_index: Default::default(),
             arena: Bump::new(),
             well_known: Default::default(),
-            frames: Vec::new(),
+            frames: Vec::with_capacity(16),
             pending: None,
             closures: Vec::new(),
             context_stack: HashMap::new(),
@@ -264,6 +279,30 @@ impl VM {
     ///
     /// Combines [`VM::register_all_natives`] and [`VM::register_all_types`].
     pub fn register_all(&mut self) {
+        #[cfg(feature = "std")]
+        {
+            static CACHE: std::sync::OnceLock<CachedRegistry> = std::sync::OnceLock::new();
+            if self.global_table.is_empty() && self.domain_table.is_empty() {
+                let cached = CACHE.get_or_init(|| {
+                    let mut tmp = VM::new();
+                    tmp.register_all_natives();
+                    tmp.register_all_types();
+                    CachedRegistry {
+                        global_index: tmp.global_index,
+                        global_table: tmp.global_table,
+                        domain_index: tmp.domain_index,
+                        domain_table: tmp.domain_table,
+                        type_index: tmp.type_index,
+                    }
+                });
+                self.global_index.clone_from(&cached.global_index);
+                self.global_table.clone_from(&cached.global_table);
+                self.domain_index.clone_from(&cached.domain_index);
+                self.domain_table.clone_from(&cached.domain_table);
+                self.type_index.clone_from(&cached.type_index);
+                return;
+            }
+        }
         self.register_all_natives();
         self.register_all_types();
     }

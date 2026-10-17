@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn instance_list_missing_account() {
-        let result = evaluate_new(r#"instance.list ()"#);
+        let result = evaluate_new(r#"instance.list"#);
         assert_eq!(result.map_variant(), Some(xcl_vm::VARIANT_ERR));
     }
 }

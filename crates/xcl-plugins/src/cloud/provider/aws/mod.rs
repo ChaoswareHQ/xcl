@@ -6,7 +6,7 @@
 //! # AWS with domain expansion — unified service names
 //! aws "us-east-1" {
 //!     bucket "my-bucket" {
-//!         $list = bucket.list ()
+//!         $list = bucket.list
 //!     }
 //!     function "my-function" {
 //!         $result = function.invoke { input: "test" }
@@ -48,7 +48,7 @@ use xcl_vm::{Value, DomainCtx};
 /// ```xcl
 /// aws "us-east-1" {
 ///     s3 "my-bucket" {
-///         $list = s3.list ()
+///         $list = s3.list
 ///     }
 /// }
 /// ```
@@ -209,7 +209,9 @@ mod tests {
     fn aws_run_sets_region() {
         let r = evaluate_new(r#"
             aws "us-east-1" {
-                aws.config ().region
+                $c = aws.config
+
+                $c.region
             }
         "#);
         assert_eq!(r.as_str(), Some("us-east-1"));
@@ -219,7 +221,7 @@ mod tests {
     fn aws_run_clears_after_block() {
         let r = evaluate_new(r#"
             aws "us-east-1" { }
-            aws.config ().region
+            aws.config.region
         "#);
         assert!(r.is_nil());
     }
@@ -229,7 +231,9 @@ mod tests {
         let r = evaluate_new(r#"
             aws "us-east-1" {
                 aws "eu-west-1" {
-                    aws.config ().region
+                    $c = aws.config
+
+                    $c.region
                 }
             }
         "#);
@@ -240,7 +244,8 @@ mod tests {
     fn aws_config_returns_map() {
         let r = evaluate_new(r#"
             aws "us-east-1" {
-                aws.config ()
+                $c = aws.config
+                $c
             }
         "#);
         let map = r.as_map().expect("aws.config should return a map");
@@ -251,7 +256,8 @@ mod tests {
     fn aws_credential_returns_map() {
         let r = evaluate_new(r#"
             aws "us-east-1" {
-                aws.credential ()
+                $c = aws.credential
+                $c
             }
         "#);
         assert!(r.as_map().is_some());
@@ -267,7 +273,9 @@ mod tests {
 
         let r = evaluate_new(r#"
             aws "us-east-1" {
-                aws.credential ().access_key_id
+                $c = aws.credential
+
+                $c.access_key_id
             }
         "#);
         assert_eq!(r.as_str(), Some("test_key"));

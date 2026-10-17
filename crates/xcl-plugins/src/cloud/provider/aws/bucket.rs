@@ -5,7 +5,7 @@
 //! ```xcl
 //! aws "us-east-1" {
 //!     bucket "my-bucket" {
-//!         $list = bucket.list ()
+//!         $list = bucket.list
 //!         $data = bucket.get "key.txt"
 //!         bucket.put "key.txt" "hello"
 //!         bucket.delete "key.txt"
@@ -36,7 +36,7 @@ use std::collections::HashMap;
 /// ```xcl
 /// aws "us-east-1" {
 ///     bucket "my-bucket" {
-///         $list = bucket.list ()
+///         $list = bucket.list
 ///         $data = bucket.get "key.txt"
 ///     }
 /// }
@@ -389,7 +389,9 @@ mod tests {
         let r = evaluate_new(r#"
             aws "us-east-1" {
                 bucket "my-bucket" {
-                    bucket.config ().bucket
+                    $c = bucket.config
+
+                    $c.bucket
                 }
             }
         "#);
@@ -412,7 +414,8 @@ mod tests {
         let r = evaluate_new(r#"
             aws "us-east-1" {
                 bucket "my-bucket" {
-                    bucket.list ()
+                    $c = bucket.list
+                    $c
                 }
             }
         "#);

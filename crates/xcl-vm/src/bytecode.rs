@@ -65,7 +65,7 @@ use alloc::vec::Vec;
 use std::sync::Arc;
 
 use crate::ast::{AstNode, BinaryOperator, TypeKind, UnaryOperator};
-use crate::value::FuncValue;
+use crate::value::{FuncValue, Value};
 
 /// A 64-bit packed virtual machine instruction.
 ///
@@ -808,12 +808,19 @@ impl Compiler {
 
         // Run peephole optimizer to fuse common patterns
         let mut code: Vec<Instr> = core::mem::take(&mut self.code);
-        peephole_optimize_once(&mut code, &self.wide);
+        peephole_optimize_once(&mut code, &mut self.wide);
+
+        let strings = core::mem::take(&mut self.strings);
+        let string_values: Vec<Value> = strings
+            .iter()
+            .map(|s| Value::from_str_boxed(s.to_string()))
+            .collect();
 
         Bytecode {
             instructions: code.into(),
             wide_operands: core::mem::take(&mut self.wide).into(),
-            string_table: core::mem::take(&mut self.strings).into(),
+            string_table: strings.into(),
+            string_values: string_values.into(),
             local_names: core::mem::take(&mut self.locals).into(),
             global_names: core::mem::take(&mut self.globals).into(),
             user_functions: core::mem::take(&mut self.functions),
@@ -825,11 +832,74 @@ impl Compiler {
         match node {
             AstNode::Assign { name, value, .. } => {
                 let slot = self.local(name);
+                // Fast in-place array push: $arr = $arr + [elem]
+                if let AstNode::BinaryOp {
+                    left,
+                    op: BinaryOperator::Add,
+                    right,
+                    ..
+                } = value.as_ref()
+                    && let AstNode::Ident { name: ln, .. } = left.as_ref()
+                    && ln == name
+                    && let AstNode::ArrayLit { elements, .. } = right.as_ref()
+                    && elements.len() == 1
+                {
+                    if self.locals.len() < 200 && self.can_emit_to_slot(&elements[0]) {
+                        let elem_slot = self.emit_expr_to_slot(&elements[0], 0);
+                        self.emit(Instr::a2(OP_ARRAY_PUSH_LOCAL, slot, elem_slot as u16));
+                        return;
+                    }
+                    self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
+                    self.node(&elements[0]);
+                    self.emit(Instr::none(OP_ARRAY_PUSH));
+                    self.emit(Instr::a1(OP_STORE_LOCAL, slot));
+                    return;
+                }
                 // Try recursive RHS fusion for nested binary expressions
                 // e.g., $zr = $zr*$zr - $zi*$zi + $cr
                 if let AstNode::BinaryOp { .. } = value.as_ref() {
                     if self.try_emit_binary_fused(slot, value.as_ref()) {
                         return;
+                    }
+                }
+                // Direct RHS fusion for unary math calls, array index, and field access
+                if self.locals.len() < 200 && self.can_emit_to_slot(value.as_ref()) {
+                    match value.as_ref() {
+                        AstNode::Call { callee, args, .. } => {
+                            let cname = collect_dotted_name(callee).unwrap_or_default();
+                            if let Some(math_id) = math_unary_id(&cname) {
+                                let src = self.emit_expr_to_slot(&args[0].value, 0);
+                                self.emit(Instr::make(OP_MATH_UNARY, slot, src as u16, math_id));
+                                return;
+                            }
+                        }
+                        AstNode::Index { target, index, .. } => {
+                            let t_slot = self.emit_expr_to_slot(target, 0);
+                            let i_slot = self.emit_expr_to_slot(index, 1);
+                            if t_slot < 256 {
+                                self.emit(Instr::make(
+                                    OP_GET_INDEX_LOCAL_LOCAL_STORE,
+                                    slot,
+                                    i_slot as u16,
+                                    t_slot as u8,
+                                ));
+                                return;
+                            }
+                        }
+                        AstNode::FieldAccess { target, field, .. } => {
+                            let t_slot = self.emit_expr_to_slot(target, 0);
+                            if t_slot < 256 {
+                                let field_idx = self.intern(field);
+                                self.emit(Instr::make(
+                                    OP_GET_FIELD_LOCAL_STORE,
+                                    slot,
+                                    field_idx as u16,
+                                    t_slot as u8,
+                                ));
+                                return;
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 // Try to fuse hot patterns: $x = $x + 1, $x = $x - 1, $x = $x + c, $a = $a + $b
@@ -1004,18 +1074,25 @@ impl Compiler {
                     if let (Some(start_i), Some(end_i)) = (start_val, end_val) {
                         // Use single-opcode FOR_NUMBER_LOOP (like Luau's FORNLOOP)
                         let var = self.local(variable);
-                        // Emit start value and end value as wide operands for the loop
-                        let start_wide = self.wide(start_i);
+                        let start_minus_1 = self.wide(start_i.wrapping_sub(1));
+                        self.emit(Instr::a1(OP_PUSH_INT_WIDE, start_minus_1));
+                        self.emit(Instr::a1(OP_STORE_LOCAL, var));
                         let end_wide = self.wide(end_i);
-                        // a = (var_slot << 16) | start_wide_idx, b = end_wide_idx
-                        let a_combined = var << 16 | (start_wide & 0xFFFF);
-                        self.emit(Instr::a2(OP_FOR_NUMBER_LOOP, a_combined, end_wide as u16));
+                        let exit_wide = self.wide(0);
                         let loop_start = self.ip();
+                        self.emit(Instr::make(
+                            OP_FOR_NUMBER_LOOP,
+                            var,
+                            end_wide as u16,
+                            exit_wide as u8,
+                        ));
                         for s in body {
                             self.node(s);
                         }
                         // Jump back to FOR_NUMBER_LOOP
                         self.emit(Instr::a1(OP_JUMP, loop_start));
+                        let exit_ip = self.ip();
+                        self.wide[exit_wide as usize] = exit_ip as i64;
                     } else {
                         // Fallback: use FOR_RANGE_START/NEXT for non-constant ranges
                         if let Some(s) = start {
@@ -1387,14 +1464,9 @@ impl Compiler {
             AstNode::Lambda {
                 params,
                 body,
-                implicit_it,
                 ..
             } => {
                 let mut sub = Compiler::new();
-                // If implicit_it is true, add "it" as the first parameter
-                if *implicit_it {
-                    sub.local("it");
-                }
                 for p in params {
                     sub.local(p);
                 }
@@ -1403,18 +1475,10 @@ impl Compiler {
                 sub.emit(Instr::none(OP_HALT));
 
                 let bc = sub.compile(&[]);
-                // Build params list with implicit "it" prepended if needed
-                let all_params = if *implicit_it {
-                    let mut p = vec!["it".to_string()];
-                    p.extend(params.clone());
-                    p
-                } else {
-                    params.clone()
-                };
                 let f = FuncValue {
                     name: "lambda".into(),
                     bytecode: Some(Arc::new(bc)),
-                    params: all_params,
+                    params: params.clone(),
                     closure_captures: Vec::new(),
                     closure_env: Vec::new(),
                 };
@@ -1541,14 +1605,47 @@ pub fn compile(ast: &[AstNode]) -> Bytecode {
     c.compile(ast)
 }
 
+/// Drain instructions in `range` and adjust all jump targets after `range.start()`.
+#[inline]
+fn drain_and_patch(
+    code: &mut Vec<Instr>,
+    wide: &mut [i64],
+    range: core::ops::RangeInclusive<usize>,
+) {
+    let start = *range.start();
+    let count = range.end() - start + 1;
+    code.drain(range);
+    let start_u32 = start as u32;
+    let count_u32 = count as u32;
+    for instr in code.iter_mut() {
+        let op = instr.op();
+        match op {
+            OP_JUMP | OP_JUMP_IF_FALSE | OP_JUMP_IF_NIL | OP_FOR_ITER_NEXT | OP_FOR_RANGE_NEXT => {
+                if instr.a() > start_u32 {
+                    *instr = Instr::make(op, instr.a() - count_u32, instr.b(), instr.c());
+                }
+            }
+            OP_WHILE_LT_INT | OP_WHILE_LT_LOCAL | OP_FOR_NUMBER_LOOP => {
+                let w_idx = instr.c() as usize;
+                if let Some(exit_ip) = wide.get_mut(w_idx)
+                    && *exit_ip > start as i64
+                {
+                    *exit_ip -= count as i64;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Peephole optimizer — scans bytecode and fuses common patterns.
 /// This runs after compilation and catches patterns the AST-level fusion misses.
-fn peephole_optimize_once(code: &mut Vec<Instr>, _wide: &[i64]) {
+fn peephole_optimize_once(code: &mut Vec<Instr>, wide: &mut [i64]) {
     let mut i = 0;
 
     while i < code.len() {
         let matched = match code.get(i).copied() {
-            Some(instr) => peephole_at(code, i, instr),
+            Some(instr) => peephole_at(code, wide, i, instr),
             None => false,
         };
         if !matched {
@@ -1561,12 +1658,135 @@ fn peephole_optimize_once(code: &mut Vec<Instr>, _wide: &[i64]) {
 /// Try to match and fuse a pattern at instruction index `i`.
 /// Returns true if a fusion occurred (caller should not advance `i`).
 #[inline]
-fn peephole_at(code: &mut Vec<Instr>, i: usize, instr: Instr) -> bool {
+fn peephole_at(code: &mut Vec<Instr>, wide: &mut [i64], i: usize, instr: Instr) -> bool {
     let op = instr.op();
 
+    // Pattern 6: LOAD_LOCAL a; PUSH_INT 1; ADD; STORE_LOCAL a → INC_LOCAL a
+    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        let next3 = code[i + 3];
+        if next.op() == OP_PUSH_INT
+            && next.a() == 1
+            && next2.op() == OP_ADD
+            && next3.op() == OP_STORE_LOCAL
+            && next3.a() == instr.a()
+        {
+            code[i] = Instr::a1(OP_INC_LOCAL, instr.a());
+            drain_and_patch(code, wide, i + 1..=i + 3);
+            return true;
+        }
+    }
+
+    // Pattern 11: DEC_LOCAL — LOAD_LOCAL a; PUSH_INT 1; SUB; STORE_LOCAL a
+    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        let next3 = code[i + 3];
+        if next.op() == OP_PUSH_INT
+            && next.a() == 1
+            && next2.op() == OP_SUB
+            && next3.op() == OP_STORE_LOCAL
+            && next3.a() == instr.a()
+        {
+            code[i] = Instr::a1(OP_DEC_LOCAL, instr.a());
+            drain_and_patch(code, wide, i + 1..=i + 3);
+            return true;
+        }
+    }
+
+    // Pattern 7: LOAD_LOCAL a; LOAD_LOCAL b; ADD; STORE_LOCAL a → ADD_LOCAL_STORE a, b
+    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        let next3 = code[i + 3];
+        if next.op() == OP_LOAD_LOCAL && next3.op() == OP_STORE_LOCAL && next3.a() == instr.a() {
+            let store_op = match next2.op() {
+                OP_ADD => Some(OP_ADD_LOCAL_STORE),
+                OP_SUB => Some(OP_SUB_LOCAL_STORE),
+                OP_MUL => Some(OP_MUL_LOCAL_STORE),
+                OP_DIV => Some(OP_DIV_LOCAL_STORE),
+                _ => None,
+            };
+            if let Some(fused) = store_op {
+                code[i] = Instr::a2(fused, instr.a(), next.a() as u16);
+                drain_and_patch(code, wide, i + 1..=i + 3);
+                return true;
+            }
+        }
+    }
+
+    // Pattern 9: LOAD_LOCAL a; LOAD_LOCAL b; ADD; STORE_LOCAL c → ADD_LOCAL_LOCAL_STORE c, a, b
+    // Like Luau's fused store pattern — eliminates 4 instructions into 1
+    if op == OP_LOAD_LOCAL && code.len() >= i + 4 && instr.a() < 256 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        let next3 = code[i + 3];
+        if next.op() == OP_LOAD_LOCAL && next3.op() == OP_STORE_LOCAL {
+            let store_op = match next2.op() {
+                OP_ADD => Some(OP_ADD_LOCAL_LOCAL_STORE),
+                OP_SUB => Some(OP_SUB_LOCAL_LOCAL_STORE),
+                OP_MUL => Some(OP_MUL_LOCAL_LOCAL_STORE),
+                OP_DIV => Some(OP_DIV_LOCAL_LOCAL_STORE),
+                OP_MOD => Some(OP_MOD_LOCAL_LOCAL_STORE),
+                _ => None,
+            };
+            if let Some(fused) = store_op {
+                // a=dest, b=src2, c=src1
+                code[i] = Instr::make(fused, next3.a(), next.a() as u16, instr.a() as u8);
+                drain_and_patch(code, wide, i + 1..=i + 3);
+                return true;
+            }
+        }
+    }
+
+    // Pattern 2: LOAD_LOCAL a; PUSH_INT k; OP; STORE_LOCAL a → ADD_INT_LOCAL a, k
+    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        let next3 = code[i + 3];
+        if next.op() == OP_PUSH_INT
+            && next.a() <= u16::MAX as u32
+            && next3.op() == OP_STORE_LOCAL
+            && next3.a() == instr.a()
+        {
+            let arith_op = match next2.op() {
+                OP_ADD => Some(OP_ADD_INT_LOCAL),
+                OP_SUB => Some(OP_SUB_INT_LOCAL),
+                OP_MUL => Some(OP_MUL_INT_LOCAL),
+                _ => None,
+            };
+            if let Some(fused) = arith_op {
+                code[i] = Instr::a2(fused, instr.a(), next.a() as u16);
+                drain_and_patch(code, wide, i + 1..=i + 3);
+                return true;
+            }
+        }
+    }
+
+    // Pattern 10: LOAD_LOCAL a; PUSH_INT k; ADD; STORE_LOCAL b → ADD_INT_STORE_LOCAL b, a, k
+    // Like Luau's ADDK — constant on the right side
+    if op == OP_LOAD_LOCAL && code.len() >= i + 4 && instr.a() <= u16::MAX as u32 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        let next3 = code[i + 3];
+        if next.op() == OP_PUSH_INT
+            && next.a() <= u8::MAX as u32
+            && next2.op() == OP_ADD
+            && next3.op() == OP_STORE_LOCAL
+        {
+            code[i] = Instr::make(
+                OP_ADD_INT_STORE_LOCAL,
+                next3.a(),
+                instr.a() as u16,
+                next.a() as u8,
+            );
+            drain_and_patch(code, wide, i + 1..=i + 3);
+            return true;
+        }
+    }
+
     // Pattern 1: LOAD_LOCAL a; LOAD_LOCAL b; ADD → ADD_LOCAL_LOCAL a, b
-    // Only fuse if STORE_LOCAL immediately follows (the fused op pushes to stack,
-    // and STORE_LOCAL will consume it). Otherwise the caller expects the value on the stack.
     if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
         let next = code[i + 1];
         let next2 = code[i + 2];
@@ -1582,28 +1802,7 @@ fn peephole_at(code: &mut Vec<Instr>, i: usize, instr: Instr) -> bool {
             };
             if let Some(fused) = arith_op {
                 code[i] = Instr::make(fused, instr.a(), next.a() as u16, 0);
-                code.drain(i + 1..=i + 2);
-                return true;
-            }
-        }
-    }
-
-    // Pattern 2: LOAD_LOCAL a; PUSH_INT k; ADD → ADD_INT_LOCAL a, k
-    // Only fuse if STORE_LOCAL immediately follows. Otherwise the caller expects the value on the stack.
-    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
-        let next = code[i + 1];
-        let next2 = code[i + 2];
-        let next3 = code[i + 3];
-        if next.op() == OP_PUSH_INT && next3.op() == OP_STORE_LOCAL {
-            let arith_op = match next2.op() {
-                OP_ADD => Some(OP_ADD_INT_LOCAL),
-                OP_SUB => Some(OP_SUB_INT_LOCAL),
-                OP_MUL => Some(OP_MUL_INT_LOCAL),
-                _ => None,
-            };
-            if let Some(fused) = arith_op {
-                code[i] = Instr::a2(fused, instr.a(), next.a() as u16);
-                code.drain(i + 1..=i + 2);
+                drain_and_patch(code, wide, i + 1..=i + 2);
                 return true;
             }
         }
@@ -1626,25 +1825,10 @@ fn peephole_at(code: &mut Vec<Instr>, i: usize, instr: Instr) -> bool {
             if let Some(r) = result {
                 if (0..=u32::MAX as i64).contains(&r) {
                     code[i] = Instr::a1(OP_PUSH_INT, r as u32);
-                    code.drain(i + 1..=i + 2);
+                    drain_and_patch(code, wide, i + 1..=i + 2);
                     return true;
                 }
             }
-        }
-    }
-
-    // Pattern 4: STORE_LOCAL a; LOAD_LOCAL a → (delete the LOAD, duplicate value)
-    // This only works if the LOAD is immediately after the STORE for the same slot
-    if op == OP_STORE_LOCAL && code.len() >= i + 2 {
-        let next = code[i + 1];
-        if next.op() == OP_LOAD_LOCAL && next.a() == instr.a() {
-            // Check if the next instruction after LOAD is an arithmetic op that
-            // would benefit from having the value on the stack
-            // Actually, just delete the redundant LOAD — the STORE already left the value
-            // But wait: STORE_LOCAL pops the value, so we need to PUSH it back
-            // This pattern is only useful if we can replace STORE; LOAD with just LOAD
-            // which means the value was already on the stack before STORE
-            // For now, skip this — it's tricky with the stack semantics
         }
     }
 
@@ -1652,50 +1836,12 @@ fn peephole_at(code: &mut Vec<Instr>, i: usize, instr: Instr) -> bool {
     if op == OP_LOAD_LOCAL && code.len() >= i + 2 {
         let next = code[i + 1];
         if next.op() == OP_STORE_LOCAL && next.a() == instr.a() {
-            code.drain(i..=i + 1);
+            drain_and_patch(code, wide, i..=i + 1);
             return true;
-        }
-    }
-
-    // Pattern 6: LOAD_LOCAL a; PUSH_INT 1; ADD; STORE_LOCAL a → INC_LOCAL a
-    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
-        let next = code[i + 1];
-        let next2 = code[i + 2];
-        let next3 = code[i + 3];
-        if next.op() == OP_PUSH_INT
-            && next.a() == 1
-            && next2.op() == OP_ADD
-            && next3.op() == OP_STORE_LOCAL
-            && next3.a() == instr.a()
-        {
-            code[i] = Instr::a1(OP_INC_LOCAL, instr.a());
-            code.drain(i + 1..=i + 3);
-            return true;
-        }
-    }
-
-    // Pattern 7: LOAD_LOCAL a; LOAD_LOCAL b; ADD; STORE_LOCAL a → ADD_LOCAL_STORE a, b
-    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
-        let next = code[i + 1];
-        let next2 = code[i + 2];
-        let next3 = code[i + 3];
-        if next.op() == OP_LOAD_LOCAL && next3.op() == OP_STORE_LOCAL && next3.a() == instr.a() {
-            let store_op = match next2.op() {
-                OP_ADD => Some(OP_ADD_LOCAL_STORE),
-                OP_SUB => Some(OP_SUB_LOCAL_STORE),
-                OP_MUL => Some(OP_MUL_LOCAL_STORE),
-                _ => None,
-            };
-            if let Some(fused) = store_op {
-                code[i] = Instr::a2(fused, instr.a(), next.a() as u16);
-                code.drain(i + 1..=i + 3);
-                return true;
-            }
         }
     }
 
     // Pattern 8: LOAD_LOCAL a; LOAD_LOCAL b; LOAD_LOCAL c; ADD; ADD → fused chain
-    // (Two consecutive LOAD_LOCAL_LOAD_LOCAL + ADD can be folded)
     if op == OP_LOAD_LOCAL && code.len() >= i + 5 {
         let next = code[i + 1];
         let next2 = code[i + 2];
@@ -1706,80 +1852,17 @@ fn peephole_at(code: &mut Vec<Instr>, i: usize, instr: Instr) -> bool {
             && next3.op() == OP_ADD
             && next4.op() == OP_ADD
         {
-            // LOAD a; LOAD b; LOAD c; ADD; ADD → ADD_LL a,b; LOAD c; ADD
             code[i] = Instr::make(OP_ADD_LOCAL_LOCAL, instr.a(), next.a() as u16, 0);
             code[i + 1] = next2;
             code[i + 2] = next3;
-            code.drain(i + 3..=i + 4);
-            return true;
-        }
-    }
-
-    // Pattern 9: LOAD_LOCAL a; LOAD_LOCAL b; ADD; STORE_LOCAL c → ADD_LOCAL_LOCAL_STORE c, a, b
-    // Like Luau's fused store pattern — eliminates 4 instructions into 1
-    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
-        let next = code[i + 1];
-        let next2 = code[i + 2];
-        let next3 = code[i + 3];
-        if next.op() == OP_LOAD_LOCAL && next3.op() == OP_STORE_LOCAL {
-            let store_op = match next2.op() {
-                OP_ADD => Some(OP_ADD_LOCAL_LOCAL_STORE),
-                OP_SUB => Some(OP_SUB_LOCAL_LOCAL_STORE),
-                OP_MUL => Some(OP_MUL_LOCAL_LOCAL_STORE),
-                OP_DIV => Some(OP_DIV_LOCAL_LOCAL_STORE),
-                _ => None,
-            };
-            if let Some(fused) = store_op {
-                // a=dest, b=src2, c=src1
-                code[i] = Instr::make(fused, next3.a(), next.a() as u16, instr.a() as u8);
-                code.drain(i + 1..=i + 3);
-                return true;
-            }
-        }
-    }
-
-    // Pattern 10: LOAD_LOCAL a; PUSH_INT k; ADD; STORE_LOCAL b → ADD_INT_STORE_LOCAL b, a, k
-    // Like Luau's ADDK — constant on the right side
-    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
-        let next = code[i + 1];
-        let next2 = code[i + 2];
-        let next3 = code[i + 3];
-        if next.op() == OP_PUSH_INT && next3.op() == OP_STORE_LOCAL {
-            if next2.op() == OP_ADD {
-                code[i] = Instr::a2(OP_ADD_INT_STORE_LOCAL, next3.a(), next.a() as u16);
-                // encode src local in c
-                code[i] = Instr::make(
-                    OP_ADD_INT_STORE_LOCAL,
-                    next3.a(),
-                    next.a() as u16,
-                    instr.a() as u8,
-                );
-                code.drain(i + 1..=i + 3);
-                return true;
-            }
-        }
-    }
-
-    // Pattern 11: DEC_LOCAL — LOAD_LOCAL a; PUSH_INT 1; SUB; STORE_LOCAL a
-    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
-        let next = code[i + 1];
-        let next2 = code[i + 2];
-        let next3 = code[i + 3];
-        if next.op() == OP_PUSH_INT
-            && next.a() == 1
-            && next2.op() == OP_SUB
-            && next3.op() == OP_STORE_LOCAL
-            && next3.a() == instr.a()
-        {
-            code[i] = Instr::a1(OP_DEC_LOCAL, instr.a());
-            code.drain(i + 1..=i + 3);
+            drain_and_patch(code, wide, i + 3..=i + 4);
             return true;
         }
     }
 
     // Pattern 12: Dead code elimination — consecutive NOPs
     if op == OP_NOP && code.len() >= i + 2 && code[i + 1].op() == OP_NOP {
-        code.drain(i..=i + 1);
+        drain_and_patch(code, wide, i..=i + 1);
         return true;
     }
 

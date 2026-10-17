@@ -140,7 +140,9 @@ mod tests {
     fn oci_run_sets_tenancy() {
         let r = evaluate_new(r#"
             oci "my-tenancy" {
-                oci.config ().tenancy
+                $c = oci.config
+
+                $c.tenancy
             }
         "#);
         assert_eq!(r.as_str(), Some("my-tenancy"));
@@ -151,7 +153,9 @@ mod tests {
         let r = evaluate_new(r#"
             oci "tenancy-a" {
                 oci "tenancy-b" {
-                    oci.config ().tenancy
+                    $c = oci.config
+
+                    $c.tenancy
                 }
             }
         "#);

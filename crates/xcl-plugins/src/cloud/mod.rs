@@ -20,7 +20,7 @@
 //! # AWS — unified service names
 //! aws "us-east-1" {
 //!     bucket "my-bucket" {
-//!         $list = bucket.list ()
+//!         $list = bucket.list
 //!         $data = bucket.get "key.txt"
 //!     }
 //!     function "my-function" {
@@ -31,7 +31,7 @@
 //! # GCP — same service names, different provider
 //! gcp "my-project" {
 //!     bucket "my-bucket" {
-//!         $list = bucket.list ()
+//!         $list = bucket.list
 //!     }
 //!     function "my-function" {
 //!         $result = function.invoke { input: "test" }
@@ -53,42 +53,39 @@ use xcl_vm::{Value, DomainCtx};
 
 /// Run a closure within a cloud provider context.
 ///
-/// Sets the provider name and configuration, runs the closure, then clears
+/// Sets the provider name and region, runs the closure, then clears
 /// the context. Used by provider-specific wrappers like `aws(region)`.
 ///
 /// ## SYNTAX
 ///
 /// ```xcl
-/// fn cloud.run(provider: str; config: map; f: any) -> any
+/// fn cloud.run(provider: str; region: str; f: any) -> any
 /// ```
 ///
 /// ## EXAMPLES
 ///
 /// ```xcl
-/// cloud.run "aws" { region: "us-east-1" } {
-///     $provider = cloud.get ()
+/// cloud.run "aws" "us-east-1" {
+///     $provider = cloud.get
 ///     print $provider
 /// }
 /// ```
 #[xcl_fn(
     name = "cloud.run",
-    args = "provider: str; config: map; f: any",
+    args = "provider: str; region: str; f: any",
     ret = "any",
     summary = "Run a closure within a cloud provider context scope."
 )]
 fn cloud_run(ctx: &mut DomainCtx) -> Value {
     let provider = ctx.arg(0).as_str().unwrap_or("");
-    let config = ctx.arg(1);
+    let region = ctx.arg(1).as_str().unwrap_or("");
     let closure = ctx.arg(2);
 
     // Set provider context
     ctx.push_context("cloud.provider", Value::from_str_boxed(provider.to_string()));
-    if let Some(map) = config.as_map() {
-        let cloned: HashMap<String, Value> = map.iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect();
-        ctx.push_context("cloud.config", Value::from_map_boxed(cloned));
-    }
+    let mut config: HashMap<String, Value> = HashMap::new();
+    config.insert("region".to_string(), Value::from_str_boxed(region.to_string()));
+    ctx.push_context("cloud.config", Value::from_map_boxed(config));
 
     let result = ctx.call(closure, &[]);
 
@@ -141,8 +138,9 @@ mod tests {
     #[test]
     fn cloud_run_sets_provider() {
         let r = evaluate_new(r#"
-            cloud.run "aws" { region: "us-east-1" } {
-                cloud.get ()
+            cloud.run "aws" "us-east-1" {
+                $p = cloud.get
+                $p
             }
         "#);
         assert_eq!(r.as_str(), Some("aws"));
@@ -151,8 +149,8 @@ mod tests {
     #[test]
     fn cloud_run_clears_after_block() {
         let r = evaluate_new(r#"
-            cloud.run "aws" { region: "us-east-1" } { }
-            cloud.get ()
+            cloud.run "aws" "us-east-1" { }
+            cloud.get
         "#);
         assert!(r.is_nil());
     }
@@ -160,8 +158,9 @@ mod tests {
     #[test]
     fn cloud_config_returns_map() {
         let r = evaluate_new(r#"
-            cloud.run "aws" { region: "us-east-1" } {
-                cloud.config ()
+            cloud.run "aws" "us-east-1" {
+                $c = cloud.config
+                $c
             }
         "#);
         let map = r.as_map().expect("cloud.config should return a map");
@@ -171,9 +170,11 @@ mod tests {
     #[test]
     fn cloud_nesting_works() {
         let r = evaluate_new(r#"
-            cloud.run "aws" { region: "us-east-1" } {
-                cloud.run "aws" { region: "eu-west-1" } {
-                    cloud.config ().region
+            cloud.run "aws" "us-east-1" {
+                cloud.run "aws" "eu-west-1" {
+                    $c = cloud.config
+
+                    $c.region
                 }
             }
         "#);
@@ -185,7 +186,9 @@ mod tests {
         let r = evaluate_new(r#"
             aws "us-east-1" {
                 bucket "my-bucket" {
-                    bucket.config ().bucket
+                    $c = bucket.config
+
+                    $c.bucket
                 }
             }
         "#);
@@ -197,7 +200,9 @@ mod tests {
         let r = evaluate_new(r#"
             aws "us-east-1" {
                 function "my-fn" {
-                    function.config ().function
+                    $c = function.config
+
+                    $c.function
                 }
             }
         "#);

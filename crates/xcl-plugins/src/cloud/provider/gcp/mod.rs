@@ -6,7 +6,7 @@
 //! # GCP with domain expansion — unified service names
 //! gcp "my-project" {
 //!     bucket "my-bucket" {
-//!         $list = bucket.list ()
+//!         $list = bucket.list
 //!     }
 //!     function "my-function" {
 //!         $result = function.invoke { input: "test" }
@@ -47,7 +47,7 @@ use xcl_vm::{Value, DomainCtx};
 /// ```xcl
 /// gcp "my-project" {
 ///     bucket "my-bucket" {
-///         $list = bucket.list ()
+///         $list = bucket.list
 ///     }
 /// }
 /// ```
@@ -196,7 +196,9 @@ mod tests {
     fn gcp_run_sets_project() {
         let r = evaluate_new(r#"
             gcp "my-project" {
-                gcp.config ().project
+                $c = gcp.config
+
+                $c.project
             }
         "#);
         assert_eq!(r.as_str(), Some("my-project"));
@@ -206,7 +208,7 @@ mod tests {
     fn gcp_run_clears_after_block() {
         let r = evaluate_new(r#"
             gcp "my-project" { }
-            gcp.config ().project
+            gcp.config.project
         "#);
         assert!(r.is_nil());
     }
@@ -216,7 +218,9 @@ mod tests {
         let r = evaluate_new(r#"
             gcp "project-a" {
                 gcp "project-b" {
-                    gcp.config ().project
+                    $c = gcp.config
+
+                    $c.project
                 }
             }
         "#);

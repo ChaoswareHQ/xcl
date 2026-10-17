@@ -56,7 +56,7 @@ fn arr_is_empty(args: &[Value]) -> Value {
 //  Functional transformations
 // ═══════════════════════════════════════════════════════════
 
-/// Transform each element: `arr.map $arr (fn { $it * 2 })`.
+/// Transform each element: `arr.map $arr (($x) => $x * 2)`.
 #[xcl_fn(name = "arr.map", args = "a: array; f: any", ret = "array")]
 fn arr_map(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
@@ -68,7 +68,7 @@ fn arr_map(ctx: &mut DomainCtx) -> Value {
     make_array(ctx, result)
 }
 
-/// Filter elements by predicate: `arr.filter $arr (fn { $it > 0 })`.
+/// Filter elements by predicate: `arr.filter $arr (($x) => $x > 0)`.
 #[xcl_fn(name = "arr.filter", args = "a: array; f: any", ret = "array")]
 fn arr_filter(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
@@ -83,7 +83,7 @@ fn arr_filter(ctx: &mut DomainCtx) -> Value {
     make_array(ctx, result)
 }
 
-/// Reduce to a single value: `arr.reduce $arr 0 (fn { $acc + $it })`.
+/// Reduce to a single value: `arr.reduce $arr 0 (($acc, $x) => $acc + $x)`.
 #[xcl_fn(name = "arr.reduce", args = "a: array; init: any; f: any", ret = "any")]
 fn arr_reduce(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
@@ -95,7 +95,7 @@ fn arr_reduce(ctx: &mut DomainCtx) -> Value {
     acc
 }
 
-/// Partition into two arrays: `arr.partition $arr (fn { $it > 0 })`.
+/// Partition into two arrays: `arr.partition $arr (($x) => $x > 0)`.
 #[xcl_fn(name = "arr.partition", args = "a: array; f: any", ret = "array")]
 fn arr_partition(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));

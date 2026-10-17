@@ -6,7 +6,7 @@
 //! # GitHub with domain expansion
 //! github "my-org" {
 //!     bucket "my-repo" {
-//!         $list = bucket.list ()
+//!         $list = bucket.list
 //!     }
 //!     function "my-action" {
 //!         $result = function.invoke { input: "test" }
@@ -114,7 +114,9 @@ mod tests {
     fn github_run_sets_org() {
         let r = evaluate_new(r#"
             github "my-org" {
-                github.config ().org
+                $c = github.config
+
+                $c.org
             }
         "#);
         assert_eq!(r.as_str(), Some("my-org"));
@@ -125,7 +127,9 @@ mod tests {
         let r = evaluate_new(r#"
             github "org-a" {
                 github "org-b" {
-                    github.config ().org
+                    $c = github.config
+
+                    $c.org
                 }
             }
         "#);

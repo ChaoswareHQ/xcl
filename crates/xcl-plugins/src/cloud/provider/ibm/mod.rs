@@ -114,7 +114,9 @@ mod tests {
     fn ibm_run_sets_account() {
         let r = evaluate_new(r#"
             ibm "my-account" {
-                ibm.config ().account
+                $c = ibm.config
+
+                $c.account
             }
         "#);
         assert_eq!(r.as_str(), Some("my-account"));

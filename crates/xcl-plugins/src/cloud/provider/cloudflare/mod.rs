@@ -6,7 +6,7 @@
 //! # Cloudflare with domain expansion
 //! cloudflare "my-account" {
 //!     bucket "my-bucket" {
-//!         $list = bucket.list ()
+//!         $list = bucket.list
 //!     }
 //!     function "my-worker" {
 //!         $result = function.invoke { input: "test" }
@@ -149,7 +149,8 @@ mod tests {
     fn cloudflare_run_sets_account() {
         let r = evaluate_new(r#"
             cloudflare "my-account" {
-                cloudflare.config ().account
+                $c = cloudflare.config
+                $c.account
             }
         "#);
         assert_eq!(r.as_str(), Some("my-account"));
@@ -160,7 +161,8 @@ mod tests {
         let r = evaluate_new(r#"
             cloudflare "acc-a" {
                 cloudflare "acc-b" {
-                    cloudflare.config ().account
+                    $c = cloudflare.config
+                    $c.account
                 }
             }
         "#);

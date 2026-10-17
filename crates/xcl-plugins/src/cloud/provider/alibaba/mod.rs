@@ -6,7 +6,7 @@
 //! # Alibaba Cloud with domain expansion
 //! alibaba "my-account" {
 //!     oss "my-bucket" {
-//!         $list = oss.list ()
+//!         $list = oss.list
 //!     }
 //! }
 //! ```
@@ -134,7 +134,9 @@ mod tests {
     fn alibaba_run_sets_account() {
         let r = evaluate_new(r#"
             alibaba "my-account" {
-                alibaba.config ().account
+                $c = alibaba.config
+
+                $c.account
             }
         "#);
         assert_eq!(r.as_str(), Some("my-account"));
@@ -145,7 +147,9 @@ mod tests {
         let r = evaluate_new(r#"
             alibaba "acc-a" {
                 alibaba "acc-b" {
-                    alibaba.config ().account
+                    $c = alibaba.config
+
+                    $c.account
                 }
             }
         "#);

@@ -198,7 +198,9 @@ mod tests {
         let r = evaluate_new(r#"
             aws "us-east-1" {
                 function "my-function" {
-                    function.config ().function
+                    $c = function.config
+
+                    $c.function
                 }
             }
         "#);

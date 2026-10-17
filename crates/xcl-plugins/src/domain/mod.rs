@@ -633,7 +633,8 @@ mod tests {
         let r = evaluate_new(r#"
             domain.run "x" 1 {
                 domain.run "y" 2 {
-                    domain.keys ()
+                    $k = domain.keys
+                    $k
                 }
             }
         "#);
@@ -668,7 +669,8 @@ mod tests {
         let r = evaluate_new(r#"
             domain.run "a" 10 {
                 domain.run "b" 20 {
-                    domain.snapshot ()
+                    $s = domain.snapshot
+                    $s
                 }
             }
         "#);
@@ -681,9 +683,11 @@ mod tests {
     #[test]
     fn io_dir_changes_and_restores() {
         let r = evaluate_new(r#"
-            $before = path.cwd ().value
+            $before = path.cwd
+            $before = $before.value
             io.dir "." {
-                path.cwd ().value
+                $v = path.cwd
+                $v.value
             }
         "#);
         // Should return the current dir (same as before since we chdir to ".")
@@ -691,9 +695,11 @@ mod tests {
 
         // Verify cwd is restored after the block
         let r2 = evaluate_new(r#"
-            $before = path.cwd ().value
+            $before = path.cwd
+            $before = $before.value
             io.dir "." { }
-            path.cwd ().value
+            $v = path.cwd
+            $v.value
         "#);
         assert_eq!(r.as_str(), r2.as_str());
     }
@@ -703,7 +709,8 @@ mod tests {
         let r = evaluate_new(r#"
             io.dir "." {
                 io.dir "." {
-                    path.cwd ().value
+                    $v = path.cwd
+                    $v.value
                 }
             }
         "#);
@@ -717,7 +724,8 @@ mod tests {
 
         let r = evaluate_new(r#"
             env.override { XCL_TEST_DOMAIN_VAR: "overridden" } {
-                env.get "XCL_TEST_DOMAIN_VAR"
+                $v = env.get "XCL_TEST_DOMAIN_VAR"
+                $v
             }
         "#);
         assert_eq!(r.as_str(), Some("overridden"));
@@ -725,7 +733,8 @@ mod tests {
         // After the block, the original value should be restored
         let r2 = evaluate_new(r#"
             env.override { XCL_TEST_DOMAIN_VAR: "overridden" } { }
-            env.get "XCL_TEST_DOMAIN_VAR"
+            $v = env.get "XCL_TEST_DOMAIN_VAR"
+            $v
         "#);
         assert_eq!(r2.as_str(), Some("original"));
 
@@ -737,14 +746,16 @@ mod tests {
         // A var that didn't exist before should be removed after the block
         let r = evaluate_new(r#"
             env.override { XCL_TEST_NEW_VAR: "hello" } {
-                env.get "XCL_TEST_NEW_VAR"
+                $v = env.get "XCL_TEST_NEW_VAR"
+                $v
             }
         "#);
         assert_eq!(r.as_str(), Some("hello"));
 
         let r2 = evaluate_new(r#"
             env.override { XCL_TEST_NEW_VAR: "hello" } { }
-            env.get "XCL_TEST_NEW_VAR"
+            $v = env.get "XCL_TEST_NEW_VAR"
+            $v
         "#);
         assert!(r2.is_nil());
     }

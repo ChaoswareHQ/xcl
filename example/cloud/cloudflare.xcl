@@ -1,10 +1,24 @@
 # Cloudflare provider example
 # Tests domain expansion, credentials, and all service operations
-# Requires CLOUDFLARE_ACCOUNT and CLOUDFLARE_API_TOKEN in .env file
 #
-# Credentials are loaded from .env using io.read_env internally.
-# Use cloudflare "" to auto-load the account from .env.
-# Use cloudflare "your-account-id" to override with a specific account.
+# SECURITY: Never hardcode API tokens or credentials in your XCL scripts.
+# Always load them from a .env file using io.read_env.
+#
+# Create a .env file with your credentials:
+#   CLOUDFLARE_API_TOKEN=your-api-token-here
+#   CLOUDFLARE_ACCOUNT=your-account-id-here
+
+# Load credentials securely from .env
+$envResult = io.read_env ".env"
+if $envResult.is_ok {
+    $env = $envResult.value
+    $token = $env.CLOUDFLARE_API_TOKEN
+    $account = $env.CLOUDFLARE_ACCOUNT
+    print "Cloudflare credentials loaded from .env"
+}
+if $envResult.is_err {
+    print "Warning: could not load .env file:" $envResult.message
+}
 
 # Basic Cloudflare context — account auto-loaded from .env
 cloudflare "" {

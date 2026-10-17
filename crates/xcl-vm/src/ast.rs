@@ -133,8 +133,6 @@ pub enum AstNode {
         params: Vec<String>,
         /// Expression evaluated when the lambda is called.
         body: Box<AstNode>,
-        /// Whether the lambda references the implicit `$it` parameter.
-        implicit_it: bool,
     },
     /// Function or method invocation: `foo(a, b, c)` or `foo(a: 1, b: 2)`.
     Call {

@@ -94,8 +94,8 @@ fn bench_array_pipeline(c: &mut Criterion) {
             $records = $records + [{id: $i, value: $val, category: $category}]
             $i = $i + 1
         }
-        $mapped = arr.map $records { $it.value * 2 }
-        $filtered = arr.filter $mapped { $it > 1000 }
+        $mapped = arr.map $records (($x) => $x.value * 2)
+        $filtered = arr.filter $mapped (($x) => $x > 1000)
         $sorted = arr.sort $filtered
         $total = arr.sum $sorted
         $total

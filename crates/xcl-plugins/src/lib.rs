@@ -505,18 +505,15 @@ $pair $ident $three"#;
     fn block_lambda_call() {
         // Calling a block-lambda executes its body and returns the last value
         let mut vm = new_vm();
-        let r = evaluate(r#"$f = { 42 }; $f"#, &mut vm);
-        assert!(r.as_func().is_some());
-        // Call the function
-        let r2 = evaluate(r#"$f = { 42 }; $f ()"#, &mut vm);
-        assert_eq!(r2.as_i48(), 42);
+        let r = evaluate(r#"domain.run "key" "val" { 42 }"#, &mut vm);
+        assert_eq!(r.as_i48(), 42);
     }
 
     #[test]
     fn block_lambda_multiple_statements() {
         // Block-lambda with multiple statements
         let mut vm = new_vm();
-        let r = evaluate(r#"$f = { $x = 10; $x + 2 }; $f ()"#, &mut vm);
+        let r = evaluate(r#"domain.run "key" "val" { $x = 10; $x + 2 }"#, &mut vm);
         assert_eq!(r.as_i48(), 12);
     }
 
@@ -524,7 +521,7 @@ $pair $ident $three"#;
     fn block_lambda_empty() {
         // `{ }` is an empty block-lambda that returns nil
         let mut vm = new_vm();
-        let r = evaluate(r#"$f = { }; $f ()"#, &mut vm);
+        let r = evaluate(r#"domain.run "key" "val" { }"#, &mut vm);
         assert!(r.is_nil(), "empty block-lambda should return nil");
     }
 
@@ -547,69 +544,6 @@ defer { print "cleaned" }
 print "main"
 "#, &mut vm);
         assert!(r.is_nil());
-    }
-
-    // ── implicit $it tests ──
-
-    #[test]
-    fn implicit_it_block_lambda() {
-        // `{ $it * 2 }` creates a 1-param closure with implicit "it"
-        let mut vm = new_vm();
-        let r = evaluate(r#"$f = { $it * 2 }; $f 21"#, &mut vm);
-        assert_eq!(r.as_i48(), 42);
-    }
-
-    #[test]
-    fn implicit_it_arr_map() {
-        // `arr.map $a { $it + 1 }` — block-lambda with implicit $it
-        let mut vm = new_vm();
-        let r = evaluate(r#"$a = [1; 2; 3]; arr.map $a { $it + 1 }"#, &mut vm);
-        let arr = r.as_array().expect("result should be an array");
-        assert_eq!(arr[0].as_i48(), 2);
-        assert_eq!(arr[1].as_i48(), 3);
-        assert_eq!(arr[2].as_i48(), 4);
-    }
-
-    #[test]
-    fn implicit_it_arr_filter() {
-        // `arr.filter $a { $it > 1 }` — implicit $it in filter
-        let mut vm = new_vm();
-        let r = evaluate(r#"$a = [1; 2; 3; 4]; arr.filter $a { $it > 2 }"#, &mut vm);
-        let arr = r.as_array().expect("result should be an array");
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0].as_i48(), 3);
-        assert_eq!(arr[1].as_i48(), 4);
-    }
-
-    #[test]
-    fn implicit_it_defer() {
-        // `defer { $it }` — defer with implicit $it (no-op since defer passes no args)
-        let mut vm = new_vm();
-        let r = evaluate(r#"
-$x = 0
-defer { $x = 99 }
-print "done"
-"#, &mut vm);
-        assert!(r.is_nil());
-    }
-
-    #[test]
-    fn implicit_it_without_usage() {
-        // `{ 42 }` without $it should NOT add implicit param; call with ()
-        let mut vm = new_vm();
-        let r = evaluate(r#"$f = { 42 }; $f ()"#, &mut vm);
-        assert_eq!(r.as_i48(), 42);
-    }
-
-    #[test]
-    fn implicit_it_nested_call() {
-        // `$it` inside a call within block-lambda
-        let mut vm = new_vm();
-        let r = evaluate(r#"$a = [1; 2; 3]; arr.map $a { math.abs $it }"#, &mut vm);
-        let arr = r.as_array().expect("result should be an array");
-        assert_eq!(arr[0].as_f64(), 1.0);
-        assert_eq!(arr[1].as_f64(), 2.0);
-        assert_eq!(arr[2].as_f64(), 3.0);
     }
 
     // ── array tests ──

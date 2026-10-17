@@ -44,7 +44,7 @@ use xcl_vm::{Value, DomainCtx};
 /// ```xcl
 /// azure "my-subscription" {
 ///     bucket "my-storage" {
-///         $list = bucket.list ()
+///         $list = bucket.list
 ///     }
 /// }
 /// ```
@@ -199,7 +199,9 @@ mod tests {
     fn azure_run_sets_subscription() {
         let r = evaluate_new(r#"
             azure "my-sub" {
-                azure.config ().subscription
+                $c = azure.config
+
+                $c.subscription
             }
         "#);
         assert_eq!(r.as_str(), Some("my-sub"));
@@ -209,7 +211,7 @@ mod tests {
     fn azure_run_clears_after_block() {
         let r = evaluate_new(r#"
             azure "my-sub" { }
-            azure.config ().subscription
+            azure.config.subscription
         "#);
         assert!(r.is_nil());
     }
@@ -219,7 +221,9 @@ mod tests {
         let r = evaluate_new(r#"
             azure "sub-a" {
                 azure "sub-b" {
-                    azure.config ().subscription
+                    $c = azure.config
+
+                    $c.subscription
                 }
             }
         "#);

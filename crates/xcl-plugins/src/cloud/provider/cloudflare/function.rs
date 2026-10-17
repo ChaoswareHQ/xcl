@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn function_list_missing_account() {
-        let result = evaluate_new(r#"function.list ()"#);
+        let result = evaluate_new(r#"function.list"#);
         assert_eq!(result.map_variant(), Some(xcl_vm::VARIANT_ERR));
     }
 }
