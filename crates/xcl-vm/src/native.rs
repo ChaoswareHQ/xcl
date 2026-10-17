@@ -12,7 +12,7 @@
 //! * [`TYPE_REGISTRY`] - Static list of custom types and record/sum definitions.
 //! * [`IMPL_REGISTRY`] - Static list of trait implementation blocks for types.
 //!
-//! When a [`VM`](crate::vm::VM) starts up, calling [`VM::register_all`](crate::vm::VM::register_all)
+//! When a [`crate::vm::VM`] starts up, calling [`crate::vm::VM::register_all`]
 //! scans these slices and populates the VM's internal dispatch tables.
 //!
 //! # Examples
@@ -42,7 +42,7 @@ use linkme::distributed_slice;
 /// `#[linkme::distributed_slice(NATIVE_REGISTRY)]`) are placed into this slice
 /// by the linker.
 ///
-/// The VM loads these entries during [`VM::register_all_natives`](crate::vm::VM::register_all_natives).
+/// The VM loads these entries during [`crate::vm::VM::register_all_natives`].
 ///
 /// # Examples
 ///
@@ -60,7 +60,7 @@ pub static NATIVE_REGISTRY: [NativeEntry] = [..];
 /// Records type metadata, field definitions, and variant structures registered
 /// by core domains or third-party plugins.
 ///
-/// The VM loads these entries during [`VM::register_all_types`](crate::vm::VM::register_all_types).
+/// The VM loads these entries during [`crate::vm::VM::register_all_types`].
 ///
 /// # Examples
 ///

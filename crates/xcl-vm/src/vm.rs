@@ -255,7 +255,7 @@ impl VM {
     ///
     /// # Arguments
     ///
-    /// * `wk` - Configured [`WellKnown`] metadata.
+    /// * `wk` - Configured [`crate::wellknown::WellKnown`] metadata.
     pub fn set_well_known(&mut self, wk: crate::wellknown::WellKnown) {
         self.well_known = wk;
     }
@@ -268,7 +268,7 @@ impl VM {
         self.register_all_types();
     }
 
-    /// Scans the distributed [`NATIVE_REGISTRY`] slice
+    /// Scans the distributed [`crate::native::NATIVE_REGISTRY`] slice
     /// and populates the VM's domain and global dispatch tables.
     pub fn register_all_natives(&mut self) {
         use crate::native::NATIVE_REGISTRY;
@@ -318,7 +318,7 @@ impl VM {
         }
     }
 
-    /// Scans the distributed [`TYPE_REGISTRY`] slice
+    /// Scans the distributed [`crate::native::TYPE_REGISTRY`] slice
     /// and indexes all registered custom types by name.
     pub fn register_all_types(&mut self) {
         use crate::native::TYPE_REGISTRY;

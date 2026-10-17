@@ -34,7 +34,7 @@
 //! # Heap Allocation & Bump Arenas
 //!
 //! Temporary objects generated during execution (such as intermediate strings, slices,
-//! and maps) are allocated from a [`bumpalo::Bump`] arena owned by [`VM`](crate::vm::VM).
+//! and maps) are allocated from a [`bumpalo::Bump`] arena owned by [`crate::vm::VM`].
 //! This provides microsecond allocation speed and batch cleanup on loop or VM reset.
 //!
 //! Long-lived objects (such as exported plugins or leaked constants) can be created with
@@ -296,12 +296,7 @@ impl Value {
     /// ```
     #[inline(always)]
     pub fn from_f64(f: f64) -> Self {
-        let bits = if f.is_nan() {
-            f64::NAN.to_bits()
-        } else {
-            f.to_bits()
-        };
-        Value(bits)
+        Value(f.to_bits())
     }
 
     /// Constructs a value from a 48-bit signed integer.
@@ -466,7 +461,7 @@ impl Value {
     /// Decodes the 48-bit signed integer value with sign extension.
     #[inline(always)]
     pub fn as_i48(self) -> i64 {
-        ((self.0 & PAYLOAD) as i64) << 16 >> 16
+        (self.0 as i64) << 16 >> 16
     }
 
     /// Returns the boolean value.
@@ -565,16 +560,10 @@ impl Value {
 
     /// Fast integer addition when both operands are known to be integers.
     ///
-    /// Performs checked 48-bit addition; on overflow, falls back to 64-bit float addition.
+    /// Performs 48-bit addition.
     #[inline(always)]
     pub fn add_int(self, other: Self) -> Self {
-        let a = self.as_i48();
-        let b = other.as_i48();
-        if let Some(r) = a.checked_add(b) {
-            Self::from_i48(r)
-        } else {
-            Self::from_f64(a as f64 + b as f64)
-        }
+        Self::from_i48(self.as_i48().wrapping_add(other.as_i48()))
     }
 
     /// Fast integer multiplication when both operands are known to be integers.
@@ -592,13 +581,7 @@ impl Value {
     /// Fast integer subtraction when both operands are known to be integers.
     #[inline(always)]
     pub fn sub_int(self, other: Self) -> Self {
-        let a = self.as_i48();
-        let b = other.as_i48();
-        if let Some(r) = a.checked_sub(b) {
-            Self::from_i48(r)
-        } else {
-            Self::from_f64(a as f64 - b as f64)
-        }
+        Self::from_i48(self.as_i48().wrapping_sub(other.as_i48()))
     }
 
     /// Fast integer division when both operands are known to be integers.
@@ -607,7 +590,7 @@ impl Value {
         let a = self.as_i48();
         let b = other.as_i48();
         if b != 0 {
-            Self::from_i48(a / b)
+            Self::from_i48(a.wrapping_div(b))
         } else {
             Self::from_f64(f64::INFINITY)
         }
@@ -619,7 +602,7 @@ impl Value {
         let a = self.as_i48();
         let b = other.as_i48();
         if b != 0 {
-            Self::from_i48(a % b)
+            Self::from_i48(a.wrapping_rem(b))
         } else {
             Self::nil()
         }
@@ -628,40 +611,48 @@ impl Value {
     /// Fast integer equality comparison without tag inspection.
     #[inline(always)]
     pub fn eq_int(self, other: Self) -> bool {
-        self.as_i48() == other.as_i48()
+        self.0 == other.0
     }
 
     /// Fast integer less-than comparison without tag inspection.
     #[inline(always)]
     pub fn lt_int(self, other: Self) -> bool {
-        self.as_i48() < other.as_i48()
+        ((self.0 as i64) << 16) < ((other.0 as i64) << 16)
     }
 
     /// Fast integer greater-than comparison without tag inspection.
     #[inline(always)]
     pub fn gt_int(self, other: Self) -> bool {
-        self.as_i48() > other.as_i48()
+        ((self.0 as i64) << 16) > ((other.0 as i64) << 16)
     }
 
     /// Generic addition operator with dynamic type dispatch.
     ///
-    /// Supports integers, floats, and string concatenation.
+    /// Supports integers, floats, array concatenation, and string concatenation.
+    #[inline(always)]
     pub fn add(self, other: Self, arena: &bumpalo::Bump) -> Self {
         if self.tag() == TAG_INT && other.tag() == TAG_INT {
             return self.add_int(other);
         }
-        if self.is_float() || other.is_float() {
-            let a = if self.is_float() {
-                self.as_f64()
-            } else {
-                self.as_i48() as f64
-            };
-            let b = if other.is_float() {
-                other.as_f64()
-            } else {
-                other.as_i48() as f64
-            };
-            return Self::from_f64(a + b);
+        if self.is_float() && other.is_float() {
+            return Self::from_f64(self.as_f64() + other.as_f64());
+        }
+        if (self.is_float() && other.is_int()) || (self.is_int() && other.is_float()) {
+            return Self::from_f64(self.as_float() + other.as_float());
+        }
+        Self::add_slow(self, other, arena)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn add_slow(self, other: Self, arena: &bumpalo::Bump) -> Self {
+        if self.heap_kind() == Some(KIND_ARRAY) && other.heap_kind() == Some(KIND_ARRAY) {
+            let a = unsafe { &(*(self.as_ptr::<HeapArray>())).data };
+            let b = unsafe { &(*(other.as_ptr::<HeapArray>())).data };
+            let mut v = Vec::with_capacity(a.len() + b.len());
+            v.extend_from_slice(a);
+            v.extend_from_slice(b);
+            return Self::from_array(v, arena);
         }
         if self.tag() == TAG_PTR || other.tag() == TAG_PTR {
             let a = self.as_string();
@@ -673,43 +664,37 @@ impl Value {
 
     /// Generic subtraction operator with dynamic type dispatch.
     #[doc(alias("sub"))]
+    #[inline(always)]
     pub fn sub_(self, other: Self) -> Self {
         if self.tag() == TAG_INT && other.tag() == TAG_INT {
             return self.sub_int(other);
         }
-        let a = if self.is_float() {
-            self.as_f64()
-        } else {
-            self.as_i48() as f64
-        };
-        let b = if other.is_float() {
-            other.as_f64()
-        } else {
-            other.as_i48() as f64
-        };
-        Self::from_f64(a - b)
+        if self.is_float() && other.is_float() {
+            return Self::from_f64(self.as_f64() - other.as_f64());
+        }
+        Self::from_f64(self.as_float() - other.as_float())
     }
 
     /// Generic multiplication operator with dynamic type dispatch.
     ///
     /// Supports numeric multiplication and string repetition (e.g. `"a" * 3`).
+    #[inline(always)]
     pub fn mul(self, other: Self, arena: &bumpalo::Bump) -> Self {
         if self.tag() == TAG_INT && other.tag() == TAG_INT {
             return self.mul_int(other);
         }
-        if self.is_float() || other.is_float() {
-            let a = if self.is_float() {
-                self.as_f64()
-            } else {
-                self.as_i48() as f64
-            };
-            let b = if other.is_float() {
-                other.as_f64()
-            } else {
-                other.as_i48() as f64
-            };
-            return Self::from_f64(a * b);
+        if self.is_float() && other.is_float() {
+            return Self::from_f64(self.as_f64() * other.as_f64());
         }
+        if (self.is_float() && other.is_int()) || (self.is_int() && other.is_float()) {
+            return Self::from_f64(self.as_float() * other.as_float());
+        }
+        Self::mul_slow(self, other, arena)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn mul_slow(self, other: Self, arena: &bumpalo::Bump) -> Self {
         if self.tag() == TAG_PTR && other.is_int() {
             return Self::from_str(self.as_string().repeat(other.as_i48() as usize), arena);
         }
@@ -721,43 +706,45 @@ impl Value {
 
     /// Generic division operator with dynamic type dispatch.
     #[doc(alias("div"))]
+    #[inline(always)]
     pub fn div_(self, other: Self) -> Self {
         if self.tag() == TAG_INT && other.tag() == TAG_INT {
             return self.div_int(other);
         }
-        let a = if self.is_float() {
-            self.as_f64()
-        } else {
-            self.as_i48() as f64
-        };
-        let b = if other.is_float() {
-            other.as_f64()
-        } else {
-            other.as_i48() as f64
-        };
-        Self::from_f64(a / b)
+        if self.is_float() && other.is_float() {
+            return Self::from_f64(self.as_f64() / other.as_f64());
+        }
+        Self::from_f64(self.as_float() / other.as_float())
     }
 
     /// Generic modulo remainder operator with dynamic type dispatch.
+    #[inline(always)]
     pub fn mod_(self, other: Self) -> Self {
         if self.tag() == TAG_INT && other.tag() == TAG_INT {
             return self.mod_int(other);
+        }
+        if self.is_float() || other.is_float() {
+            return Self::from_f64(self.as_float() % other.as_float());
         }
         Self::nil()
     }
 
     /// Generic equality operator with tag-based early exit and string comparison.
     #[doc(alias("eq"))]
+    #[inline(always)]
     pub fn eq_(self, other: Self) -> bool {
         if self.0 == other.0 {
             return true;
         }
-        if self.tag() == TAG_INT && other.tag() == TAG_INT {
-            return self.eq_int(other);
-        }
         if self.is_float() && other.is_float() {
             return self.as_f64() == other.as_f64();
         }
+        Self::eq_slow(self, other)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn eq_slow(self, other: Self) -> bool {
         if self.is_int() && other.is_float() {
             return self.as_i48() as f64 == other.as_f64();
         }
@@ -777,6 +764,7 @@ impl Value {
     }
 
     /// Generic less-than operator with dynamic type dispatch.
+    #[inline(always)]
     pub fn lt(self, other: Self) -> bool {
         if self.tag() == TAG_INT && other.tag() == TAG_INT {
             return self.lt_int(other);
@@ -784,6 +772,12 @@ impl Value {
         if self.is_float() && other.is_float() {
             return self.as_f64() < other.as_f64();
         }
+        Self::lt_slow(self, other)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn lt_slow(self, other: Self) -> bool {
         if self.is_int() && other.is_float() {
             return (self.as_i48() as f64) < other.as_f64();
         }
@@ -797,6 +791,7 @@ impl Value {
     }
 
     /// Generic greater-than operator with dynamic type dispatch.
+    #[inline(always)]
     pub fn gt(self, other: Self) -> bool {
         if self.tag() == TAG_INT && other.tag() == TAG_INT {
             return self.gt_int(other);
@@ -804,6 +799,12 @@ impl Value {
         if self.is_float() && other.is_float() {
             return self.as_f64() > other.as_f64();
         }
+        Self::gt_slow(self, other)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn gt_slow(self, other: Self) -> bool {
         if self.is_int() && other.is_float() {
             return (self.as_i48() as f64) > other.as_f64();
         }
@@ -818,14 +819,14 @@ impl Value {
 
     /// Logical NOT operator (`!`).
     #[doc(alias("not"))]
-    #[inline]
+    #[inline(always)]
     pub fn not_(self) -> Self {
         Self::bool(!self.is_truthy())
     }
 
     /// Arithmetic negation operator (`-x`).
     #[doc(alias("neg"))]
-    #[inline]
+    #[inline(always)]
     pub fn neg_(self) -> Self {
         if self.is_int() {
             Self::from_i48(-self.as_i48())
@@ -890,7 +891,7 @@ impl Value {
     }
 
     /// Converts the value to an integer if possible; otherwise returns 0.
-    #[inline]
+    #[inline(always)]
     pub fn as_int(self) -> i64 {
         if self.is_int() {
             self.as_i48()
@@ -902,7 +903,7 @@ impl Value {
     }
 
     /// Converts the value to a float if possible; otherwise returns 0.0.
-    #[inline]
+    #[inline(always)]
     pub fn as_float(self) -> f64 {
         if self.is_float() {
             self.as_f64()

@@ -3,7 +3,7 @@
 //! # Overview
 //!
 //! The XCL bytecode system translates AST expressions into a high-density, cache-friendly
-//! stream of 64-bit instructions executed by the [`VM`](crate::vm::VM).
+//! stream of 64-bit instructions executed by the [`crate::vm::VM`].
 //!
 //! # Instruction Encoding
 //!
@@ -306,6 +306,55 @@ pub const OP_SUB_LOCAL_LOCAL_STORE: u8 = 101;
 pub const OP_DIV_LOCAL_LOCAL_STORE: u8 = 102;
 /// Fused while-loop condition and conditional jump comparing two locals (`while $a < $b`).
 pub const OP_WHILE_LT_LOCAL: u8 = 103;
+/// Fused unary math intrinsic: `locals[a] = math_op(locals[b])` where `c` selects the function.
+pub const OP_MATH_UNARY: u8 = 104;
+/// Fused array/map index load into local: `locals[a] = locals[c][locals[b]]`.
+pub const OP_GET_INDEX_LOCAL_LOCAL_STORE: u8 = 105;
+/// Fused map field load into local: `locals[a] = locals[c].(string_table[b])`.
+pub const OP_GET_FIELD_LOCAL_STORE: u8 = 106;
+/// Fused modulo local-local store: `locals[a] = locals[c] % locals[b]`.
+pub const OP_MOD_LOCAL_LOCAL_STORE: u8 = 107;
+/// Loads a constant from `wide_operands[b]` into `locals[a]` (`c = 0` for int, `c = 1` for float).
+pub const OP_LOAD_CONST_LOCAL: u8 = 108;
+/// Appends `locals[b]` in-place to the array in `locals[a]`.
+pub const OP_ARRAY_PUSH_LOCAL: u8 = 109;
+
+/// Math intrinsic IDs for [`OP_MATH_UNARY`].
+pub const MATH_SQRT: u8 = 0;
+pub const MATH_SIN: u8 = 1;
+pub const MATH_COS: u8 = 2;
+pub const MATH_TAN: u8 = 3;
+pub const MATH_EXP: u8 = 4;
+pub const MATH_LOG: u8 = 5;
+pub const MATH_ABS: u8 = 6;
+pub const MATH_FLOOR: u8 = 7;
+pub const MATH_CEIL: u8 = 8;
+pub const MATH_ROUND: u8 = 9;
+pub const MATH_TANH: u8 = 10;
+pub const MATH_LOG2: u8 = 11;
+pub const MATH_LOG10: u8 = 12;
+pub const MATH_CBRT: u8 = 13;
+
+#[inline]
+fn math_unary_id(name: &str) -> Option<u8> {
+    match name {
+        "math.sqrt" => Some(MATH_SQRT),
+        "math.sin" => Some(MATH_SIN),
+        "math.cos" => Some(MATH_COS),
+        "math.tan" => Some(MATH_TAN),
+        "math.exp" => Some(MATH_EXP),
+        "math.log" => Some(MATH_LOG),
+        "math.abs" => Some(MATH_ABS),
+        "math.floor" => Some(MATH_FLOOR),
+        "math.ceil" => Some(MATH_CEIL),
+        "math.round" => Some(MATH_ROUND),
+        "math.tanh" => Some(MATH_TANH),
+        "math.log2" => Some(MATH_LOG2),
+        "math.log10" => Some(MATH_LOG10),
+        "math.cbrt" => Some(MATH_CBRT),
+        _ => None,
+    }
+}
 
 /// Compiled XCL bytecode unit ready for execution by the VM runtime.
 ///
@@ -319,6 +368,8 @@ pub struct Bytecode {
     pub wide_operands: Arc<[i64]>,
     /// Interned string literals and member/method names.
     pub string_table: Arc<[Box<str>]>,
+    /// Pre-allocated string [`Value`] constants corresponding to `string_table`.
+    pub string_values: Arc<[Value]>,
     /// Local variable names mapped to slot indices.
     pub local_names: Arc<[Box<str>]>,
     /// Global variable names mapped to slot indices.
@@ -409,6 +460,145 @@ impl Compiler {
         i
     }
 
+    #[inline]
+    fn temp_slot(&mut self, depth: u32) -> u32 {
+        let name = format!("__tmp_{depth}");
+        self.local(&name)
+    }
+
+    fn can_emit_to_slot(&self, node: &AstNode) -> bool {
+        match node {
+            AstNode::Ident { name, .. } => !self.is_global(name),
+            AstNode::Int { .. } | AstNode::Float { .. } => true,
+            AstNode::UnaryOp {
+                op: UnaryOperator::Neg,
+                operand,
+                ..
+            } => self.can_emit_to_slot(operand),
+            AstNode::BinaryOp {
+                left,
+                op:
+                    BinaryOperator::Add
+                    | BinaryOperator::Sub
+                    | BinaryOperator::Mul
+                    | BinaryOperator::Div
+                    | BinaryOperator::Mod,
+                right,
+                ..
+            } => self.can_emit_to_slot(left) && self.can_emit_to_slot(right),
+            AstNode::Index { target, index, .. } => {
+                self.can_emit_to_slot(target) && self.can_emit_to_slot(index)
+            }
+            AstNode::FieldAccess { target, .. } => self.can_emit_to_slot(target),
+            AstNode::Call { callee, args, .. } => {
+                args.len() == 1
+                    && args[0].name.is_none()
+                    && collect_dotted_name(callee)
+                        .and_then(|n| math_unary_id(&n))
+                        .is_some()
+                    && self.can_emit_to_slot(&args[0].value)
+            }
+            _ => false,
+        }
+    }
+
+    fn emit_expr_to_slot(&mut self, node: &AstNode, temp_depth: u32) -> u32 {
+        match node {
+            AstNode::Ident { name, .. } => self.local(name),
+            AstNode::Int { value, .. } => {
+                let dst = self.temp_slot(temp_depth);
+                let w = self.wide(*value);
+                self.emit(Instr::make(OP_LOAD_CONST_LOCAL, dst, w as u16, 0));
+                dst
+            }
+            AstNode::Float { value, .. } => {
+                let dst = self.temp_slot(temp_depth);
+                let w = self.wide(value.to_bits() as i64);
+                self.emit(Instr::make(OP_LOAD_CONST_LOCAL, dst, w as u16, 1));
+                dst
+            }
+            AstNode::UnaryOp {
+                op: UnaryOperator::Neg,
+                operand,
+                ..
+            } => {
+                if let AstNode::Int { value, .. } = operand.as_ref() {
+                    let dst = self.temp_slot(temp_depth);
+                    let w = self.wide(-*value);
+                    self.emit(Instr::make(OP_LOAD_CONST_LOCAL, dst, w as u16, 0));
+                    return dst;
+                }
+                if let AstNode::Float { value, .. } = operand.as_ref() {
+                    let dst = self.temp_slot(temp_depth);
+                    let w = self.wide((-*value).to_bits() as i64);
+                    self.emit(Instr::make(OP_LOAD_CONST_LOCAL, dst, w as u16, 1));
+                    return dst;
+                }
+                let zero_slot = self.temp_slot(temp_depth);
+                let w = self.wide(0);
+                self.emit(Instr::make(OP_LOAD_CONST_LOCAL, zero_slot, w as u16, 0));
+                let src = self.emit_expr_to_slot(operand, temp_depth + 1);
+                self.emit(Instr::make(
+                    OP_SUB_LOCAL_LOCAL_STORE,
+                    zero_slot,
+                    src as u16,
+                    zero_slot as u8,
+                ));
+                zero_slot
+            }
+            AstNode::Index { target, index, .. } => {
+                let t_slot = self.emit_expr_to_slot(target, temp_depth);
+                let i_slot = self.emit_expr_to_slot(index, temp_depth + 1);
+                let dst = self.temp_slot(temp_depth);
+                self.emit(Instr::make(
+                    OP_GET_INDEX_LOCAL_LOCAL_STORE,
+                    dst,
+                    i_slot as u16,
+                    t_slot as u8,
+                ));
+                dst
+            }
+            AstNode::FieldAccess { target, field, .. } => {
+                let t_slot = self.emit_expr_to_slot(target, temp_depth);
+                let field_idx = self.intern(field);
+                let dst = self.temp_slot(temp_depth);
+                self.emit(Instr::make(
+                    OP_GET_FIELD_LOCAL_STORE,
+                    dst,
+                    field_idx as u16,
+                    t_slot as u8,
+                ));
+                dst
+            }
+            AstNode::Call { callee, args, .. } => {
+                let cname = collect_dotted_name(callee).unwrap_or_default();
+                let math_id = math_unary_id(&cname).unwrap_or(MATH_SQRT);
+                let src = self.emit_expr_to_slot(&args[0].value, temp_depth);
+                let dst = self.temp_slot(temp_depth);
+                self.emit(Instr::make(OP_MATH_UNARY, dst, src as u16, math_id));
+                dst
+            }
+            AstNode::BinaryOp {
+                left, op, right, ..
+            } => {
+                let l_slot = self.emit_expr_to_slot(left, temp_depth);
+                let r_slot = self.emit_expr_to_slot(right, temp_depth + 1);
+                let dst = self.temp_slot(temp_depth);
+                let opc = match op {
+                    BinaryOperator::Add => OP_ADD_LOCAL_LOCAL_STORE,
+                    BinaryOperator::Sub => OP_SUB_LOCAL_LOCAL_STORE,
+                    BinaryOperator::Mul => OP_MUL_LOCAL_LOCAL_STORE,
+                    BinaryOperator::Div => OP_DIV_LOCAL_LOCAL_STORE,
+                    BinaryOperator::Mod => OP_MOD_LOCAL_LOCAL_STORE,
+                    _ => unreachable!(),
+                };
+                self.emit(Instr::make(opc, dst, r_slot as u16, l_slot as u8));
+                dst
+            }
+            _ => unreachable!(),
+        }
+    }
+
     /// Try to fuse a nested binary expression into superinstructions.
     /// For example, `$zr = $zr*$zr - $zi*$zi + $cr` becomes:
     ///   MUL_LL_ST(temp1, zr, zr)
@@ -424,23 +614,36 @@ impl Compiler {
         };
 
         // Case 1: $dest = $dest op $b (simple self-assignment)
-        if let AstNode::Ident { name, .. } = left.as_ref() {
-            if self.local(name) == dest_slot {
-                if let AstNode::Ident { name: rn, .. } = right.as_ref() {
-                    let rslot = self.local(rn);
-                    let opc = match op {
-                        BinaryOperator::Add => Some(OP_ADD_LOCAL_STORE),
-                        BinaryOperator::Sub => Some(OP_SUB_LOCAL_STORE),
-                        BinaryOperator::Mul => Some(OP_MUL_LOCAL_STORE),
-                        BinaryOperator::Div => Some(OP_DIV_LOCAL_STORE),
-                        _ => None,
-                    };
-                    if let Some(opc) = opc {
-                        self.emit(Instr::a2(opc, dest_slot, rslot as u16));
-                        return true;
-                    }
+        if let AstNode::Ident { name, .. } = left.as_ref()
+            && !self.is_global(name)
+            && self.local(name) == dest_slot
+        {
+            if let AstNode::Ident { name: rn, .. } = right.as_ref()
+                && !self.is_global(rn)
+            {
+                let rslot = self.local(rn);
+                let opc = match op {
+                    BinaryOperator::Add => Some(OP_ADD_LOCAL_STORE),
+                    BinaryOperator::Sub => Some(OP_SUB_LOCAL_STORE),
+                    BinaryOperator::Mul => Some(OP_MUL_LOCAL_STORE),
+                    BinaryOperator::Div => Some(OP_DIV_LOCAL_STORE),
+                    _ => None,
+                };
+                if let Some(opc) = opc {
+                    self.emit(Instr::a2(opc, dest_slot, rslot as u16));
+                    return true;
                 }
-                if let AstNode::Int { value, .. } = right.as_ref() {
+            }
+            if let AstNode::Int { value, .. } = right.as_ref() {
+                if *value == 1 && matches!(op, BinaryOperator::Add) {
+                    self.emit(Instr::a1(OP_INC_LOCAL, dest_slot));
+                    return true;
+                }
+                if *value == 1 && matches!(op, BinaryOperator::Sub) {
+                    self.emit(Instr::a1(OP_DEC_LOCAL, dest_slot));
+                    return true;
+                }
+                if (0..=u16::MAX as i64).contains(value) {
                     let opc = match op {
                         BinaryOperator::Add => Some(OP_ADD_INT_LOCAL),
                         BinaryOperator::Sub => Some(OP_SUB_INT_LOCAL),
@@ -458,46 +661,77 @@ impl Compiler {
         // Case 2: $dest = $a op $b (both distinct locals)
         if let (AstNode::Ident { name: ln, .. }, AstNode::Ident { name: rn, .. }) =
             (left.as_ref(), right.as_ref())
+            && !self.is_global(ln)
+            && !self.is_global(rn)
         {
             let lslot = self.local(ln);
             let rslot = self.local(rn);
-            let c_src1 = (lslot & 0xFF) as u8;
-            let b_src2 = (rslot & 0xFFFF) as u16;
-            let opc = match op {
-                BinaryOperator::Add => Some(OP_ADD_LOCAL_LOCAL_STORE),
-                BinaryOperator::Sub => Some(OP_SUB_LOCAL_LOCAL_STORE),
-                BinaryOperator::Mul => Some(OP_MUL_LOCAL_LOCAL_STORE),
-                BinaryOperator::Div => Some(OP_DIV_LOCAL_LOCAL_STORE),
-                _ => None,
-            };
-            if let Some(opc) = opc {
-                self.emit(Instr::make(opc, dest_slot, b_src2, c_src1));
-                return true;
+            if lslot < 256 {
+                let c_src1 = (lslot & 0xFF) as u8;
+                let b_src2 = (rslot & 0xFFFF) as u16;
+                let opc = match op {
+                    BinaryOperator::Add => Some(OP_ADD_LOCAL_LOCAL_STORE),
+                    BinaryOperator::Sub => Some(OP_SUB_LOCAL_LOCAL_STORE),
+                    BinaryOperator::Mul => Some(OP_MUL_LOCAL_LOCAL_STORE),
+                    BinaryOperator::Div => Some(OP_DIV_LOCAL_LOCAL_STORE),
+                    BinaryOperator::Mod => Some(OP_MOD_LOCAL_LOCAL_STORE),
+                    _ => None,
+                };
+                if let Some(opc) = opc {
+                    self.emit(Instr::make(opc, dest_slot, b_src2, c_src1));
+                    return true;
+                }
             }
         }
 
-        // Case 3: Nested binary — recursively emit left and right into temps, then combine
-        // This handles `$zr = $zr*$zr - $zi*$zi + $cr`
-        if let BinaryOperator::Add
-        | BinaryOperator::Sub
-        | BinaryOperator::Mul
-        | BinaryOperator::Div = op
+        // Case 3: Nested 3-address register compilation
+        if matches!(
+            op,
+            BinaryOperator::Add
+                | BinaryOperator::Sub
+                | BinaryOperator::Mul
+                | BinaryOperator::Div
+                | BinaryOperator::Mod
+        ) && self.locals.len() < 200
+            && self.can_emit_to_slot(node)
         {
-            // Check if both sides are simple (ident or int) or nested binary
-            let left_is_simple =
-                matches!(left.as_ref(), AstNode::Ident { .. } | AstNode::Int { .. });
-            let right_is_simple =
-                matches!(right.as_ref(), AstNode::Ident { .. } | AstNode::Int { .. });
-
-            if left_is_simple && right_is_simple {
-                // Already handled by Case 1 and 2 above
-                return false;
+            if let AstNode::Ident { name: ln, .. } = left.as_ref()
+                && !self.is_global(ln)
+                && self.local(ln) == dest_slot
+                && matches!(
+                    op,
+                    BinaryOperator::Add
+                        | BinaryOperator::Sub
+                        | BinaryOperator::Mul
+                        | BinaryOperator::Div
+                )
+            {
+                let r_slot = self.emit_expr_to_slot(right, 0);
+                let opc = match op {
+                    BinaryOperator::Add => OP_ADD_LOCAL_STORE,
+                    BinaryOperator::Sub => OP_SUB_LOCAL_STORE,
+                    BinaryOperator::Mul => OP_MUL_LOCAL_STORE,
+                    BinaryOperator::Div => OP_DIV_LOCAL_STORE,
+                    _ => unreachable!(),
+                };
+                self.emit(Instr::a2(opc, dest_slot, r_slot as u16));
+                return true;
             }
 
-            // For nested expressions, emit left and right into temps, then combine
-            // This is a simplified approach: just emit normally and let peephole handle it
-            // A full recursive approach would need temp slot allocation
-            return false;
+            let l_slot = self.emit_expr_to_slot(left, 0);
+            let r_slot = self.emit_expr_to_slot(right, 1);
+            if l_slot < 256 {
+                let opc = match op {
+                    BinaryOperator::Add => OP_ADD_LOCAL_LOCAL_STORE,
+                    BinaryOperator::Sub => OP_SUB_LOCAL_LOCAL_STORE,
+                    BinaryOperator::Mul => OP_MUL_LOCAL_LOCAL_STORE,
+                    BinaryOperator::Div => OP_DIV_LOCAL_LOCAL_STORE,
+                    BinaryOperator::Mod => OP_MOD_LOCAL_LOCAL_STORE,
+                    _ => unreachable!(),
+                };
+                self.emit(Instr::make(opc, dest_slot, r_slot as u16, l_slot as u8));
+                return true;
+            }
         }
 
         false
@@ -1287,7 +1521,7 @@ fn collect_dotted_name(node: &AstNode) -> Option<String> {
 ///
 /// # Returns
 ///
-/// A fully optimized [`Bytecode`] ready for execution by [`VM::run`](crate::vm::VM::run).
+/// A fully optimized [`Bytecode`] ready for execution by [`crate::vm::VM::run`].
 ///
 /// # Examples
 ///

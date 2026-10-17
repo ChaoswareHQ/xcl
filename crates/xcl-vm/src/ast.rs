@@ -3,7 +3,7 @@
 //! # Overview
 //!
 //! The AST represents the syntactic structure of an XCL program produced by the
-//! [`parser`](crate::parser) and consumed by the [`bytecode`](crate::bytecode) compiler.
+//! [`crate::parser`] and consumed by the [`crate::bytecode`] compiler.
 //!
 //! Every AST node records a [`Span`] indicating its original source location for
 //! accurate error diagnostics, debugging symbols, and stack traces.
