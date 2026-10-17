@@ -1,0 +1,54 @@
+# Alibaba Cloud provider example
+# Tests domain expansion, config, credentials, and service operations
+
+# Basic Alibaba context
+$alibaba_config = alibaba "my-account" {
+    alibaba.config ()
+}
+print "Alibaba account:" $alibaba_config.account
+
+# Alibaba credentials from environment
+$creds = alibaba "my-account" {
+    alibaba.credential ()
+}
+print "Alibaba credentials loaded"
+
+# Alibaba bucket operations (OSS)
+$bucket_result = alibaba "my-account" {
+    bucket "my-test-bucket" {
+        bucket.list ""
+    }
+}
+if $bucket_result.is_err {
+    print "Bucket list error (expected without real credentials):" $bucket_result.message
+}
+
+# Alibaba function operations (FC)
+$function_result = alibaba "my-account" {
+    function "my-test-function" {
+        function.invoke { input: "test" }
+    }
+}
+if $function_result.is_err {
+    print "Function invoke error (expected without real credentials):" $function_result.message
+}
+
+# Alibaba instance operations (ECS)
+$instance_result = alibaba "my-account" {
+    instance "my-test-instance" {
+        instance.list ()
+    }
+}
+if $instance_result.is_err {
+    print "Instance list error (expected without real credentials):" $instance_result.message
+}
+
+# Nested Alibaba accounts
+$nested_account = alibaba "acc-a" {
+    alibaba "acc-b" {
+        alibaba.config ().account
+    }
+}
+print "Nested account:" $nested_account
+
+print "Alibaba example complete"

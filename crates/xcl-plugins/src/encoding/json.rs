@@ -83,7 +83,7 @@ pub fn json_to_value(json: &serde_json::Value) -> Value {
         }
         serde_json::Value::String(s) => Value::from_str_boxed(s.clone()),
         serde_json::Value::Array(arr) => {
-            let items: Vec<Value> = arr.iter().map(|v| json_to_value(v)).collect();
+            let items: Vec<Value> = arr.iter().map(json_to_value).collect();
             Value::from_array_boxed(items)
         }
         serde_json::Value::Object(obj) => {

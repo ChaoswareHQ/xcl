@@ -43,7 +43,7 @@ const PAYLOAD: u64 = 0x0000_FFFF_FFFF_FFFF;
 const TAG_NIL:   u64 = QNAN;
 const TAG_FALSE: u64 = QNAN | (1u64 << 48);
 const TAG_TRUE:  u64 = QNAN | (2u64 << 48);
-const TAG_INT:   u64 = QNAN | (3u64 << 48);
+pub const TAG_INT:   u64 = QNAN | (3u64 << 48);
 const TAG_PTR:   u64 = QNAN | (4u64 << 48);
 
 const KIND_STR:     u8 = 0;
@@ -255,18 +255,98 @@ impl Value {
         } else { None }
     }
 
-    pub fn add(self, other: Self, arena: &bumpalo::Bump) -> Self {
-        if self.is_int() && other.is_int() {
-            let a = self.as_i48();
-            let b = other.as_i48();
-            if let Some(r) = a.checked_add(b) { return Self::from_i48(r); }
-            return Self::from_f64(a as f64 + b as f64);
+    /// Fast integer add — both operands known to be int. No type checks.
+    #[inline(always)]
+    pub fn add_int(self, other: Self) -> Self {
+        let a = self.as_i48();
+        let b = other.as_i48();
+        if let Some(r) = a.checked_add(b) {
+            Self::from_i48(r)
+        } else {
+            // Overflow: fall back to float
+            Self::from_f64(a as f64 + b as f64)
         }
+    }
+
+    /// Fast integer mul — both operands known to be int. No type checks.
+    #[inline(always)]
+    pub fn mul_int(self, other: Self) -> Self {
+        let a = self.as_i48();
+        let b = other.as_i48();
+        if let Some(r) = a.checked_mul(b) {
+            Self::from_i48(r)
+        } else {
+            Self::from_f64(a as f64 * b as f64)
+        }
+    }
+
+    /// Fast integer sub — both operands known to be int. No type checks.
+    #[inline(always)]
+    pub fn sub_int(self, other: Self) -> Self {
+        let a = self.as_i48();
+        let b = other.as_i48();
+        if let Some(r) = a.checked_sub(b) {
+            Self::from_i48(r)
+        } else {
+            Self::from_f64(a as f64 - b as f64)
+        }
+    }
+
+    /// Fast integer div — both operands known to be int. No type checks.
+    #[inline(always)]
+    pub fn div_int(self, other: Self) -> Self {
+        let a = self.as_i48();
+        let b = other.as_i48();
+        if b != 0 {
+            Self::from_i48(a / b)
+        } else {
+            Self::from_f64(f64::INFINITY)
+        }
+    }
+
+    /// Fast integer mod — both operands known to be int. No type checks.
+    #[inline(always)]
+    pub fn mod_int(self, other: Self) -> Self {
+        let a = self.as_i48();
+        let b = other.as_i48();
+        if b != 0 {
+            Self::from_i48(a % b)
+        } else {
+            Self::nil()
+        }
+    }
+
+    /// Fast int comparison — both operands known to be int. No type checks.
+    #[inline(always)]
+    pub fn eq_int(self, other: Self) -> bool {
+        self.as_i48() == other.as_i48()
+    }
+
+    /// Fast int less-than — both operands known to be int. No type checks.
+    #[inline(always)]
+    pub fn lt_int(self, other: Self) -> bool {
+        self.as_i48() < other.as_i48()
+    }
+
+    /// Fast int greater-than — both operands known to be int. No type checks.
+    #[inline(always)]
+    pub fn gt_int(self, other: Self) -> bool {
+        self.as_i48() > other.as_i48()
+    }
+
+    /// Generic add with type dispatch. Only call when types are unknown.
+    pub fn add(self, other: Self, arena: &bumpalo::Bump) -> Self {
+        // Fast path: both int (most common case)
+        if self.tag() == TAG_INT && other.tag() == TAG_INT {
+            return self.add_int(other);
+        }
+        // Float path
         if self.is_float() || other.is_float() {
             let a = if self.is_float() { self.as_f64() } else { self.as_i48() as f64 };
             let b = if other.is_float() { other.as_f64() } else { other.as_i48() as f64 };
             return Self::from_f64(a + b);
         }
+        // String concatenation
         if self.tag() == TAG_PTR || other.tag() == TAG_PTR {
             let a = self.as_string();
             let b = other.as_string();
@@ -275,31 +355,31 @@ impl Value {
         Self::nil()
     }
 
+    /// Generic sub with type dispatch. Only call when types are unknown.
     #[doc(alias("sub"))]
     pub fn sub_(self, other: Self) -> Self {
-        if self.is_int() && other.is_int() {
-            let a = self.as_i48();
-            let b = other.as_i48();
-            if let Some(r) = a.checked_sub(b) { return Self::from_i48(r); }
-            return Self::from_f64(a as f64 - b as f64);
+        // Fast path: both int
+        if self.tag() == TAG_INT && other.tag() == TAG_INT {
+            return self.sub_int(other);
         }
         let a = if self.is_float() { self.as_f64() } else { self.as_i48() as f64 };
         let b = if other.is_float() { other.as_f64() } else { other.as_i48() as f64 };
         Self::from_f64(a - b)
     }
 
+    /// Generic mul with type dispatch. Only call when types are unknown.
     pub fn mul(self, other: Self, arena: &bumpalo::Bump) -> Self {
-        if self.is_int() && other.is_int() {
-            let a = self.as_i48();
-            let b = other.as_i48();
-            if let Some(r) = a.checked_mul(b) { return Self::from_i48(r); }
-            return Self::from_f64(a as f64 * b as f64);
+        // Fast path: both int
+        if self.tag() == TAG_INT && other.tag() == TAG_INT {
+            return self.mul_int(other);
         }
+        // Float path
         if self.is_float() || other.is_float() {
             let a = if self.is_float() { self.as_f64() } else { self.as_i48() as f64 };
             let b = if other.is_float() { other.as_f64() } else { other.as_i48() as f64 };
             return Self::from_f64(a * b);
         }
+        // String repetition
         if self.tag() == TAG_PTR && other.is_int() {
             return Self::from_str(self.as_string().repeat(other.as_i48() as usize), arena);
         }
@@ -309,40 +389,58 @@ impl Value {
         Self::nil()
     }
 
+    /// Generic div with type dispatch. Only call when types are unknown.
     #[doc(alias("div"))]
     pub fn div_(self, other: Self) -> Self {
-        if self.is_int() && other.is_int() {
-            let b = other.as_i48();
-            if b != 0 { return Self::from_i48(self.as_i48() / b); }
-            return Self::from_f64(f64::INFINITY);
+        // Fast path: both int
+        if self.tag() == TAG_INT && other.tag() == TAG_INT {
+            return self.div_int(other);
         }
         let a = if self.is_float() { self.as_f64() } else { self.as_i48() as f64 };
         let b = if other.is_float() { other.as_f64() } else { other.as_i48() as f64 };
         Self::from_f64(a / b)
     }
 
+    /// Generic mod with type dispatch. Only call when types are unknown.
     pub fn mod_(self, other: Self) -> Self {
-        if self.is_int() && other.is_int() {
-            let b = other.as_i48();
-            if b != 0 { return Self::from_i48(self.as_i48() % b); }
+        // Fast path: both int
+        if self.tag() == TAG_INT && other.tag() == TAG_INT {
+            return self.mod_int(other);
         }
         Self::nil()
     }
 
+    /// Generic eq with type dispatch. Uses tag-based early exit.
     #[doc(alias("eq"))]
     pub fn eq_(self, other: Self) -> bool {
-        if self.is_int() && other.is_int() { return self.as_i48() == other.as_i48(); }
+        // Same raw bits — fast path for identical values
+        if self.0 == other.0 { return true; }
+        // Int comparison
+        if self.tag() == TAG_INT && other.tag() == TAG_INT {
+            return self.eq_int(other);
+        }
+        // Float comparison
         if self.is_float() && other.is_float() { return self.as_f64() == other.as_f64(); }
+        // Cross-type int/float
         if self.is_int() && other.is_float() { return self.as_i48() as f64 == other.as_f64(); }
         if self.is_float() && other.is_int() { return self.as_f64() == other.as_i48() as f64; }
+        // Bool comparison
         if self.is_bool() && other.is_bool() { return self.as_bool() == other.as_bool(); }
-        if self.is_nil() && other.is_nil() { return true; }
-        if self.tag() == TAG_PTR || other.tag() == TAG_PTR { return self.as_string() == other.as_string(); }
+        // String comparison (pointer identity check first)
+        if self.tag() == TAG_PTR && other.tag() == TAG_PTR {
+            // Fast path: same pointer
+            if (self.0 & PAYLOAD) == (other.0 & PAYLOAD) { return true; }
+            return self.as_string() == other.as_string();
+        }
         false
     }
 
+    /// Generic lt with type dispatch. Uses tag-based early exit.
     pub fn lt(self, other: Self) -> bool {
-        if self.is_int() && other.is_int() { return self.as_i48() < other.as_i48(); }
+        // Fast path: both int
+        if self.tag() == TAG_INT && other.tag() == TAG_INT {
+            return self.lt_int(other);
+        }
         if self.is_float() && other.is_float() { return self.as_f64() < other.as_f64(); }
         if self.is_int() && other.is_float() { return (self.as_i48() as f64) < other.as_f64(); }
         if self.is_float() && other.is_int() { return self.as_f64() < (other.as_i48() as f64); }
@@ -350,8 +448,12 @@ impl Value {
         false
     }
 
+    /// Generic gt with type dispatch. Uses tag-based early exit.
     pub fn gt(self, other: Self) -> bool {
-        if self.is_int() && other.is_int() { return self.as_i48() > other.as_i48(); }
+        // Fast path: both int
+        if self.tag() == TAG_INT && other.tag() == TAG_INT {
+            return self.gt_int(other);
+        }
         if self.is_float() && other.is_float() { return self.as_f64() > other.as_f64(); }
         if self.is_int() && other.is_float() { return (self.as_i48() as f64) > other.as_f64(); }
         if self.is_float() && other.is_int() { return self.as_f64() > (other.as_i48() as f64); }
@@ -685,5 +787,60 @@ impl<'a> DomainCtx<'a> {
     /// Push a closure onto the current frame's defer stack.
     pub fn defer(&mut self, closure: Value) {
         self.vm.push_defer(closure);
+    }
+
+    /// Push a value onto the domain context stack for the given key.
+    ///
+    /// Enables nested domain blocks: `browser "chrome" { browser "firefox" { ... } }`.
+    /// The inner block sees "firefox", the outer sees "chrome" after pop.
+    pub fn push_context(&mut self, key: &str, value: Value) {
+        self.vm.context_stack
+            .entry(key.to_string())
+            .or_insert_with(Vec::new)
+            .push(value);
+    }
+
+    /// Get the current context value for the given key, if any.
+    ///
+    /// Returns the most recently pushed value (top of the stack).
+    pub fn get_context(&self, key: &str) -> Option<Value> {
+        self.vm.context_stack.get(key).and_then(|stack| stack.last().copied())
+    }
+
+    /// Pop the top context value for the given key.
+    ///
+    /// Returns the popped value, or `None` if the key had no context.
+    pub fn pop_context(&mut self, key: &str) -> Option<Value> {
+        self.vm.context_stack.get_mut(key).and_then(|stack| stack.pop())
+    }
+
+    /// Check if a context key is currently set.
+    pub fn has_context(&self, key: &str) -> bool {
+        self.vm.context_stack.get(key).map(|s| !s.is_empty()).unwrap_or(false)
+    }
+
+    /// Clear all context entries for a key.
+    pub fn clear_context(&mut self, key: &str) {
+        self.vm.context_stack.remove(key);
+    }
+
+    /// Get all currently set context keys as a vector of strings.
+    pub fn context_keys(&self) -> Vec<String> {
+        self.vm.context_stack
+            .iter()
+            .filter(|(_, stack)| !stack.is_empty())
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    /// Snapshot all current context values as a HashMap.
+    pub fn context_snapshot(&self) -> std::collections::HashMap<String, Value> {
+        let mut map = std::collections::HashMap::new();
+        for (key, stack) in &self.vm.context_stack {
+            if let Some(top) = stack.last() {
+                map.insert(key.clone(), *top);
+            }
+        }
+        map
     }
 }

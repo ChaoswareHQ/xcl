@@ -16,12 +16,13 @@
 //! - **io/** — Local I/O: files, stdin, stdout
 //! - **encoding/** — Format conversion: JSON, YAML, TOML, XML, CSV, hex
 //! - **math/** — Math: complex, matrix, quaternion, vector, scalar
-//! - **transport/** — Raw byte movement: HTTP, DNS
-//! - **protocol/** — Application protocols: FTP, SMTP, IMAP, POP3, CDP, MCP
+//! - **net/** — Network layer: TCP, UDP, HTTP, DNS, TLS
+//! - **cloud/** — Cloud providers: AWS (S3, Lambda, API Gateway)
 //! - **lang/** — XCL language support
 //! - **translate/** — Polyglot transpiler: XCL ↔ Java/Rust/Python via IR
 //! - **plugin/** — Plugin system
 //! - **util/** — Cross-platform utilities: OS, env, path, time
+//! - **domain/** — Context blocks: scoped context propagation for domain functions
 
 pub mod core;
 pub mod collections;
@@ -29,12 +30,13 @@ pub mod text;
 pub mod io;
 pub mod encoding;
 pub mod math;
-pub mod transport;
-pub mod protocol;
+pub mod net;
+pub mod cloud;
 pub mod lang;
-pub mod translate;
+// pub mod translate;  // TODO: polyglot transpiler module not yet implemented
 pub mod plugin;
 pub mod util;
+pub mod domain;
 
 use xcl_vm::{VM, Value};
 

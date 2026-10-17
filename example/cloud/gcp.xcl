@@ -1,0 +1,54 @@
+# GCP provider example
+# Tests domain expansion, config, credentials, and service operations
+
+# Basic GCP context
+$gcp_config = gcp "my-project" {
+    gcp.config ()
+}
+print "GCP project:" $gcp_config.project
+
+# GCP credentials from environment
+$creds = gcp "my-project" {
+    gcp.credential ()
+}
+print "GCP credentials loaded"
+
+# GCP bucket operations
+$bucket_result = gcp "my-project" {
+    bucket "my-test-bucket" {
+        bucket.list ""
+    }
+}
+if $bucket_result.is_err {
+    print "Bucket list error (expected without real credentials):" $bucket_result.message
+}
+
+# GCP function operations
+$function_result = gcp "my-project" {
+    function "my-test-function" {
+        function.invoke { input: "test" }
+    }
+}
+if $function_result.is_err {
+    print "Function invoke error (expected without real credentials):" $function_result.message
+}
+
+# GCP instance operations
+$instance_result = gcp "my-project" {
+    instance "my-test-instance" {
+        instance.list ()
+    }
+}
+if $instance_result.is_err {
+    print "Instance list error (expected without real credentials):" $instance_result.message
+}
+
+# Nested GCP projects
+$nested_project = gcp "project-a" {
+    gcp "project-b" {
+        gcp.config ().project
+    }
+}
+print "Nested project:" $nested_project
+
+print "GCP example complete"

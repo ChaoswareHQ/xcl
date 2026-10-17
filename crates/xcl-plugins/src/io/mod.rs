@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{BufRead, Read, Write, Seek, SeekFrom};
 use xcl_macros::{xcl_fn, xcl_type};
 use xcl_vm::{Value, HandleKind, DomainCtx, errors::{universal, filesystem}};
@@ -107,9 +108,8 @@ fn make_err_io(path: &str, e: std::io::Error) -> Value {
 /// ## EXAMPLES
 ///
 /// ```xcl
-/// # Open for reading
 /// $result = io.open "data.txt" "r"
-/// if $result.tag == "Ok" {
+/// if result.is_ok $result {
 ///     $file = $result.value
 ///     $content = io.read_all_from $file
 ///     io.close $file
@@ -181,11 +181,11 @@ fn open_with_mode(path: &str, mode: &str) -> std::io::Result<std::fs::File> {
 ///
 /// ```xcl
 /// $result = io.read "config.json"
-/// if $result.tag == "Ok" {
+/// if result.is_ok $result {
 ///     $content = $result.value
 ///     io.print "File has ${$content.len()} characters"
 /// } else {
-///     io.print "Error: ${$result.message}"
+///     io.print "Error: ${$result.error.message}"
 /// }
 /// ```
 ///
@@ -229,7 +229,7 @@ pub fn io_read(path: &str) -> Value {
 ///
 /// ```xcl
 /// $result = io.read_bytes "image.png"
-/// if $result.tag == "Ok" {
+/// if result.is_ok $result {
 ///     $bytes = $result.value
 ///     io.print "File has ${$bytes.len()} bytes"
 /// }
@@ -256,6 +256,100 @@ pub fn io_read_bytes(path: &str) -> Value {
         }
         Err(e) => make_err_io(path, e),
     }
+}
+
+/// Read and parse a `.env` file securely, returning key-value pairs as a dict.
+///
+/// Reads a `.env` file and parses it into a dictionary of environment variables.
+/// Supports standard `.env` format: `KEY=VALUE` pairs, one per line.
+///
+/// ## SECURITY
+///
+/// - Only reads from the specified path; no shell expansion or command injection.
+/// - Values are stored as plain strings; no automatic execution or evaluation.
+/// - Comments (lines starting with `#`) and empty lines are ignored.
+/// - Export prefix (`export KEY=VALUE`) is supported and stripped.
+///
+/// ## SYNTAX
+///
+/// ```xcl
+/// fn read_env($path: str) -> Result
+/// ```
+///
+/// ## PARAMETERS
+///
+/// `$path`: The file system path to the `.env` file to read.
+///
+/// ## EXAMPLES
+///
+/// ```xcl
+/// $result = io.read_env ".env"
+/// if result.is_ok $result {
+///     $vars = $result.value
+///     io.print $vars.DATABASE_URL
+///     io.print $vars.API_KEY
+/// }
+/// ```
+///
+/// ## FORMAT
+///
+/// - `KEY=VALUE` — Standard key-value pair
+/// - `export KEY=VALUE` — Export prefix (stripped)
+/// - `# comment` — Comment line (ignored)
+/// - `` — Empty line (ignored)
+/// - `KEY="quoted value"` — Quoted value (quotes preserved)
+///
+/// ## INPUT TYPES
+///
+/// - `str`
+///
+/// ## OUTPUT TYPES
+///
+/// - `Result`
+///
+/// ## NOTES
+///
+/// - Returns `Err` if the file doesn't exist or cannot be read.
+/// - Duplicate keys: later values override earlier ones.
+/// - Keys must be valid environment variable names (alphanumeric and underscore).
+/// - Values are not automatically trimmed; use `str.trim` if needed.
+#[xcl_fn(name = "io.read_env", args = "path: str", ret = "Result")]
+pub fn io_read_env(path: &str) -> Value {
+    let content = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => return make_err_io(path, e),
+    };
+
+    let mut vars = HashMap::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+
+        // Skip empty lines and comments
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // Strip optional "export " prefix
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+
+        // Find the first '=' to split key and value
+        let Some((key, value)) = line.split_once('=') else {
+            continue; // Skip malformed lines
+        };
+
+        let key = key.trim();
+        let value = value.trim();
+
+        // Validate key: only allow alphanumeric and underscore
+        if key.is_empty() || !key.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            continue; // Skip invalid keys
+        }
+
+        vars.insert(key.to_string(), Value::from_str_boxed(value.to_string()));
+    }
+
+    ok_result(Value::from_map_boxed(vars))
 }
 
 /// Write a string to a file, creating or overwriting it.
@@ -446,7 +540,7 @@ pub fn io_append(path: &str, data: &str) -> Value {
 ///
 /// ```xcl
 /// $result = io.lines "words.txt"
-/// if $result.tag == "Ok" {
+/// if result.is_ok $result {
 ///     for $line in $result.value {
 ///         io.print $line
 ///     }
@@ -498,7 +592,7 @@ pub fn io_lines(path: &str) -> Value {
 ///
 /// ```xcl
 /// $result = io.copy "original.txt" "backup.txt"
-/// if $result.tag == "Ok" {
+/// if result.is_ok $result {
 ///     io.print "Copied ${$result.value} bytes"
 /// }
 /// ```
@@ -1300,7 +1394,7 @@ pub fn io_is_tty(ctx: &mut DomainCtx) -> Value {
 ///
 /// ```xcl
 /// $result = io.read_line
-/// if $result.tag == "Ok" {
+/// if result.is_ok $result {
 ///     io.print "You entered: ${$result.value}"
 /// }
 /// ```
@@ -1489,6 +1583,129 @@ pub fn io_to_string(args: &[Value]) -> Value {
         Value::from_str_boxed(ryu::Buffer::new().format(v.as_f64()).to_string())
     } else {
         Value::from_str_boxed(v.as_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xcl_vm::{VARIANT_OK, VARIANT_ERR};
+    use std::io::Write;
+    use std::env::temp_dir;
+
+    static TEST_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn create_env_file(content: &str) -> std::path::PathBuf {
+        let dir = temp_dir();
+        let counter = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = dir.join(format!("xcl_test_env_{}_{}.txt", std::process::id(), counter));
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        path
+    }
+
+    fn get_result_value(result: &Value) -> Value {
+        let map = result.as_map().unwrap();
+        map.get("value").copied().unwrap_or(Value::nil())
+    }
+
+    #[test]
+    fn read_env_basic_key_value() {
+        let path = create_env_file("DATABASE_URL=postgres://localhost/mydb");
+        let result = io_read_env(path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(result.map_variant(), Some(VARIANT_OK));
+        let vars = get_result_value(&result).as_map().unwrap();
+        assert_eq!(vars.get("DATABASE_URL").unwrap().as_str(), Some("postgres://localhost/mydb"));
+    }
+
+    #[test]
+    fn read_env_multiple_keys() {
+        let path = create_env_file("KEY1=value1\nKEY2=value2\nKEY3=value3");
+        let result = io_read_env(path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(result.map_variant(), Some(VARIANT_OK));
+        let vars = get_result_value(&result).as_map().unwrap();
+        assert_eq!(vars.get("KEY1").unwrap().as_str(), Some("value1"));
+        assert_eq!(vars.get("KEY2").unwrap().as_str(), Some("value2"));
+        assert_eq!(vars.get("KEY3").unwrap().as_str(), Some("value3"));
+    }
+
+    #[test]
+    fn read_env_ignores_comments() {
+        let path = create_env_file("# This is a comment\nKEY=value\n# Another comment");
+        let result = io_read_env(path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(result.map_variant(), Some(VARIANT_OK));
+        let vars = get_result_value(&result).as_map().unwrap();
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars.get("KEY").unwrap().as_str(), Some("value"));
+    }
+
+    #[test]
+    fn read_env_ignores_empty_lines() {
+        let path = create_env_file("KEY1=value1\n\n\nKEY2=value2\n");
+        let result = io_read_env(path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(result.map_variant(), Some(VARIANT_OK));
+        let vars = get_result_value(&result).as_map().unwrap();
+        assert_eq!(vars.len(), 2);
+    }
+
+    #[test]
+    fn read_env_strips_export_prefix() {
+        let path = create_env_file("export API_KEY=secret123");
+        let result = io_read_env(path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(result.map_variant(), Some(VARIANT_OK));
+        let vars = get_result_value(&result).as_map().unwrap();
+        assert_eq!(vars.get("API_KEY").unwrap().as_str(), Some("secret123"));
+    }
+
+    #[test]
+    fn read_env_invalid_key_skipped() {
+        let path = create_env_file("VALID_KEY=good\ninvalid-key=bad\nALSO_VALID=also_good");
+        let result = io_read_env(path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(result.map_variant(), Some(VARIANT_OK));
+        let vars = get_result_value(&result).as_map().unwrap();
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars.get("VALID_KEY").unwrap().as_str(), Some("good"));
+        assert_eq!(vars.get("ALSO_VALID").unwrap().as_str(), Some("also_good"));
+    }
+
+    #[test]
+    fn read_env_value_with_equals() {
+        let path = create_env_file("BASE64=data==value==");
+        let result = io_read_env(path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(result.map_variant(), Some(VARIANT_OK));
+        let vars = get_result_value(&result).as_map().unwrap();
+        assert_eq!(vars.get("BASE64").unwrap().as_str(), Some("data==value=="));
+    }
+
+    #[test]
+    fn read_env_file_not_found() {
+        let result = io_read_env("/nonexistent/path/.env");
+        assert_eq!(result.map_variant(), Some(VARIANT_ERR));
+    }
+
+    #[test]
+    fn read_env_empty_file() {
+        let path = create_env_file("");
+        let result = io_read_env(path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(result.map_variant(), Some(VARIANT_OK));
+        let vars = get_result_value(&result).as_map().unwrap();
+        assert_eq!(vars.len(), 0);
     }
 }
 

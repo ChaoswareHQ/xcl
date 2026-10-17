@@ -56,7 +56,7 @@ pub struct ProcessType;
 /// ```xcl
 /// # Spawn a simple command
 /// $result = proc.spawn "echo" ["Hello, world!"]
-/// if $result.tag == "Ok" {
+/// if $result.is_ok {
 ///     $process = $result.value
 ///     $status = proc.wait $process
 ///     io.print "Exit code: ${$status.value}"
@@ -124,7 +124,7 @@ pub fn proc_spawn(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// # Run a command and get the result
 /// $result = proc.run "echo" ["Hello"]
-/// if $result.tag == "Ok" {
+/// if $result.is_ok {
 ///     $output = $result.value
 ///     io.print "Exit code: ${$output.exit_code}"
 ///     io.print "Output: ${$output.stdout}"

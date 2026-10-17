@@ -1,0 +1,54 @@
+# GitHub provider example
+# Tests domain expansion, config, credentials, and service operations
+
+# Basic GitHub context
+$gh_config = github "my-org" {
+    github.config ()
+}
+print "GitHub org:" $gh_config.org
+
+# GitHub credentials from environment
+$creds = github "my-org" {
+    github.credential ()
+}
+print "GitHub credentials loaded"
+
+# GitHub bucket operations (Packages/Artifacts)
+$bucket_result = github "my-org" {
+    bucket "my-repo" {
+        bucket.list ""
+    }
+}
+if $bucket_result.is_err {
+    print "Bucket list error (expected without real credentials):" $bucket_result.message
+}
+
+# GitHub function operations (Actions)
+$function_result = github "my-org" {
+    function "my-action" {
+        function.invoke { input: "test" }
+    }
+}
+if $function_result.is_err {
+    print "Function invoke error (expected without real credentials):" $function_result.message
+}
+
+# GitHub instance operations (Runners)
+$instance_result = github "my-org" {
+    instance "my-runner" {
+        instance.list ()
+    }
+}
+if $instance_result.is_err {
+    print "Instance list error (expected without real credentials):" $instance_result.message
+}
+
+# Nested GitHub orgs
+$nested_org = github "org-a" {
+    github "org-b" {
+        github.config ().org
+    }
+}
+print "Nested org:" $nested_org
+
+print "GitHub example complete"

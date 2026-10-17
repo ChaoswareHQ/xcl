@@ -28,7 +28,7 @@ use hashbrown::HashMap;
 use bumpalo::Bump;
 use smallvec::SmallVec;
 use crate::bytecode::*;
-use crate::value::{Value, BuiltinImpl, TypeDescriptor};
+use crate::value::{Value, BuiltinImpl, TypeDescriptor, TAG_INT};
 
 // ── Helper functions for integer arithmetic with overflow fallback ──
 
@@ -137,6 +137,9 @@ pub struct VM {
     pub(crate) frames: Vec<Frame>,
     pending: Option<Frame>,
     closures: Vec<crate::value::FuncValue>,
+    /// Stack-based context for domain blocks (e.g., `browser "brave" { ... }`).
+    /// Each key maps to a stack of values, enabling nested domain contexts.
+    pub(crate) context_stack: HashMap<String, Vec<Value>>,
     #[cfg(feature = "opcode-stats")]
     opcode_counter: OpcodeCounter,
 }
@@ -158,6 +161,7 @@ impl VM {
             frames: Vec::new(),
             pending: None,
             closures: Vec::new(),
+            context_stack: HashMap::new(),
             #[cfg(feature = "opcode-stats")]
             opcode_counter: OpcodeCounter::new(),
         }
@@ -191,6 +195,10 @@ impl VM {
             };
 
             if let Some(domain) = entry.domain {
+                // Build the full dotted name: domain + "." + method
+                let full_name = format!("{}.{}", domain, entry.method);
+
+                // Register in domain table for domain-based lookup
                 let didx = *self.domain_index.entry(domain.into()).or_insert_with(|| {
                     let idx = self.domain_table.len() as u32;
                     self.domain_table.push(DomainSlot {
@@ -204,6 +212,11 @@ impl VM {
                 let midx = slot.methods.len() as u32;
                 slot.methods.push(Some(impl_));
                 slot.index.insert(entry.method.into(), midx);
+
+                // Also register the full dotted name globally so "net.tcp.connect" works
+                let idx = self.global_table.len() as u32;
+                self.global_table.push(Some(impl_));
+                self.global_index.insert(full_name.into(), idx);
             } else {
                 let idx = self.global_table.len() as u32;
                 self.global_table.push(Some(impl_));
@@ -239,6 +252,11 @@ impl VM {
         self.stack.clear();
         self.frames.clear();
         self.closures = bc.closures.clone();
+
+        // Pre-allocate globals for enum variants and type names
+        // Preserve existing globals (builtins registered by register_all)
+        let needed = bc.global_names.len().max(self.globals.len());
+        self.globals.resize(needed, Value::nil());
 
         // Register user-defined functions in globals so OP_CALL can find them
         for (name, func) in &bc.user_functions {
@@ -362,55 +380,83 @@ impl VM {
             }
             OP_NEG => { let a = self.pop(); self.push(a.neg_()); Action::Next }
             OP_NOT => { let a = self.pop(); self.push(a.not_()); Action::Next }
-            op if [OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD].contains(&op) => {
-                return match op {
-                    OP_ADD => {
-                        let b = self.pop();
-                        let a = self.pop();
-                        self.push(a.add(b, &self.arena));
-                        Action::Next
-                    }
-                    OP_MUL => {
-                        let b = self.pop();
-                        let a = self.pop();
-                        self.push(a.mul(b, &self.arena));
-                        Action::Next
-                    }
-                    OP_SUB => {
-                        let b = self.pop();
-                        let a = self.pop();
-                        self.push(a.sub_(b));
-                        Action::Next
-                    }
-                    OP_DIV => {
-                        let b = self.pop();
-                        let a = self.pop();
-                        self.push(a.div_(b));
-                        Action::Next
-                    }
-                    OP_MOD => {
-                        let b = self.pop();
-                        let a = self.pop();
-                        self.push(a.mod_(b));
-                        Action::Next
-                    }
-                    _ => Action::Next,
-                };
-            }
-            op if [OP_EQ, OP_NEQ, OP_LT, OP_GT, OP_LE, OP_GE, OP_AND, OP_OR].contains(&op) => {
+            OP_ADD => {
                 let b = self.pop();
                 let a = self.pop();
-                return match op {
-                    OP_EQ => { self.push(Value::bool(a.eq_(b))); Action::Next }
-                    OP_NEQ => { self.push(Value::bool(!a.eq_(b))); Action::Next }
-                    OP_LT => { self.push(Value::bool(a.lt(b))); Action::Next }
-                    OP_GT => { self.push(Value::bool(a.gt(b))); Action::Next }
-                    OP_LE => { self.push(Value::bool(a.lt(b) || a.eq_(b))); Action::Next }
-                    OP_GE => { self.push(Value::bool(a.gt(b) || a.eq_(b))); Action::Next }
-                    OP_AND => { self.push(Value::bool(a.is_truthy() && b.is_truthy())); Action::Next }
-                    OP_OR => { self.push(Value::bool(a.is_truthy() || b.is_truthy())); Action::Next }
-                    _ => Action::Next,
-                };
+                self.push(a.add(b, &self.arena));
+                Action::Next
+            }
+            OP_SUB => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(a.sub_(b));
+                Action::Next
+            }
+            OP_MUL => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(a.mul(b, &self.arena));
+                Action::Next
+            }
+            OP_DIV => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(a.div_(b));
+                Action::Next
+            }
+            OP_MOD => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(a.mod_(b));
+                Action::Next
+            }
+            OP_EQ => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::bool(a.eq_(b)));
+                Action::Next
+            }
+            OP_NEQ => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::bool(!a.eq_(b)));
+                Action::Next
+            }
+            OP_LT => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::bool(a.lt(b)));
+                Action::Next
+            }
+            OP_GT => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::bool(a.gt(b)));
+                Action::Next
+            }
+            OP_LE => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::bool(a.lt(b) || a.eq_(b)));
+                Action::Next
+            }
+            OP_GE => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::bool(a.gt(b) || a.eq_(b)));
+                Action::Next
+            }
+            OP_AND => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::bool(a.is_truthy() && b.is_truthy()));
+                Action::Next
+            }
+            OP_OR => {
+                let b = self.pop();
+                let a = self.pop();
+                self.push(Value::bool(a.is_truthy() || b.is_truthy()));
+                Action::Next
             }
             OP_IN => {
                 let c = self.pop(); let item = self.pop();
@@ -456,7 +502,7 @@ impl VM {
                 let callee = self.pop();
 
                 if let Some(name) = callee.as_str() {
-                    // 1. Check global builtins first
+                    // 1. Check global builtins first (handles "net.tcp.connect", "io.read", etc.)
                     if let Some(&idx) = self.global_index.get(name) {
                         if let Some(Some(impl_)) = self.global_table.get(idx as usize) {
                             let impl_copy = *impl_;
@@ -472,15 +518,18 @@ impl VM {
                             }
                         }
                     }
-                    // 2. Check domain methods (e.g. "io.read")
-                    if let Some(dot_pos) = name.find('.') {
-                        let domain = &name[..dot_pos];
-                        let method = &name[dot_pos + 1..];
-                        if let Some(impl_) = self.resolve_domain_method(domain, method) {
-                            let impl_copy = *impl_;
-                            let result = impl_copy.call(self, &args);
-                            self.push(result);
-                            return Action::Next;
+                    // 2. Check domain methods (e.g. "io.read") — only for two-part names
+                    // For three+ part names like "net.tcp.connect", step 1 already handled it
+                    if name.split('.').count() == 2 {
+                        if let Some(dot_pos) = name.find('.') {
+                            let domain = &name[..dot_pos];
+                            let method = &name[dot_pos + 1..];
+                            if let Some(impl_) = self.resolve_domain_method(domain, method) {
+                                let impl_copy = *impl_;
+                                let result = impl_copy.call(self, &args);
+                                self.push(result);
+                                return Action::Next;
+                            }
                         }
                     }
                     // 2b. Domain expansion: if callee is a domain name, check for block/dict args.
@@ -702,98 +751,123 @@ impl VM {
                 Action::Next
             }
 
-            // ── Integer-specialized arithmetic ──
-            op if [OP_ADD_INT, OP_SUB_INT, OP_MUL_INT].contains(&op) => {
+            // ── Integer-specialized arithmetic (fast path, no type checks) ──
+            OP_ADD_INT => {
                 let b = self.pop();
                 let a = self.pop();
-                if a.is_int() && b.is_int() {
-                    let r = match op {
-                        OP_ADD_INT => checked_add_overflow(a.as_i48(), b.as_i48()),
-                        OP_SUB_INT => checked_sub_overflow(a.as_i48(), b.as_i48()),
-                        OP_MUL_INT => checked_mul_overflow(a.as_i48(), b.as_i48()),
-                        _ => 0,
-                    };
-                    self.push(Value::from_i48(r));
+                if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                    self.push(a.add_int(b));
                 } else {
-                    return match op {
-                        OP_ADD_INT => {
-                            self.push(a.add(b, &self.arena));
-                            Action::Next
-                        }
-                        OP_SUB_INT => {
-                            self.push(a.sub_(b));
-                            Action::Next
-                        }
-                        OP_MUL_INT => {
-                            self.push(a.mul(b, &self.arena));
-                            Action::Next
-                        }
-                        _ => Action::Next,
-                    };
+                    self.push(a.add(b, &self.arena));
                 }
                 Action::Next
             }
-            op if [OP_LT_INT, OP_GT_INT, OP_EQ_INT].contains(&op) => {
+            OP_SUB_INT => {
                 let b = self.pop();
                 let a = self.pop();
-                let r = match op {
-                    OP_LT_INT => if a.is_int() && b.is_int() {
-                        a.as_i48() < b.as_i48()
-                    } else {
-                        a.lt(b)
-                    },
-                    OP_GT_INT => if a.is_int() && b.is_int() {
-                        a.as_i48() > b.as_i48()
-                    } else {
-                        a.gt(b)
-                    },
-                    OP_EQ_INT => if a.is_int() && b.is_int() {
-                        a.as_i48() == b.as_i48()
-                    } else {
-                        a.eq_(b)
-                    },
-                    _ => false,
-                };
+                if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                    self.push(a.sub_int(b));
+                } else {
+                    self.push(a.sub_(b));
+                }
+                Action::Next
+            }
+            OP_MUL_INT => {
+                let b = self.pop();
+                let a = self.pop();
+                if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                    self.push(a.mul_int(b));
+                } else {
+                    self.push(a.mul(b, &self.arena));
+                }
+                Action::Next
+            }
+            // ── Integer-specialized comparisons (fast path, no type checks) ──
+            OP_LT_INT => {
+                let b = self.pop();
+                let a = self.pop();
+                let r = if a.tag() == TAG_INT && b.tag() == TAG_INT { a.lt_int(b) } else { a.lt(b) };
+                self.push(Value::bool(r));
+                Action::Next
+            }
+            OP_GT_INT => {
+                let b = self.pop();
+                let a = self.pop();
+                let r = if a.tag() == TAG_INT && b.tag() == TAG_INT { a.gt_int(b) } else { a.gt(b) };
+                self.push(Value::bool(r));
+                Action::Next
+            }
+            OP_EQ_INT => {
+                let b = self.pop();
+                let a = self.pop();
+                let r = if a.tag() == TAG_INT && b.tag() == TAG_INT { a.eq_int(b) } else { a.eq_(b) };
                 self.push(Value::bool(r));
                 Action::Next
             }
 
             // ── INC/DEC_LOCAL: $x = $x + 1 / $x - 1 ──
-            op if [OP_INC_LOCAL, OP_DEC_LOCAL].contains(&op) => {
+            OP_INC_LOCAL => {
                 let l = &mut self.frames[top].locals;
                 let idx = i.a() as usize;
                 let v = unsafe { *l.get_unchecked(idx) };
-                if v.is_int() {
-                    let r = match op {
-                        OP_INC_LOCAL => v.as_i48().checked_add(1).unwrap_or(v.as_i48()),
-                        OP_DEC_LOCAL => v.as_i48().checked_sub(1).unwrap_or(v.as_i48()),
-                        _ => 0,
-                    };
+                if v.tag() == TAG_INT {
+                    let r = v.as_i48().checked_add(1).unwrap_or(v.as_i48());
                     unsafe { *l.get_unchecked_mut(idx) = Value::from_i48(r); }
                 } else {
                     unsafe {
-                        *l.get_unchecked_mut(idx) = match op {
-                            OP_INC_LOCAL => v.add(Value::from_i48(1), &self.arena),
-                            OP_DEC_LOCAL => v.sub_(Value::from_i48(1)),
-                            _ => Value::nil(),
-                        };
+                        *l.get_unchecked_mut(idx) = v.add(Value::from_i48(1), &self.arena);
+                    }
+                }
+                Action::Next
+            }
+            OP_DEC_LOCAL => {
+                let l = &mut self.frames[top].locals;
+                let idx = i.a() as usize;
+                let v = unsafe { *l.get_unchecked(idx) };
+                if v.tag() == TAG_INT {
+                    let r = v.as_i48().checked_sub(1).unwrap_or(v.as_i48());
+                    unsafe { *l.get_unchecked_mut(idx) = Value::from_i48(r); }
+                } else {
+                    unsafe {
+                        *l.get_unchecked_mut(idx) = v.sub_(Value::from_i48(1));
                     }
                 }
                 Action::Next
             }
             // ── Local-local binary ops: push(a op b) where a and b are locals ──
-            op if [OP_ADD_LOCAL_LOCAL, OP_SUB_LOCAL_LOCAL, OP_MUL_LOCAL_LOCAL, OP_DIV_LOCAL_LOCAL, OP_LT_LOCAL_LOCAL].contains(&op) => {
+            OP_ADD_LOCAL_LOCAL => {
                 let l = &self.frames[top].locals;
                 let a = unsafe { *l.get_unchecked(i.a() as usize) };
                 let b = unsafe { *l.get_unchecked(i.b() as usize) };
-                match op {
-                    OP_ADD_LOCAL_LOCAL => self.push(a.add(b, &self.arena)),
-                    OP_SUB_LOCAL_LOCAL => self.push(a.sub_(b)),
-                    OP_MUL_LOCAL_LOCAL => self.push(a.mul(b, &self.arena)),
-                    OP_DIV_LOCAL_LOCAL => self.push(a.div_(b)),
-                    OP_LT_LOCAL_LOCAL => self.push(Value::bool(a.lt(b))),
-                    _ => {},
-                }
+                self.push(a.add(b, &self.arena));
+                Action::Next
+            }
+            OP_SUB_LOCAL_LOCAL => {
+                let l = &self.frames[top].locals;
+                let a = unsafe { *l.get_unchecked(i.a() as usize) };
+                let b = unsafe { *l.get_unchecked(i.b() as usize) };
+                self.push(a.sub_(b));
+                Action::Next
+            }
+            OP_MUL_LOCAL_LOCAL => {
+                let l = &self.frames[top].locals;
+                let a = unsafe { *l.get_unchecked(i.a() as usize) };
+                let b = unsafe { *l.get_unchecked(i.b() as usize) };
+                self.push(a.mul(b, &self.arena));
+                Action::Next
+            }
+            OP_DIV_LOCAL_LOCAL => {
+                let l = &self.frames[top].locals;
+                let a = unsafe { *l.get_unchecked(i.a() as usize) };
+                let b = unsafe { *l.get_unchecked(i.b() as usize) };
+                self.push(a.div_(b));
+                Action::Next
+            }
+            OP_LT_LOCAL_LOCAL => {
+                let l = &self.frames[top].locals;
+                let a = unsafe { *l.get_unchecked(i.a() as usize) };
+                let b = unsafe { *l.get_unchecked(i.b() as usize) };
+                self.push(Value::bool(a.lt(b)));
                 Action::Next
             }
             // ── ADD_INT_STORE_LOCAL: $dest = $src + c (three operands) ──
@@ -882,58 +956,100 @@ impl VM {
             }
 
             // ── Int-constant local arithmetic: $x = $x op c ──
-            op if [OP_ADD_INT_LOCAL, OP_SUB_INT_LOCAL, OP_MUL_INT_LOCAL].contains(&op) => {
+            OP_ADD_INT_LOCAL => {
                 let l = &mut self.frames[top].locals;
                 let idx = i.a() as usize;
                 let c = i.b() as i64;
                 let v = unsafe { *l.get_unchecked(idx) };
-                if v.is_int() {
-                    let r = match op {
-                        OP_ADD_INT_LOCAL => v.as_i48().checked_add(c).unwrap_or(v.as_i48()),
-                        OP_SUB_INT_LOCAL => v.as_i48().checked_sub(c).unwrap_or(v.as_i48()),
-                        OP_MUL_INT_LOCAL => v.as_i48().checked_mul(c).unwrap_or(v.as_i48()),
-                        _ => 0,
-                    };
+                if v.tag() == TAG_INT {
+                    let r = v.as_i48().checked_add(c).unwrap_or(v.as_i48());
                     unsafe { *l.get_unchecked_mut(idx) = Value::from_i48(r); }
                 } else {
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = match op {
-                            OP_ADD_INT_LOCAL => v.add(Value::from_i48(c), &self.arena),
-                            OP_SUB_INT_LOCAL => v.sub_(Value::from_i48(c)),
-                            OP_MUL_INT_LOCAL => v.mul(Value::from_i48(c), &self.arena),
-                            _ => Value::nil(),
-                        };
-                    }
+                    unsafe { *l.get_unchecked_mut(idx) = v.add(Value::from_i48(c), &self.arena); }
+                }
+                Action::Next
+            }
+            OP_SUB_INT_LOCAL => {
+                let l = &mut self.frames[top].locals;
+                let idx = i.a() as usize;
+                let c = i.b() as i64;
+                let v = unsafe { *l.get_unchecked(idx) };
+                if v.tag() == TAG_INT {
+                    let r = v.as_i48().checked_sub(c).unwrap_or(v.as_i48());
+                    unsafe { *l.get_unchecked_mut(idx) = Value::from_i48(r); }
+                } else {
+                    unsafe { *l.get_unchecked_mut(idx) = v.sub_(Value::from_i48(c)); }
+                }
+                Action::Next
+            }
+            OP_MUL_INT_LOCAL => {
+                let l = &mut self.frames[top].locals;
+                let idx = i.a() as usize;
+                let c = i.b() as i64;
+                let v = unsafe { *l.get_unchecked(idx) };
+                if v.tag() == TAG_INT {
+                    let r = v.as_i48().checked_mul(c).unwrap_or(v.as_i48());
+                    unsafe { *l.get_unchecked_mut(idx) = Value::from_i48(r); }
+                } else {
+                    unsafe { *l.get_unchecked_mut(idx) = v.mul(Value::from_i48(c), &self.arena); }
                 }
                 Action::Next
             }
 
             // ── Two-operand local store: dest = dest op src ──
-            op if [OP_ADD_LOCAL_STORE, OP_SUB_LOCAL_STORE, OP_MUL_LOCAL_STORE, OP_DIV_LOCAL_STORE].contains(&op) => {
+            OP_ADD_LOCAL_STORE => {
                 let l = &mut self.frames[top].locals;
                 let dest = i.a() as usize;
                 let src = i.b() as usize;
                 let a = unsafe { *l.get_unchecked(dest) };
                 let b = unsafe { *l.get_unchecked(src) };
-                if a.is_int() && b.is_int() {
-                    let r = match op {
-                        OP_ADD_LOCAL_STORE => checked_add_overflow(a.as_i48(), b.as_i48()),
-                        OP_SUB_LOCAL_STORE => checked_sub_overflow(a.as_i48(), b.as_i48()),
-                        OP_MUL_LOCAL_STORE => checked_mul_overflow(a.as_i48(), b.as_i48()),
-                        OP_DIV_LOCAL_STORE => checked_div_overflow(a.as_i48(), b.as_i48()),
-                        _ => 0,
-                    };
+                if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                    let r = checked_add_overflow(a.as_i48(), b.as_i48());
                     unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
                 } else {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = match op {
-                            OP_ADD_LOCAL_STORE => a.add(b, &self.arena),
-                            OP_SUB_LOCAL_STORE => a.sub_(b),
-                            OP_MUL_LOCAL_STORE => a.mul(b, &self.arena),
-                            OP_DIV_LOCAL_STORE => a.div_(b),
-                            _ => Value::nil(),
-                        };
-                    }
+                    unsafe { *l.get_unchecked_mut(dest) = a.add(b, &self.arena); }
+                }
+                Action::Next
+            }
+            OP_SUB_LOCAL_STORE => {
+                let l = &mut self.frames[top].locals;
+                let dest = i.a() as usize;
+                let src = i.b() as usize;
+                let a = unsafe { *l.get_unchecked(dest) };
+                let b = unsafe { *l.get_unchecked(src) };
+                if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                    let r = checked_sub_overflow(a.as_i48(), b.as_i48());
+                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
+                } else {
+                    unsafe { *l.get_unchecked_mut(dest) = a.sub_(b); }
+                }
+                Action::Next
+            }
+            OP_MUL_LOCAL_STORE => {
+                let l = &mut self.frames[top].locals;
+                let dest = i.a() as usize;
+                let src = i.b() as usize;
+                let a = unsafe { *l.get_unchecked(dest) };
+                let b = unsafe { *l.get_unchecked(src) };
+                if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                    let r = checked_mul_overflow(a.as_i48(), b.as_i48());
+                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
+                } else {
+                    unsafe { *l.get_unchecked_mut(dest) = a.mul(b, &self.arena); }
+                }
+                Action::Next
+            }
+            OP_DIV_LOCAL_STORE => {
+                let l = &mut self.frames[top].locals;
+                let dest = i.a() as usize;
+                let src = i.b() as usize;
+                let a = unsafe { *l.get_unchecked(dest) };
+                let b = unsafe { *l.get_unchecked(src) };
+                if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                    let r = checked_div_overflow(a.as_i48(), b.as_i48());
+                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
+                } else {
+                    unsafe { *l.get_unchecked_mut(dest) = a.div_(b); }
                 }
                 Action::Next
             }
@@ -948,7 +1064,7 @@ impl VM {
                 let limit = i.b() as i32 as i64;
                 let exit_wide_idx = i.c() as usize;
                 let v = unsafe { *f.locals.get_unchecked(slot) };
-                let val = if v.is_int() { v.as_i48() } else { v.as_int() };
+                let val = if v.tag() == TAG_INT { v.as_i48() } else { v.as_int() };
                 if val < limit {
                     Action::Next
                 } else {
@@ -959,32 +1075,63 @@ impl VM {
             }
 
             // ── Three-operand local store: dest = src1 op src2 ──
-            op if [OP_ADD_LOCAL_LOCAL_STORE, OP_SUB_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_LOCAL_STORE, OP_DIV_LOCAL_LOCAL_STORE].contains(&op) => {
+            OP_ADD_LOCAL_LOCAL_STORE => {
                 let l = &mut self.frames[top].locals;
                 let dest = i.a() as usize;
                 let src1 = i.c() as usize;
                 let src2 = i.b() as usize;
                 let a = unsafe { *l.get_unchecked(src1) };
                 let b = unsafe { *l.get_unchecked(src2) };
-                if a.is_int() && b.is_int() {
-                    let r = match op {
-                        OP_ADD_LOCAL_LOCAL_STORE => checked_add_overflow(a.as_i48(), b.as_i48()),
-                        OP_SUB_LOCAL_LOCAL_STORE => checked_sub_overflow(a.as_i48(), b.as_i48()),
-                        OP_MUL_LOCAL_LOCAL_STORE => checked_mul_overflow(a.as_i48(), b.as_i48()),
-                        OP_DIV_LOCAL_LOCAL_STORE => checked_div_overflow(a.as_i48(), b.as_i48()),
-                        _ => 0,
-                    };
+                if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                    let r = checked_add_overflow(a.as_i48(), b.as_i48());
                     unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
                 } else {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = match op {
-                            OP_ADD_LOCAL_LOCAL_STORE => a.add(b, &self.arena),
-                            OP_SUB_LOCAL_LOCAL_STORE => a.sub_(b),
-                            OP_MUL_LOCAL_LOCAL_STORE => a.mul(b, &self.arena),
-                            OP_DIV_LOCAL_LOCAL_STORE => a.div_(b),
-                            _ => Value::nil(),
-                        };
-                    }
+                    unsafe { *l.get_unchecked_mut(dest) = a.add(b, &self.arena); }
+                }
+                Action::Next
+            }
+            OP_SUB_LOCAL_LOCAL_STORE => {
+                let l = &mut self.frames[top].locals;
+                let dest = i.a() as usize;
+                let src1 = i.c() as usize;
+                let src2 = i.b() as usize;
+                let a = unsafe { *l.get_unchecked(src1) };
+                let b = unsafe { *l.get_unchecked(src2) };
+                if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                    let r = checked_sub_overflow(a.as_i48(), b.as_i48());
+                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
+                } else {
+                    unsafe { *l.get_unchecked_mut(dest) = a.sub_(b); }
+                }
+                Action::Next
+            }
+            OP_MUL_LOCAL_LOCAL_STORE => {
+                let l = &mut self.frames[top].locals;
+                let dest = i.a() as usize;
+                let src1 = i.c() as usize;
+                let src2 = i.b() as usize;
+                let a = unsafe { *l.get_unchecked(src1) };
+                let b = unsafe { *l.get_unchecked(src2) };
+                if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                    let r = checked_mul_overflow(a.as_i48(), b.as_i48());
+                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
+                } else {
+                    unsafe { *l.get_unchecked_mut(dest) = a.mul(b, &self.arena); }
+                }
+                Action::Next
+            }
+            OP_DIV_LOCAL_LOCAL_STORE => {
+                let l = &mut self.frames[top].locals;
+                let dest = i.a() as usize;
+                let src1 = i.c() as usize;
+                let src2 = i.b() as usize;
+                let a = unsafe { *l.get_unchecked(src1) };
+                let b = unsafe { *l.get_unchecked(src2) };
+                if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                    let r = checked_div_overflow(a.as_i48(), b.as_i48());
+                    unsafe { *l.get_unchecked_mut(dest) = Value::from_i48(r); }
+                } else {
+                    unsafe { *l.get_unchecked_mut(dest) = a.div_(b); }
                 }
                 Action::Next
             }
@@ -1090,6 +1237,7 @@ impl VM {
 
         // Run the VM dispatch loop until the frame we just pushed returns
         loop {
+            // Recalculate top every iteration because PushFrame/Return change frame count
             let top = match self.frames.len().checked_sub(1) {
                 Some(i) => i,
                 None    => {
@@ -1134,8 +1282,14 @@ impl VM {
             let instr = unsafe { *frame.code.instructions.get_unchecked(frame.ip as usize) };
             let action = self.dispatch(top, instr);
             match action {
-                Action::Next => self.frames[top].ip += 1,
-                Action::Jump(to) => self.frames[top].ip = to,
+                Action::Next => {
+                    let top = self.frames.len().checked_sub(1).unwrap_or(top);
+                    self.frames[top].ip += 1;
+                }
+                Action::Jump(to) => {
+                    let top = self.frames.len().checked_sub(1).unwrap_or(top);
+                    self.frames[top].ip = to;
+                }
                 Action::Return => {
                     // Run deferred closures before returning
                     if let Some(frame) = self.frames.last_mut() {
@@ -1161,6 +1315,8 @@ impl VM {
                 Action::PushFrame => {
                     let f = self.pending.take().expect("missing frame");
                     self.frames.push(f);
+                    // Don't advance ip; the newly pushed frame will be dispatched next iteration
+                    continue;
                 }
             }
         }

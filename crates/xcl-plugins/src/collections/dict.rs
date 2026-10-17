@@ -10,7 +10,7 @@ use xcl_vm::{Value, DomainCtx};
 // ─── Helper ───
 
 fn get_map(v: Value) -> HashMap<String, Value> {
-    v.as_map().map(|m| m.clone()).unwrap_or_default()
+    v.as_map().cloned().unwrap_or_default()
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -41,9 +41,7 @@ fn dict_entries(ctx: &mut DomainCtx) -> Value {
     let map = get_map(ctx.arg(0));
     let mut entries = Vec::with_capacity(map.len());
     for (k, v) in map {
-        let mut pair = Vec::with_capacity(2);
-        pair.push(Value::from_str(k, ctx.arena()));
-        pair.push(v);
+        let pair = vec![Value::from_str(k, ctx.arena()), v];
         entries.push(Value::from_array(pair, ctx.arena()));
     }
     Value::from_array(entries, ctx.arena())
@@ -93,7 +91,7 @@ fn dict_filter(ctx: &mut DomainCtx) -> Value {
     for (k, v) in map {
         let cond = ctx.call(f, &[v]);
         if cond.as_bool() {
-            result.insert(k.into(), v);
+            result.insert(k, v);
         }
     }
     Value::from_map_boxed(result)
@@ -107,7 +105,7 @@ fn dict_map(ctx: &mut DomainCtx) -> Value {
     let mut result = HashMap::with_capacity(map.len());
     for (k, v) in map {
         let new_v = ctx.call(f, &[v]);
-        result.insert(k.into(), new_v);
+        result.insert(k, new_v);
     }
     Value::from_map_boxed(result)
 }

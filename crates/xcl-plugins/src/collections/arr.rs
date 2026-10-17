@@ -9,7 +9,7 @@ use xcl_vm::{Value, DomainCtx};
 // ─── Helper: get array from args ───
 
 fn get_array(v: Value) -> Vec<Value> {
-    v.as_array().map(|arr| arr.clone()).unwrap_or_default()
+    v.as_array().cloned().unwrap_or_default()
 }
 
 fn make_array(ctx: &DomainCtx, elements: Vec<Value>) -> Value {
@@ -110,9 +110,7 @@ fn arr_partition(ctx: &mut DomainCtx) -> Value {
             right.push(item);
         }
     }
-    let mut result = Vec::with_capacity(2);
-    result.push(make_array(ctx, left));
-    result.push(make_array(ctx, right));
+    let result = vec![make_array(ctx, left), make_array(ctx, right)];
     make_array(ctx, result)
 }
 
@@ -360,9 +358,7 @@ fn arr_zip(ctx: &mut DomainCtx) -> Value {
     let b = get_array(ctx.arg(1));
     let mut result = Vec::with_capacity(a.len().min(b.len()));
     for (ai, bi) in a.iter().zip(b.iter()) {
-        let mut pair = Vec::with_capacity(2);
-        pair.push(*ai);
-        pair.push(*bi);
+        let pair = vec![*ai, *bi];
         result.push(make_array(ctx, pair));
     }
     make_array(ctx, result)
@@ -427,7 +423,7 @@ fn arr_group_by(ctx: &mut DomainCtx) -> Value {
     // Convert to XCL map
     let mut map = std::collections::HashMap::with_capacity(groups.len());
     for (key, values) in groups {
-        map.insert(key.into(), make_array(ctx, values));
+        map.insert(key, make_array(ctx, values));
     }
     Value::from_map_boxed(map)
 }

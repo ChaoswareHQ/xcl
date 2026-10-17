@@ -1,0 +1,54 @@
+# AWS provider example
+# Tests domain expansion, config, credentials, and service operations
+
+# Basic AWS context
+$aws_config = aws "us-east-1" {
+    aws.config ()
+}
+print "AWS region:" $aws_config.region
+
+# AWS credentials from environment
+$creds = aws "us-east-1" {
+    aws.credential ()
+}
+print "AWS credentials loaded"
+
+# AWS bucket operations
+$bucket_result = aws "us-east-1" {
+    bucket "my-test-bucket" {
+        bucket.list ""
+    }
+}
+if $bucket_result.is_err {
+    print "Bucket list error (expected without real credentials):" $bucket_result.message
+}
+
+# AWS function operations
+$function_result = aws "us-east-1" {
+    function "my-test-function" {
+        function.invoke { input: "test" }
+    }
+}
+if $function_result.is_err {
+    print "Function invoke error (expected without real credentials):" $function_result.message
+}
+
+# AWS API operations
+$api_result = aws "us-east-1" {
+    api "my-test-api" {
+        api.create "api.example.com" "arn:aws:lambda:us-east-1:123456789:function:my-fn"
+    }
+}
+if $api_result.is_err {
+    print "API create error (expected without real credentials):" $api_result.message
+}
+
+# Nested AWS regions
+$nested_region = aws "us-east-1" {
+    aws "eu-west-1" {
+        aws.config ().region
+    }
+}
+print "Nested region:" $nested_region
+
+print "AWS example complete"

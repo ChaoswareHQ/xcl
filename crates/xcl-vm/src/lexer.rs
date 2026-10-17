@@ -190,14 +190,22 @@ impl LineMap {
     /// Convert byte offset to (line, col) in O(log n) time using binary search.
     #[inline]
     fn offset_to_line_col(&self, offset: usize) -> (u32, u32) {
-        // Binary search for the line
+        // Binary search for the largest line start <= offset
         let line = match self.offsets.binary_search(&offset) {
-            Ok(0) | Err(0) => 1u32,
-            Ok(i) | Err(i) => (i + 1) as u32,
+            Ok(i) => (i + 1) as u32,
+            Err(i) => {
+                // i is the insertion point; the line before insertion is our line
+                if i == 0 { 1u32 } else { i as u32 }
+            }
         };
         // Column is offset minus the start of the line
-        let line_start = *self.offsets.get((line - 1) as usize).unwrap_or(&0);
-        let col = (offset - line_start + 1) as u32;
+        let line_idx = if line > 0 { (line - 1) as usize } else { 0 };
+        let line_start = *self.offsets.get(line_idx).unwrap_or(&0);
+        let col = if offset >= line_start {
+            (offset - line_start + 1) as u32
+        } else {
+            1u32
+        };
         (line, col)
     }
 }

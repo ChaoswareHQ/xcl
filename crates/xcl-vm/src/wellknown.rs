@@ -14,9 +14,6 @@ pub struct WellKnown {
     /// Name of the result type, typically "Result".
     pub result_type: Option<&'static str>,
 
-    /// Field name that holds the variant tag, typically "tag".
-    pub tag_field: Option<&'static str>,
-
     /// Field name that holds the Ok payload, typically "value".
     pub value_field: Option<&'static str>,
 

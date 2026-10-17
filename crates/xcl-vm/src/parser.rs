@@ -116,12 +116,20 @@ impl<'a> Parser<'a> {
 
     #[inline]
     fn lookahead_type_def(&self) -> bool {
-        // Name = { or Name = |
+        // Name = { or Name = | ... or Name = Variant | ... or Name = Variant { ... } | ...
         if !matches!(self.tokens.get(self.pos + 1).map(|t| &t.token), Some(Token::Assign)) {
             return false;
         }
-        matches!(self.tokens.get(self.pos + 2).map(|t| &t.token),
-            Some(Token::LBrace) | Some(Token::Pipe))
+        match self.tokens.get(self.pos + 2).map(|t| &t.token) {
+            Some(Token::LBrace) | Some(Token::Pipe) => true,
+            // `Name = IdentPlain |` — enum-style without leading pipe
+            // `Name = IdentPlain {` — variant with fields
+            Some(Token::IdentPlain) => {
+                matches!(self.tokens.get(self.pos + 3).map(|t| &t.token),
+                    Some(Token::Pipe) | Some(Token::LBrace))
+            }
+            _ => false,
+        }
     }
 
     #[inline]
@@ -142,10 +150,13 @@ impl<'a> Parser<'a> {
         let name = self.consume().text; // IdentPlain
         self.expect(Token::Assign);
 
-        if self.at(Token::Pipe) {
-            // Sum type: `Name = | Variant1 { ... } | Variant2 { ... }`
-            self.consume(); // |
+        if self.at(Token::Pipe) || self.at(Token::IdentPlain) {
+            // Sum type: `Name = | Variant1 | Variant2` or `Name = Variant1 | Variant2`
             let mut variants = Vec::new();
+            // If starts with `|`, consume it first (old syntax)
+            if self.at(Token::Pipe) {
+                self.consume();
+            }
             while self.at(Token::IdentPlain) {
                 let vname = self.consume().text;
                 let mut fields = Vec::new();

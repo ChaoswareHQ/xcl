@@ -1,0 +1,54 @@
+# OCI (Oracle Cloud Infrastructure) provider example
+# Tests domain expansion, config, credentials, and service operations
+
+# Basic OCI context
+$oci_config = oci "my-tenancy" {
+    oci.config ()
+}
+print "OCI tenancy:" $oci_config.tenancy
+
+# OCI credentials from environment
+$creds = oci "my-tenancy" {
+    oci.credential ()
+}
+print "OCI credentials loaded"
+
+# OCI bucket operations (Object Storage)
+$bucket_result = oci "my-tenancy" {
+    bucket "my-test-bucket" {
+        bucket.list ""
+    }
+}
+if $bucket_result.is_err {
+    print "Bucket list error (expected without real credentials):" $bucket_result.message
+}
+
+# OCI function operations
+$function_result = oci "my-tenancy" {
+    function "my-test-function" {
+        function.invoke { input: "test" }
+    }
+}
+if $function_result.is_err {
+    print "Function invoke error (expected without real credentials):" $function_result.message
+}
+
+# OCI instance operations (Compute)
+$instance_result = oci "my-tenancy" {
+    instance "my-test-instance" {
+        instance.list ()
+    }
+}
+if $instance_result.is_err {
+    print "Instance list error (expected without real credentials):" $instance_result.message
+}
+
+# Nested OCI tenancies
+$nested_tenancy = oci "tenancy-a" {
+    oci "tenancy-b" {
+        oci.config ().tenancy
+    }
+}
+print "Nested tenancy:" $nested_tenancy
+
+print "OCI example complete"

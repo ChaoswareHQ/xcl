@@ -1,0 +1,54 @@
+# Cloudflare provider example
+# Tests domain expansion, config, credentials, and service operations
+
+# Basic Cloudflare context
+$cf_config = cloudflare "my-account" {
+    cloudflare.config ()
+}
+print "Cloudflare account:" $cf_config.account
+
+# Cloudflare credentials from environment
+$creds = cloudflare "my-account" {
+    cloudflare.credential ()
+}
+print "Cloudflare credentials loaded"
+
+# Cloudflare bucket operations (R2)
+$bucket_result = cloudflare "my-account" {
+    bucket "my-test-bucket" {
+        bucket.list ""
+    }
+}
+if $bucket_result.is_err {
+    print "Bucket list error (expected without real credentials):" $bucket_result.message
+}
+
+# Cloudflare function operations (Workers)
+$function_result = cloudflare "my-account" {
+    function "my-test-worker" {
+        function.invoke { input: "test" }
+    }
+}
+if $function_result.is_err {
+    print "Function invoke error (expected without real credentials):" $function_result.message
+}
+
+# Cloudflare instance operations (Durable Objects)
+$instance_result = cloudflare "my-account" {
+    instance "my-test-object" {
+        instance.list ()
+    }
+}
+if $instance_result.is_err {
+    print "Instance list error (expected without real credentials):" $instance_result.message
+}
+
+# Nested Cloudflare accounts
+$nested_account = cloudflare "acc-a" {
+    cloudflare "acc-b" {
+        cloudflare.config ().account
+    }
+}
+print "Nested account:" $nested_account
+
+print "Cloudflare example complete"

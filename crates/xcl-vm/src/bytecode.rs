@@ -187,6 +187,7 @@ pub struct Bytecode {
     pub wide_operands: Arc<[i64]>,
     pub string_table:  Arc<[Box<str>]>,
     pub local_names:   Arc<[Box<str>]>,
+    pub global_names:  Arc<[Box<str>]>,
     pub user_functions: Vec<(Box<str>, FuncValue)>,
     pub closures:      Vec<FuncValue>,
 }
@@ -196,6 +197,7 @@ struct Compiler {
     wide:      Vec<i64>,
     strings:   Vec<Box<str>>,
     locals:    Vec<Box<str>>,
+    globals:   Vec<Box<str>>,
     functions: Vec<(Box<str>, FuncValue)>,
     closures:  Vec<FuncValue>,
 }
@@ -207,6 +209,7 @@ impl Compiler {
             wide: Vec::new(),
             strings: Vec::new(),
             locals: Vec::new(),
+            globals: Vec::new(),
             functions: Vec::new(),
             closures: Vec::new(),
         }
@@ -234,6 +237,20 @@ impl Compiler {
         let i = self.locals.len() as u32;
         self.locals.push(name.into());
         i
+    }
+
+    #[inline]
+    fn global(&mut self, name: &str) -> u32 {
+        if let Some(i) = self.globals.iter().position(|x| &**x == name) { return i as u32; }
+        let i = self.globals.len() as u32;
+        self.globals.push(name.into());
+        i
+    }
+
+    /// Check if a name is a registered global (enum variant, type name, etc.)
+    #[inline]
+    fn is_global(&self, name: &str) -> bool {
+        self.globals.iter().any(|x| &**x == name)
     }
 
     #[inline]
@@ -343,7 +360,7 @@ impl Compiler {
         if let Some(prev) = self.code.last().copied() {
             if prev.op() == OP_LOAD_LOCAL_LOAD_LOCAL {
                 self.code.pop();
-                self.emit(Instr::make(OP_ADD_LOCAL_LOCAL, prev.a(), prev.b() as u16, 0));
+                self.emit(Instr::make(OP_ADD_LOCAL_LOCAL, prev.a(), prev.b(), 0));
                 return true;
             }
         }
@@ -367,7 +384,7 @@ impl Compiler {
         if let Some(prev) = self.code.last().copied() {
             if prev.op() == OP_LOAD_LOCAL_LOAD_LOCAL {
                 self.code.pop();
-                self.emit(Instr::make(op, prev.a(), prev.b() as u16, 0));
+                self.emit(Instr::make(op, prev.a(), prev.b(), 0));
                 return true;
             }
         }
@@ -398,6 +415,7 @@ impl Compiler {
             wide_operands: core::mem::take(&mut self.wide).into(),
             string_table: core::mem::take(&mut self.strings).into(),
             local_names: core::mem::take(&mut self.locals).into(),
+            global_names: core::mem::take(&mut self.globals).into(),
             user_functions: core::mem::take(&mut self.functions),
             closures: core::mem::take(&mut self.closures),
         }
@@ -541,7 +559,7 @@ impl Compiler {
                         let start_wide = self.wide(start_i);
                         let end_wide = self.wide(end_i);
                         // a = (var_slot << 16) | start_wide_idx, b = end_wide_idx
-                        let a_combined = (var as u32) << 16 | (start_wide & 0xFFFF);
+                        let a_combined = var << 16 | (start_wide & 0xFFFF);
                         self.emit(Instr::a2(OP_FOR_NUMBER_LOOP, a_combined, end_wide as u16));
                         let loop_start = self.ip();
                         for s in body { self.node(s); }
@@ -643,26 +661,41 @@ impl Compiler {
             }
 
             AstNode::Call { callee, args, .. } => {
-                // Check if callee is a domain method like "io.read"
-                if let AstNode::FieldAccess { target, field, .. } = callee.as_ref() {
-                    if let AstNode::Ident { name, .. } = target.as_ref() {
-                        // If the target is a known local variable, it's a method call on a value.
-                        // Otherwise, treat it as a domain call like "io.read".
-                        let is_local = self.locals.iter().any(|n| **n == *name);
-                        if is_local {
-                            self.node(target);
-                            for a in args { self.node(&a.value); }
-                            let field_idx = self.intern(field);
-                            self.emit(Instr::a2(OP_CALL_METHOD, field_idx, args.len() as u16));
-                            return;
-                        } else {
-                            // If the target is a simple identifier, treat it as a domain call
-                            let full_name = format!("{}.{}", name, field);
-                            let i = self.intern(&full_name);
-                            self.emit(Instr::a1(OP_PUSH_STR, i));
+                // Build full dotted name from nested FieldAccess chains.
+                // e.g., net.tcp.connect -> "net.tcp.connect"
+                //       io.read -> "io.read"
+                //       $r.map_err -> "$r.map_err"
+                let full_name = collect_dotted_name(callee.as_ref());
+                if let Some(name) = full_name {
+                    // Check if the base identifier is a local variable AND there's a dot (method call)
+                    let parts: Vec<&str> = name.split('.').collect();
+                    let base = parts.first().copied().unwrap_or(&name);
+                    let is_local = self.locals.iter().any(|n| **n == *base);
+                    if is_local && parts.len() > 1 {
+                        // It's a method call on a local value: $x.method()
+                        // Compile as OP_CALL_METHOD: load receiver, push args, CALL_METHOD
+                        let method_name = parts.last().copied().unwrap_or(&name);
+                        let field_idx = self.intern(method_name);
+                        // Load the receiver (the local variable)
+                        if let Some(slot) = self.locals.iter().position(|n| **n == *base).map(|i| i as u32) {
+                            self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
                         }
+                        // Push args
+                        for a in args { self.node(&a.value); }
+                        self.emit(Instr::a2(OP_CALL_METHOD, field_idx, args.len() as u16));
+                    } else if is_local && parts.len() == 1 {
+                        // Single-part local variable call: $f() or $f arg
+                        if let Some(slot) = self.locals.iter().position(|n| **n == *base).map(|i| i as u32) {
+                            self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
+                        }
+                        for a in args { self.node(&a.value); }
+                        self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
                     } else {
-                        self.node(callee);
+                        // It's a domain call: net.tcp.connect or io.read
+                        let i = self.intern(&name);
+                        self.emit(Instr::a1(OP_PUSH_STR, i));
+                        for a in args { self.node(&a.value); }
+                        self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
                     }
                 } else if let AstNode::Ident { name, .. } = callee.as_ref() {
                     // If the name was originally a $-prefixed variable, load from local
@@ -673,11 +706,13 @@ impl Compiler {
                         let i = self.intern(name);
                         self.emit(Instr::a1(OP_PUSH_STR, i));
                     }
+                    for a in args { self.node(&a.value); }
+                    self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
                 } else {
                     self.node(callee);
+                    for a in args { self.node(&a.value); }
+                    self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
                 }
-                for a in args { self.node(&a.value); }
-                self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
             }
 
             AstNode::Int { value, .. } => {
@@ -702,9 +737,15 @@ impl Compiler {
             AstNode::Nil { .. } => self.emit(Instr::none(OP_PUSH_NIL)),
 
             AstNode::Ident { name, .. } => {
-                let slot = self.local(name);
-                if !self.try_fuse_load_load(slot) {
-                    self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
+                // Check if this is a registered global (enum variant, type name)
+                if self.is_global(name) {
+                    let g_slot = self.global(name);
+                    self.emit(Instr::a1(OP_LOAD_GLOBAL, g_slot));
+                } else {
+                    let slot = self.local(name);
+                    if !self.try_fuse_load_load(slot) {
+                        self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
+                    }
                 }
             }
 
@@ -851,19 +892,18 @@ impl Compiler {
                         self.node(s);
                     }
                 }
-                // Register the type name as a global variable (nil for now, VM will resolve it)
+                // Register the type name as a global
                 let type_idx = self.intern(name);
                 self.emit(Instr::a1(OP_PUSH_STR, type_idx));
-                let slot = self.local(name);
-                self.emit(Instr::a1(OP_STORE_LOCAL, slot));
-                // For sum types, compile variant constructors
+                let g_slot = self.global(name);
+                self.emit(Instr::a1(OP_STORE_GLOBAL, g_slot));
+                // For sum types, register each variant as a global string constant
                 if let TypeKind::Sum { variants } = kind {
                     for v in variants {
-                        // Each variant becomes a function call: VariantName(args) -> dict with tag
                         let v_idx = self.intern(&v.name);
                         self.emit(Instr::a1(OP_PUSH_STR, v_idx));
-                        let v_slot = self.local(&v.name);
-                        self.emit(Instr::a1(OP_STORE_LOCAL, v_slot));
+                        let vg_slot = self.global(&v.name);
+                        self.emit(Instr::a1(OP_STORE_GLOBAL, vg_slot));
                     }
                 }
             }
@@ -894,8 +934,23 @@ impl Compiler {
     }
 }
 
+/// Recursively collect a dotted name from a chain of FieldAccess nodes.
+/// e.g., FieldAccess(FieldAccess(Ident("net"), "tcp"), "connect") -> Some("net.tcp.connect")
+/// Returns None if the chain contains anything other than Ident + FieldAccess.
+fn collect_dotted_name(node: &AstNode) -> Option<String> {
+    match node {
+        AstNode::Ident { name, .. } => Some(name.clone()),
+        AstNode::FieldAccess { target, field, .. } => {
+            let base = collect_dotted_name(target)?;
+            Some(format!("{}.{}", base, field))
+        }
+        _ => None,
+    }
+}
+
 pub fn compile(ast: &[AstNode]) -> Bytecode {
-    Compiler::new().compile(ast)
+    let mut c = Compiler::new();
+    c.compile(ast)
 }
 
 /// Peephole optimizer — scans bytecode and fuses common patterns.
@@ -922,10 +977,13 @@ fn peephole_at(code: &mut Vec<Instr>, i: usize, instr: Instr) -> bool {
     let op = instr.op();
 
     // Pattern 1: LOAD_LOCAL a; LOAD_LOCAL b; ADD → ADD_LOCAL_LOCAL a, b
-    if op == OP_LOAD_LOCAL && code.len() >= i + 3 {
+    // Only fuse if STORE_LOCAL immediately follows (the fused op pushes to stack,
+    // and STORE_LOCAL will consume it). Otherwise the caller expects the value on the stack.
+    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
         let next = code[i + 1];
         let next2 = code[i + 2];
-        if next.op() == OP_LOAD_LOCAL {
+        let next3 = code[i + 3];
+        if next.op() == OP_LOAD_LOCAL && next3.op() == OP_STORE_LOCAL {
             let arith_op = match next2.op() {
                 OP_ADD => Some(OP_ADD_LOCAL_LOCAL),
                 OP_SUB => Some(OP_SUB_LOCAL_LOCAL),
@@ -943,10 +1001,12 @@ fn peephole_at(code: &mut Vec<Instr>, i: usize, instr: Instr) -> bool {
     }
 
     // Pattern 2: LOAD_LOCAL a; PUSH_INT k; ADD → ADD_INT_LOCAL a, k
-    if op == OP_LOAD_LOCAL && code.len() >= i + 3 {
+    // Only fuse if STORE_LOCAL immediately follows. Otherwise the caller expects the value on the stack.
+    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
         let next = code[i + 1];
         let next2 = code[i + 2];
-        if next.op() == OP_PUSH_INT {
+        let next3 = code[i + 3];
+        if next.op() == OP_PUSH_INT && next3.op() == OP_STORE_LOCAL {
             let arith_op = match next2.op() {
                 OP_ADD => Some(OP_ADD_INT_LOCAL),
                 OP_SUB => Some(OP_SUB_INT_LOCAL),
@@ -1060,6 +1120,66 @@ fn peephole_at(code: &mut Vec<Instr>, i: usize, instr: Instr) -> bool {
             code.drain(i + 3..=i + 4);
             return true;
         }
+    }
+
+    // Pattern 9: LOAD_LOCAL a; LOAD_LOCAL b; ADD; STORE_LOCAL c → ADD_LOCAL_LOCAL_STORE c, a, b
+    // Like Luau's fused store pattern — eliminates 4 instructions into 1
+    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        let next3 = code[i + 3];
+        if next.op() == OP_LOAD_LOCAL && next3.op() == OP_STORE_LOCAL {
+            let store_op = match next2.op() {
+                OP_ADD => Some(OP_ADD_LOCAL_LOCAL_STORE),
+                OP_SUB => Some(OP_SUB_LOCAL_LOCAL_STORE),
+                OP_MUL => Some(OP_MUL_LOCAL_LOCAL_STORE),
+                OP_DIV => Some(OP_DIV_LOCAL_LOCAL_STORE),
+                _ => None,
+            };
+            if let Some(fused) = store_op {
+                // a=dest, b=src2, c=src1
+                code[i] = Instr::make(fused, next3.a(), next.a() as u16, instr.a() as u8);
+                code.drain(i + 1..=i + 3);
+                return true;
+            }
+        }
+    }
+
+    // Pattern 10: LOAD_LOCAL a; PUSH_INT k; ADD; STORE_LOCAL b → ADD_INT_STORE_LOCAL b, a, k
+    // Like Luau's ADDK — constant on the right side
+    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        let next3 = code[i + 3];
+        if next.op() == OP_PUSH_INT && next3.op() == OP_STORE_LOCAL {
+            if next2.op() == OP_ADD {
+                code[i] = Instr::a2(OP_ADD_INT_STORE_LOCAL, next3.a(), next.a() as u16);
+                // encode src local in c
+                code[i] = Instr::make(OP_ADD_INT_STORE_LOCAL, next3.a(), next.a() as u16, instr.a() as u8);
+                code.drain(i + 1..=i + 3);
+                return true;
+            }
+        }
+    }
+
+    // Pattern 11: DEC_LOCAL — LOAD_LOCAL a; PUSH_INT 1; SUB; STORE_LOCAL a
+    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        let next3 = code[i + 3];
+        if next.op() == OP_PUSH_INT && next.a() == 1 && next2.op() == OP_SUB
+            && next3.op() == OP_STORE_LOCAL && next3.a() == instr.a()
+        {
+            code[i] = Instr::a1(OP_DEC_LOCAL, instr.a());
+            code.drain(i + 1..=i + 3);
+            return true;
+        }
+    }
+
+    // Pattern 12: Dead code elimination — consecutive NOPs
+    if op == OP_NOP && code.len() >= i + 2 && code[i + 1].op() == OP_NOP {
+        code.drain(i..=i + 1);
+        return true;
     }
 
     false

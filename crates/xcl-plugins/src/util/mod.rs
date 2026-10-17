@@ -43,10 +43,10 @@ pub fn os_name(_ctx: &mut DomainCtx) -> Value {
     let name = match os {
         "linux" => {
             // Check for Android
-            if let Ok(libc_path) = std::fs::read_to_string("/system/build.prop") {
-                if libc_path.contains("ro.product.manufacturer") {
-                    return Value::from_str_boxed("android".to_string());
-                }
+            if let Ok(libc_path) = std::fs::read_to_string("/system/build.prop")
+                && libc_path.contains("ro.product.manufacturer")
+            {
+                return Value::from_str_boxed("android".to_string());
             }
             "linux"
         }
@@ -723,7 +723,7 @@ pub fn path_is_dir(ctx: &mut DomainCtx) -> Value {
 ///
 /// ```xcl
 /// $result = path.canonicalize "./file.txt"
-/// if $result.tag == "Ok" {
+/// if $result.is_ok {
 ///     io.print "Absolute path: ${$result.value}"
 /// }
 /// ```
@@ -760,7 +760,7 @@ pub fn path_canonicalize(ctx: &mut DomainCtx) -> Value {
 ///
 /// ```xcl
 /// $result = path.cwd
-/// if $result.tag == "Ok" {
+/// if $result.is_ok {
 ///     io.print "Current directory: ${$result.value}"
 /// }
 /// ```
@@ -792,7 +792,7 @@ pub fn path_cwd(_ctx: &mut DomainCtx) -> Value {
 ///
 /// ```xcl
 /// $result = path.chdir "/tmp"
-/// if $result.tag == "Ok" {
+/// if $result.is_ok {
 ///     io.print "Changed directory"
 /// }
 /// ```
@@ -979,7 +979,7 @@ pub fn path_is_absolute(ctx: &mut DomainCtx) -> Value {
 ///
 /// ```xcl
 /// $result = path.stat "/etc/hosts"
-/// if $result.tag == "Ok" {
+/// if $result.is_ok {
 ///     $stat = $result.value
 ///     io.print "Size: ${$stat.size}"
 ///     io.print "Is file: ${$stat.is_file}"
@@ -1005,17 +1005,17 @@ pub fn path_stat(ctx: &mut DomainCtx) -> Value {
             map.insert("is_symlink".to_string(), Value::bool_(metadata.file_type().is_symlink()));
             
             // Modified time
-            if let Ok(modified) = metadata.modified() {
-                if let Ok(duration) = modified.duration_since(std::time::SystemTime::UNIX_EPOCH) {
-                    map.insert("modified".to_string(), Value::from_i48(duration.as_secs() as i64));
-                }
+            if let Ok(modified) = metadata.modified()
+                && let Ok(duration) = modified.duration_since(std::time::SystemTime::UNIX_EPOCH)
+            {
+                map.insert("modified".to_string(), Value::from_i48(duration.as_secs() as i64));
             }
             
             // Created time (not available on all platforms)
-            if let Ok(created) = metadata.created() {
-                if let Ok(duration) = created.duration_since(std::time::SystemTime::UNIX_EPOCH) {
-                    map.insert("created".to_string(), Value::from_i48(duration.as_secs() as i64));
-                }
+            if let Ok(created) = metadata.created()
+                && let Ok(duration) = created.duration_since(std::time::SystemTime::UNIX_EPOCH)
+            {
+                map.insert("created".to_string(), Value::from_i48(duration.as_secs() as i64));
             }
             
             ok_result(Value::from_map_boxed(map))
@@ -1042,7 +1042,7 @@ pub fn path_stat(ctx: &mut DomainCtx) -> Value {
 ///
 /// ```xcl
 /// $result = path.ls "/usr/local"
-/// if $result.tag == "Ok" {
+/// if $result.is_ok {
 ///     $files = $result.value
 ///     for $file in $files {
 ///         io.print $file
@@ -1063,11 +1063,9 @@ pub fn path_ls(ctx: &mut DomainCtx) -> Value {
     match std::fs::read_dir(path_str) {
         Ok(entries) => {
             let mut names = Vec::new();
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    let name = entry.file_name();
-                    names.push(Value::from_str_boxed(name.to_string_lossy().to_string()));
-                }
+            for entry in entries.filter_map(|e| e.ok()) {
+                let name = entry.file_name();
+                names.push(Value::from_str_boxed(name.to_string_lossy().to_string()));
             }
             ok_result(Value::from_array_boxed(names))
         }
@@ -1091,7 +1089,7 @@ pub fn path_ls(ctx: &mut DomainCtx) -> Value {
 ///
 /// ```xcl
 /// $result = path.mkdir "/tmp/mydir"
-/// if $result.tag == "Ok" {
+/// if $result.is_ok {
 ///     io.print "Directory created"
 /// }
 /// ```
@@ -1128,7 +1126,7 @@ pub fn path_mkdir(ctx: &mut DomainCtx) -> Value {
 ///
 /// ```xcl
 /// $result = path.mkdir_p "/tmp/a/b/c"
-/// if $result.tag == "Ok" {
+/// if $result.is_ok {
 ///     io.print "Directories created"
 /// }
 /// ```
@@ -1165,7 +1163,7 @@ pub fn path_mkdir_p(ctx: &mut DomainCtx) -> Value {
 ///
 /// ```xcl
 /// $result = path.remove "/tmp/file.txt"
-/// if $result.tag == "Ok" {
+/// if $result.is_ok {
 ///     io.print "Removed"
 /// }
 /// ```
@@ -1210,7 +1208,7 @@ pub fn path_remove(ctx: &mut DomainCtx) -> Value {
 ///
 /// ```xcl
 /// $result = path.remove_all "/tmp/mydir"
-/// if $result.tag == "Ok" {
+/// if $result.is_ok {
 ///     io.print "Removed recursively"
 /// }
 /// ```
@@ -1249,7 +1247,7 @@ pub fn path_remove_all(ctx: &mut DomainCtx) -> Value {
 ///
 /// ```xcl
 /// $result = path.copy "/tmp/source.txt" "/tmp/dest.txt"
-/// if $result.tag == "Ok" {
+/// if $result.is_ok {
 ///     io.print "File copied"
 /// }
 /// ```
@@ -1290,7 +1288,7 @@ pub fn path_copy(ctx: &mut DomainCtx) -> Value {
 ///
 /// ```xcl
 /// $result = path.rename "/tmp/old.txt" "/tmp/new.txt"
-/// if $result.tag == "Ok" {
+/// if $result.is_ok {
 ///     io.print "File renamed"
 /// }
 /// ```
@@ -1331,7 +1329,7 @@ pub fn path_rename(ctx: &mut DomainCtx) -> Value {
 ///
 /// ```xcl
 /// $result = path.symlink "/usr/local/bin/python3" "/usr/local/bin/python"
-/// if $result.tag == "Ok" {
+/// if $result.is_ok {
 ///     io.print "Symlink created"
 /// }
 /// ```
@@ -1389,7 +1387,7 @@ pub fn path_symlink(ctx: &mut DomainCtx) -> Value {
 ///
 /// ```xcl
 /// $result = path.readlink "/usr/local/bin/python"
-/// if $result.tag == "Ok" {
+/// if $result.is_ok {
 ///     io.print "Points to: ${$result.value}"
 /// }
 /// ```
@@ -1457,7 +1455,7 @@ pub fn path_is_symlink(ctx: &mut DomainCtx) -> Value {
 ///
 /// ```xcl
 /// $result = os.hostname
-/// if $result.tag == "Ok" {
+/// if $result.is_ok {
 ///     io.print "Hostname: ${$result.value}"
 /// }
 /// ```
@@ -1785,7 +1783,7 @@ pub fn util_uuid(_ctx: &mut DomainCtx) -> Value {
 ///
 /// ```xcl
 /// $result = util.exec "ls -la /tmp"
-/// if $result.tag == "Ok" {
+/// if $result.is_ok {
 ///     io.print $result.value
 /// }
 /// ```

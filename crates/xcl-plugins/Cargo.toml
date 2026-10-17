@@ -25,23 +25,33 @@ ryu.workspace = true
 # [std.encoding] — JSON serialization for MCP and general use
 serde.workspace = true
 serde_json.workspace = true
-toml.workspace = true
 
-# [std.net] — lightweight, secure HTTP client (synchronous, TLS via rustls by default)
-ureq = "3"
+# [std.net] — lightweight, secure HTTPS client (platform-specific TLS in target sections below)
 
 # [std.sys, std.ffi, std.abi] — platform-specific FFI
-libc = "0.2"
+libc.workspace = true
+
+# [std.cloud] — AWS Signature V4 signing
+hmac.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
-    "Win32_System_LibraryLoader",
-    "Win32_System_SystemInformation",
-    "Win32_Storage_FileSystem",
-] }
+# ureq with rustls + platform verifier (uses Windows cert store, no webpki-roots)
+ureq = { workspace = true, default-features = false, features = ["rustls", "platform-verifier"] }
+windows.workspace = true
+
+[target.'cfg(not(windows))'.dependencies]
+# ureq with rustls + platform verifier (uses OS cert store, no webpki-roots)
+ureq = { workspace = true, default-features = false, features = ["rustls", "platform-verifier"] }
 
 [dev-dependencies]
 criterion.workspace = true
 
 [[bench]]
 name = "integration"
+harness = false
+
+[[bench]]
+name = "vibemark"
 harness = false
