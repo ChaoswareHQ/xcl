@@ -1,54 +1,90 @@
 # Cloudflare provider example
-# Tests domain expansion, config, credentials, and service operations
+# Tests domain expansion, credentials, and all service operations
+# Requires CLOUDFLARE_ACCOUNT and CLOUDFLARE_API_TOKEN in .env file
+#
+# Credentials are loaded from .env using io.read_env internally.
+# Use cloudflare "" to auto-load the account from .env.
+# Use cloudflare "your-account-id" to override with a specific account.
 
-# Basic Cloudflare context
-$cf_config = cloudflare "my-account" {
-    cloudflare.config ()
-}
-print "Cloudflare account:" $cf_config.account
-
-# Cloudflare credentials from environment
-$creds = cloudflare "my-account" {
-    cloudflare.credential ()
-}
-print "Cloudflare credentials loaded"
-
-# Cloudflare bucket operations (R2)
-$bucket_result = cloudflare "my-account" {
-    bucket "my-test-bucket" {
-        bucket.list ""
-    }
-}
-if $bucket_result.is_err {
-    print "Bucket list error (expected without real credentials):" $bucket_result.message
-}
-
-# Cloudflare function operations (Workers)
-$function_result = cloudflare "my-account" {
-    function "my-test-worker" {
-        function.invoke { input: "test" }
-    }
-}
-if $function_result.is_err {
-    print "Function invoke error (expected without real credentials):" $function_result.message
-}
-
-# Cloudflare instance operations (Durable Objects)
-$instance_result = cloudflare "my-account" {
-    instance "my-test-object" {
-        instance.list ()
-    }
-}
-if $instance_result.is_err {
-    print "Instance list error (expected without real credentials):" $instance_result.message
+# Basic Cloudflare context — account auto-loaded from .env
+cloudflare "" {
+    $config = cloudflare.config
+    print "Cloudflare account:" $config.account
 }
 
 # Nested Cloudflare accounts
-$nested_account = cloudflare "acc-a" {
+cloudflare "acc-a" {
     cloudflare "acc-b" {
-        cloudflare.config ().account
+        $config = cloudflare.config
+        print "Nested account:" $config.account
+    }
+    $config = cloudflare.config
+    print "Restored account:" $config.account
+}
+
+# R2 bucket operations — account auto-loaded from .env
+cloudflare "" {
+    # Create a new R2 bucket
+    $create = bucket.create "xcl-test-bucket"
+    if $create.is_ok {
+        print "Bucket created successfully"
+    }
+    if $create.is_err {
+        print "Bucket create error (may already exist):" $create.message
+    }
+
+    # List, put, get, delete objects
+    domain.run "bucket.name" "xcl-test-bucket" {
+        $list = bucket.list ""
+        if $list.is_ok {
+            print "Bucket list: OK"
+        }
+        if $list.is_err {
+            print "Bucket list error:" $list.message
+        }
+
+        $put = bucket.put "hello.txt" "Hello from XCL!"
+        if $put.is_ok {
+            print "Bucket put: OK"
+        }
+        if $put.is_err {
+            print "Bucket put error:" $put.message
+        }
+
+        $get = bucket.get "hello.txt"
+        if $get.is_ok {
+            print "Bucket get: OK"
+        }
+        if $get.is_err {
+            print "Bucket get error:" $get.message
+        }
+
+        $del = bucket.delete "hello.txt"
+        if $del.is_ok {
+            print "Bucket delete: OK"
+        }
+        if $del.is_err {
+            print "Bucket delete error:" $del.message
+        }
+    }
+
+    # Workers function operations
+    $workers = function.list
+    if $workers.is_ok {
+        print "Workers list: OK"
+    }
+    if $workers.is_err {
+        print "Workers list error:" $workers.message
+    }
+
+    # Durable Objects operations
+    $instances = instance.list
+    if $instances.is_ok {
+        print "Instances list: OK"
+    }
+    if $instances.is_err {
+        print "Instances list error:" $instances.message
     }
 }
-print "Nested account:" $nested_account
 
 print "Cloudflare example complete"

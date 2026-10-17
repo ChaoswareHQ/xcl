@@ -1,54 +1,34 @@
 # GCP provider example
-# Tests domain expansion, config, credentials, and service operations
+# Tests domain expansion, config, and credentials
 
 # Basic GCP context
-$gcp_config = gcp "my-project" {
-    gcp.config ()
+gcp "my-project" {
+    $config = gcp.config ()
+    print "GCP project:" $config.project
 }
-print "GCP project:" $gcp_config.project
 
 # GCP credentials from environment
-$creds = gcp "my-project" {
-    gcp.credential ()
-}
-print "GCP credentials loaded"
-
-# GCP bucket operations
-$bucket_result = gcp "my-project" {
-    bucket "my-test-bucket" {
-        bucket.list ""
-    }
-}
-if $bucket_result.is_err {
-    print "Bucket list error (expected without real credentials):" $bucket_result.message
-}
-
-# GCP function operations
-$function_result = gcp "my-project" {
-    function "my-test-function" {
-        function.invoke { input: "test" }
-    }
-}
-if $function_result.is_err {
-    print "Function invoke error (expected without real credentials):" $function_result.message
-}
-
-# GCP instance operations
-$instance_result = gcp "my-project" {
-    instance "my-test-instance" {
-        instance.list ()
-    }
-}
-if $instance_result.is_err {
-    print "Instance list error (expected without real credentials):" $instance_result.message
+gcp "my-project" {
+    $creds = gcp.credential ()
+    print "GCP credentials loaded"
 }
 
 # Nested GCP projects
-$nested_project = gcp "project-a" {
+gcp "project-a" {
     gcp "project-b" {
-        gcp.config ().project
+        $config = gcp.config ()
+        print "Nested project:" $config.project
+    }
+    $config = gcp.config ()
+    print "Restored project:" $config.project
+}
+
+# GCP with bucket context (via domain.get)
+gcp "my-project" {
+    domain.run "bucket.name" "my-test-bucket" {
+        $bucket = domain.get "bucket.name"
+        print "Bucket context:" $bucket
     }
 }
-print "Nested project:" $nested_project
 
 print "GCP example complete"

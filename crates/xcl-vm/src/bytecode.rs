@@ -670,14 +670,16 @@ impl Compiler {
                     // Check if the base identifier is a local variable AND there's a dot (method call)
                     let parts: Vec<&str> = name.split('.').collect();
                     let base = parts.first().copied().unwrap_or(&name);
-                    let is_local = self.locals.iter().any(|n| **n == *base);
+                    // Strip $ prefix from base for local variable lookup
+                    let base_unprefixed = base.strip_prefix('$').unwrap_or(base);
+                    let is_local = self.locals.iter().any(|n| n.as_ref() == base_unprefixed);
                     if is_local && parts.len() > 1 {
                         // It's a method call on a local value: $x.method()
                         // Compile as OP_CALL_METHOD: load receiver, push args, CALL_METHOD
                         let method_name = parts.last().copied().unwrap_or(&name);
                         let field_idx = self.intern(method_name);
                         // Load the receiver (the local variable)
-                        if let Some(slot) = self.locals.iter().position(|n| **n == *base).map(|i| i as u32) {
+                        if let Some(slot) = self.locals.iter().position(|n| n.as_ref() == base_unprefixed).map(|i| i as u32) {
                             self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
                         }
                         // Push args

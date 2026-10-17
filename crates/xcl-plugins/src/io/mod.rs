@@ -341,6 +341,13 @@ pub fn io_read_env(path: &str) -> Value {
         let key = key.trim();
         let value = value.trim();
 
+        // Strip surrounding quotes from values
+        let value = if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+            &value[1..value.len() - 1]
+        } else {
+            value
+        };
+
         // Validate key: only allow alphanumeric and underscore
         if key.is_empty() || !key.chars().all(|c| c.is_alphanumeric() || c == '_') {
             continue; // Skip invalid keys

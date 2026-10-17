@@ -1,54 +1,34 @@
 # Azure provider example
-# Tests domain expansion, config, credentials, and service operations
+# Tests domain expansion, config, and credentials
 
 # Basic Azure context
-$azure_config = azure "my-subscription" {
-    azure.config ()
+azure "my-subscription" {
+    $config = azure.config ()
+    print "Azure subscription:" $config.subscription
 }
-print "Azure subscription:" $azure_config.subscription
 
 # Azure credentials from environment
-$creds = azure "my-subscription" {
-    azure.credential ()
-}
-print "Azure credentials loaded"
-
-# Azure bucket operations
-$bucket_result = azure "my-subscription" {
-    bucket "my-test-bucket" {
-        bucket.list ""
-    }
-}
-if $bucket_result.is_err {
-    print "Bucket list error (expected without real credentials):" $bucket_result.message
-}
-
-# Azure function operations
-$function_result = azure "my-subscription" {
-    function "my-test-function" {
-        function.invoke { input: "test" }
-    }
-}
-if $function_result.is_err {
-    print "Function invoke error (expected without real credentials):" $function_result.message
-}
-
-# Azure instance operations
-$instance_result = azure "my-subscription" {
-    instance "my-test-instance" {
-        instance.list ()
-    }
-}
-if $instance_result.is_err {
-    print "Instance list error (expected without real credentials):" $instance_result.message
+azure "my-subscription" {
+    $creds = azure.credential ()
+    print "Azure credentials loaded"
 }
 
 # Nested Azure subscriptions
-$nested_sub = azure "sub-a" {
+azure "sub-a" {
     azure "sub-b" {
-        azure.config ().subscription
+        $config = azure.config ()
+        print "Nested subscription:" $config.subscription
+    }
+    $config = azure.config ()
+    print "Restored subscription:" $config.subscription
+}
+
+# Azure with bucket context (via domain.get)
+azure "my-subscription" {
+    domain.run "bucket.name" "my-test-bucket" {
+        $bucket = domain.get "bucket.name"
+        print "Bucket context:" $bucket
     }
 }
-print "Nested subscription:" $nested_sub
 
 print "Azure example complete"

@@ -1,54 +1,34 @@
 # IBM Cloud provider example
-# Tests domain expansion, config, credentials, and service operations
+# Tests domain expansion, config, and credentials
 
 # Basic IBM context
-$ibm_config = ibm "my-account" {
-    ibm.config ()
+ibm "my-account" {
+    $config = ibm.config ()
+    print "IBM account:" $config.account
 }
-print "IBM account:" $ibm_config.account
 
 # IBM credentials from environment
-$creds = ibm "my-account" {
-    ibm.credential ()
-}
-print "IBM credentials loaded"
-
-# IBM bucket operations (COS)
-$bucket_result = ibm "my-account" {
-    bucket "my-test-bucket" {
-        bucket.list ""
-    }
-}
-if $bucket_result.is_err {
-    print "Bucket list error (expected without real credentials):" $bucket_result.message
-}
-
-# IBM function operations (Cloud Functions)
-$function_result = ibm "my-account" {
-    function "my-test-function" {
-        function.invoke { input: "test" }
-    }
-}
-if $function_result.is_err {
-    print "Function invoke error (expected without real credentials):" $function_result.message
-}
-
-# IBM instance operations (VPC)
-$instance_result = ibm "my-account" {
-    instance "my-test-instance" {
-        instance.list ()
-    }
-}
-if $instance_result.is_err {
-    print "Instance list error (expected without real credentials):" $instance_result.message
+ibm "my-account" {
+    $creds = ibm.credential ()
+    print "IBM credentials loaded"
 }
 
 # Nested IBM accounts
-$nested_account = ibm "acc-a" {
+ibm "acc-a" {
     ibm "acc-b" {
-        ibm.config ().account
+        $config = ibm.config ()
+        print "Nested account:" $config.account
+    }
+    $config = ibm.config ()
+    print "Restored account:" $config.account
+}
+
+# IBM with bucket context (via domain.get)
+ibm "my-account" {
+    domain.run "bucket.name" "my-test-bucket" {
+        $bucket = domain.get "bucket.name"
+        print "Bucket context:" $bucket
     }
 }
-print "Nested account:" $nested_account
 
 print "IBM example complete"

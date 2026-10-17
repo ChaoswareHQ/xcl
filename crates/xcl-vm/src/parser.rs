@@ -338,15 +338,34 @@ impl<'a> Parser<'a> {
         }
 
         self.expect(Token::Assign);
-        let value = Box::new(self.expr());
+        let value = self.expr();
+        let value = Box::new(self.bare_call_to_zero_arg(value));
         AstNode::Assign { span, name, value, type_annotation }
+    }
+
+    /// If an expression is a bare FieldAccess on a $-variable or a domain function
+    /// (starting with IdentPlain), convert it to a zero-arg Call.
+    /// This enables scripting-style syntax: `$r.is_ok` and `cloudflare.config`.
+    fn bare_call_to_zero_arg(&self, e: AstNode) -> AstNode {
+        if let AstNode::FieldAccess { target, .. } = &e {
+            if let AstNode::Ident { .. } = target.as_ref() {
+                let span = self.span();
+                return AstNode::Call {
+                    span,
+                    callee: Box::new(e),
+                    args: vec![],
+                };
+            }
+        }
+        e
     }
 
     fn ret(&mut self) -> AstNode {
         let span = self.span();
         self.consume();
         let value = if !self.at_eof() && !self.at(Token::Semi) && !self.at(Token::RBrace) {
-            Some(Box::new(self.expr()))
+            let e = self.expr();
+            Some(Box::new(self.bare_call_to_zero_arg(e)))
         } else { None };
         AstNode::Return { span, value }
     }
@@ -354,10 +373,21 @@ impl<'a> Parser<'a> {
     fn if_expr(&mut self) -> AstNode {
         let span = self.span();
         self.consume();
-        let condition = Box::new(self.expr());
+        let condition = self.expr();
+        // If the condition is a bare FieldAccess on a $-variable (like `$r.is_ok`),
+        // convert it to a zero-arg method call so `.is_ok` works as a method.
+        let condition = if let AstNode::FieldAccess { target, .. } = &condition {
+            if let AstNode::Ident { .. } = target.as_ref() {
+                AstNode::Call { span: self.span(), callee: Box::new(condition), args: vec![] }
+            } else {
+                condition
+            }
+        } else {
+            condition
+        };
         let then_branch = self.block();
         let else_branch = self.else_branch();
-        AstNode::If { span, condition, then_branch, else_branch }
+        AstNode::If { span, condition: Box::new(condition), then_branch, else_branch }
     }
 
     fn else_branch(&mut self) -> Option<Vec<AstNode>> {
@@ -373,7 +403,8 @@ impl<'a> Parser<'a> {
         self.consume();
         let variable = self.consume().text.trim_start_matches('$').to_string();
         self.expect(Token::In);
-        let iterable = Box::new(self.expr());
+        let iterable = self.expr();
+        let iterable = Box::new(self.bare_call_to_zero_arg(iterable));
         let body = self.block();
         AstNode::For { span, variable, iterable, body }
     }
@@ -381,7 +412,8 @@ impl<'a> Parser<'a> {
     fn while_expr(&mut self) -> AstNode {
         let span = self.span();
         self.consume();
-        let condition = Box::new(self.expr());
+        let condition = self.expr();
+        let condition = Box::new(self.bare_call_to_zero_arg(condition));
         let body = self.block();
         AstNode::While { span, condition, body }
     }
@@ -464,7 +496,7 @@ impl<'a> Parser<'a> {
         let e = self.expr();
         // $f $x call pattern: if expression is a plain $-ident (not FieldAccess)
         // and next token starts a positional arg, treat it as a call
-        if let AstNode::Ident { .. } = e
+        if let AstNode::Ident { .. } = &e
             && self.starts_positional_arg()
         {
             let callee = e;
@@ -474,6 +506,73 @@ impl<'a> Parser<'a> {
             }
             if self.at(Token::Semi) { self.consume(); }
             return AstNode::Call { span: self.span(), callee: Box::new(callee), args };
+        }
+        // Bare IdentPlain or FieldAccess starting with IdentPlain at a statement
+        // boundary is treated as a zero-argument call: `cloudflare.config` ==
+        // `cloudflare.config ()`. Only applies to domain functions (IdentPlain),
+        // NOT to $-variables (Ident) like `$m.key`.
+        // The expression must have NO Call nodes inside (e.g., `cloud.config ().region`
+        // is NOT a bare call because it contains a Call).
+        // We check the token stream: walk backwards from current position to find
+        // the first token of this expression and verify it's IdentPlain.
+        fn contains_call(node: &AstNode) -> bool {
+            match node {
+                AstNode::Call { .. } => true,
+                AstNode::FieldAccess { target, .. } => contains_call(target),
+                AstNode::Index { target, index, .. } => contains_call(target) || contains_call(index),
+                AstNode::Ident { .. } => false,
+                _ => true,
+            }
+        }
+        // Walk backwards through tokens to find the first token of this expression.
+        // Skip over Dot, OptionalDot, Ident, and IdentPlain tokens (part of FieldAccess chain).
+        let first_token_is_ident_plain = if self.pos > 0 {
+            let mut pos = self.pos - 1;
+            while matches!(self.tokens[pos].token,
+                Token::Dot | Token::OptionalDot | Token::Ident | Token::IdentPlain)
+                && pos > 0
+            {
+                pos -= 1;
+            }
+            matches!(self.tokens[pos].token, Token::IdentPlain)
+        } else {
+            false
+        };
+        // Bare domain function call: `cloudflare.config` at statement boundary
+        if matches!(&e, AstNode::Ident { .. } | AstNode::FieldAccess { .. })
+            && first_token_is_ident_plain
+            && !contains_call(&e)
+            && !self.starts_positional_arg()
+            && (self.at_eof() || self.at(Token::Semi) || self.at(Token::RBrace) || self.has_newline_before_current())
+        {
+            if self.at(Token::Semi) { self.consume(); }
+            return AstNode::Call { span: self.span(), callee: Box::new(e), args: vec![] };
+        }
+        // Bare method call on $-variable: `$r.is_ok` at statement boundary
+        // Walk backwards to check if the expression started with a $-variable (Token::Ident)
+        let first_token_is_dollar_ident = if self.pos > 0 {
+            let mut pos = self.pos - 1;
+            while matches!(self.tokens[pos].token,
+                Token::Dot | Token::OptionalDot | Token::Ident | Token::IdentPlain)
+                && pos > 0
+            {
+                pos -= 1;
+            }
+            matches!(self.tokens[pos].token, Token::Ident)
+        } else {
+            false
+        };
+        if let AstNode::FieldAccess { target, .. } = &e {
+            if let AstNode::Ident { .. } = target.as_ref() {
+                if first_token_is_dollar_ident
+                    && !contains_call(&e)
+                    && !self.starts_positional_arg()
+                    && (self.at_eof() || self.at(Token::Semi) || self.at(Token::RBrace) || self.has_newline_before_current())
+                {
+                    if self.at(Token::Semi) { self.consume(); }
+                    return AstNode::Call { span: self.span(), callee: Box::new(e), args: vec![] };
+                }
+            }
         }
         if self.at(Token::Semi) { self.consume(); }
         e
@@ -755,8 +854,35 @@ impl<'a> Parser<'a> {
                 && self.at(Token::Ident)
                 && matches!(self.tokens.get(self.pos + 1).map(|t| &t.token),
                     Some(Token::Dot) | Some(Token::LBracket));
-            if skip {
-                // Do nothing — $x.field will be consumed as a separate arg by the caller
+            // Skip { after FieldAccess on a $-variable when it's a block-lambda (not a dict).
+            // This prevents `if $x.field { }` from being misparsed as a call
+            // `if($x.field, { })`. Dict literals and domain functions (env.override, etc.)
+            // are allowed because their FieldAccess target starts with a plain identifier.
+            // Check the token stream: if the expression started with Token::Ident ($-var),
+            // skip the brace. If it started with Token::IdentPlain (domain function), allow it.
+            let skip_brace = if let AstNode::FieldAccess { target, .. } = &e {
+                if let AstNode::Ident { .. } = target.as_ref() {
+                    // Find the token that produced this ident - check if it was $-prefixed
+                    // by looking at the token just before the dot in the token stream
+                    let dot_pos = self.tokens.iter().rposition(|t| {
+                        matches!(t.token, Token::Dot | Token::OptionalDot)
+                            && t.byte_offset < self.tokens.get(self.pos - 1).map(|t| t.byte_offset).unwrap_or(0)
+                    });
+                    if let Some(dp) = dot_pos {
+                        let before_dot = dp.saturating_sub(1);
+                        let is_dollar_var = matches!(self.tokens.get(before_dot).map(|t| &t.token), Some(Token::Ident));
+                        is_dollar_var && self.at(Token::LBrace) && !self.lookahead_dict_literal()
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if skip || skip_brace {
+                // Do nothing — leave the token for the caller
             } else {
                 // If e is already a Call (from parenthesized args), merge additional args
                 let mut args: Vec<CallArg> = if let AstNode::Call { args, .. } = &e {

@@ -1,7 +1,13 @@
 //! Cloudflare Durable Objects — compute instance operations using unified `instance.*` naming.
+//!
+//! Uses the Cloudflare API (Bearer token auth) for Durable Objects operations:
+//! - List namespaces: `GET /client/v4/accounts/{account}/workers/durable_objects/namespaces`
+//! - Create namespace: `PUT /client/v4/accounts/{account}/workers/durable_objects/namespaces`
+
 use xcl_macros::xcl_fn;
 use xcl_vm::{Value, DomainCtx};
-use crate::core::result::err_result;
+use crate::core::result::{ok_result, err_result};
+use crate::net::tls::https_request;
 use std::collections::HashMap;
 
 #[xcl_fn(name = "instance", args = "name: str; f: any", ret = "any", summary = "Run a closure within a Cloudflare Durable Object context.")]
@@ -23,12 +29,89 @@ fn instance_config(ctx: &mut DomainCtx) -> Value {
     Value::from_map_boxed(config)
 }
 
-#[xcl_fn(name = "instance.create", args = "config: map", ret = "Result", summary = "Create a Cloudflare Durable Object.")]
-fn instance_create(_ctx: &mut DomainCtx) -> Value {
-    err_result("not_implemented", "Cloudflare Durable Objects not yet implemented", 0)
+/// Get Cloudflare credentials from context.
+fn get_cloudflare_credentials(ctx: &DomainCtx) -> Option<HashMap<String, Value>> {
+    ctx.get_context("cloudflare.credentials").and_then(|v| v.as_map().cloned())
 }
 
-#[xcl_fn(name = "instance.list", ret = "Result", summary = "List Cloudflare Durable Objects.")]
-fn instance_list(_ctx: &mut DomainCtx) -> Value {
-    err_result("not_implemented", "Cloudflare Durable Objects not yet implemented", 0)
+/// Get Cloudflare account from context.
+fn get_cloudflare_account(ctx: &DomainCtx) -> Option<String> {
+    ctx.get_context("cloudflare.account").and_then(|v| v.as_str().map(|s| s.to_string()))
+}
+
+/// Get API token from credentials.
+fn get_api_token(creds: &HashMap<String, Value>) -> Option<String> {
+    creds.get("api_token").and_then(|v| v.as_str().map(|s| s.to_string()))
+}
+
+/// Make an authenticated request to the Cloudflare API.
+fn cloudflare_request(
+    ctx: &DomainCtx,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> Result<(i64, HashMap<String, String>, String), String> {
+    let account = match get_cloudflare_account(ctx) {
+        Some(a) => a,
+        None => return Err("Missing cloudflare account context".to_string()),
+    };
+    let creds = match get_cloudflare_credentials(ctx) {
+        Some(c) => c,
+        None => return Err("Missing cloudflare credentials".to_string()),
+    };
+    let token = match get_api_token(&creds) {
+        Some(t) => t,
+        None => return Err("Missing CLOUDFLARE_API_TOKEN".to_string()),
+    };
+
+    let url = format!("https://api.cloudflare.com/client/v4/accounts/{}/{}", account, path);
+    let mut headers = HashMap::new();
+    headers.insert("Authorization".to_string(), format!("Bearer {}", token));
+    headers.insert("Content-Type".to_string(), "application/json".to_string());
+
+    https_request(method, &url, &headers, body)
+}
+
+#[xcl_fn(name = "instance.create", args = "config: map", ret = "Result", summary = "Create a Cloudflare Durable Object namespace.")]
+fn instance_create(ctx: &mut DomainCtx) -> Value {
+    let config = ctx.arg(0);
+    let name = match config.as_map() {
+        Some(m) => m.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+        None => "",
+    };
+
+    if name.is_empty() {
+        return err_result("missing_name", "Durable Object namespace name is required", 0);
+    }
+
+    let body = format!(r#"{{"name":"{}"}}"#, name);
+    match cloudflare_request(ctx, "PUT", "workers/durable_objects/namespaces", &body) {
+        Ok((_status, _headers, resp_body)) => ok_result(Value::from_str_boxed(resp_body)),
+        Err(e) => err_result("api_error", &e, 0),
+    }
+}
+
+#[xcl_fn(name = "instance.list", ret = "Result", summary = "List Cloudflare Durable Object namespaces.")]
+fn instance_list(ctx: &mut DomainCtx) -> Value {
+    match cloudflare_request(ctx, "GET", "workers/durable_objects/namespaces", "") {
+        Ok((_status, _headers, body)) => ok_result(Value::from_str_boxed(body)),
+        Err(e) => err_result("api_error", &e, 0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::evaluate_new;
+
+    #[test]
+    fn instance_create_missing_name() {
+        let result = evaluate_new(r#"instance.create {}"#);
+        assert_eq!(result.map_variant(), Some(xcl_vm::VARIANT_ERR));
+    }
+
+    #[test]
+    fn instance_list_missing_account() {
+        let result = evaluate_new(r#"instance.list ()"#);
+        assert_eq!(result.map_variant(), Some(xcl_vm::VARIANT_ERR));
+    }
 }
