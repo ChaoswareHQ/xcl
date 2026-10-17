@@ -4,7 +4,8 @@
 //! the most common opcodes: arithmetic, local variable access, and branching.
 //! It is designed to produce a clean flamegraph showing the VM dispatch loop.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use xcl_vm::{VM, evaluate};
 
 /// A single benchmark that mixes arithmetic, locals, and branching —
@@ -25,10 +26,7 @@ fn bench_flamegraph_workload(c: &mut Criterion) {
     let mut vm = VM::new();
     vm.register_all();
     c.bench_function("vm_dispatch_loop", |b| {
-        b.iter(|| {
-            let result = evaluate(black_box(source), black_box(&mut vm));
-            result
-        })
+        b.iter(|| evaluate(black_box(source), black_box(&mut vm)))
     });
 }
 

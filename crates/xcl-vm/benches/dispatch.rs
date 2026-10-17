@@ -3,7 +3,8 @@
 //! Each benchmark exercises a different set of opcodes to measure
 //! the hot paths in the interpreter.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use xcl_vm::{VM, evaluate};
 
 /// Tight arithmetic loop: exercises OP_ADD, OP_LOAD_LOCAL, OP_JUMP_IF_FALSE, OP_STORE_LOCAL
@@ -24,7 +25,9 @@ fn bench_arithmetic_loop(c: &mut Criterion) {
         b.iter(|| {
             let result = evaluate(black_box(source), black_box(&mut vm));
             #[cfg(feature = "opcode-stats")]
-            { vm.arena.reset(); }
+            {
+                vm.arena.reset();
+            }
             result
         })
     });
@@ -42,7 +45,9 @@ fn bench_function_calls(c: &mut Criterion) {
         b.iter(|| {
             let result = evaluate(black_box(source), black_box(&mut vm));
             #[cfg(feature = "opcode-stats")]
-            { vm.arena.reset(); }
+            {
+                vm.arena.reset();
+            }
             result
         })
     });
@@ -60,7 +65,9 @@ fn bench_closure_calls(c: &mut Criterion) {
         b.iter(|| {
             let result = evaluate(black_box(source), black_box(&mut vm));
             #[cfg(feature = "opcode-stats")]
-            { vm.arena.reset(); }
+            {
+                vm.arena.reset();
+            }
             result
         })
     });
@@ -89,7 +96,9 @@ fn bench_array_iteration(c: &mut Criterion) {
         b.iter(|| {
             let result = evaluate(black_box(source), black_box(&mut vm));
             #[cfg(feature = "opcode-stats")]
-            { vm.arena.reset(); }
+            {
+                vm.arena.reset();
+            }
             result
         })
     });
@@ -113,7 +122,9 @@ fn bench_range_loop(c: &mut Criterion) {
         b.iter(|| {
             let result = evaluate(black_box(source), black_box(&mut vm));
             #[cfg(feature = "opcode-stats")]
-            { vm.arena.reset(); }
+            {
+                vm.arena.reset();
+            }
             result
         })
     });
@@ -140,7 +151,9 @@ fn bench_dict_access(c: &mut Criterion) {
         b.iter(|| {
             let result = evaluate(black_box(source), black_box(&mut vm));
             #[cfg(feature = "opcode-stats")]
-            { vm.arena.reset(); }
+            {
+                vm.arena.reset();
+            }
             result
         })
     });
@@ -168,7 +181,9 @@ fn bench_branching(c: &mut Criterion) {
         b.iter(|| {
             let result = evaluate(black_box(source), black_box(&mut vm));
             #[cfg(feature = "opcode-stats")]
-            { vm.arena.reset(); }
+            {
+                vm.arena.reset();
+            }
             result
         })
     });
@@ -186,7 +201,9 @@ fn bench_nested_calls(c: &mut Criterion) {
         b.iter(|| {
             let result = evaluate(black_box(source), black_box(&mut vm));
             #[cfg(feature = "opcode-stats")]
-            { vm.arena.reset(); }
+            {
+                vm.arena.reset();
+            }
             result
         })
     });
@@ -212,7 +229,9 @@ fn bench_string_concat(c: &mut Criterion) {
         b.iter(|| {
             let result = evaluate(black_box(source), black_box(&mut vm));
             #[cfg(feature = "opcode-stats")]
-            { vm.arena.reset(); }
+            {
+                vm.arena.reset();
+            }
             result
         })
     });

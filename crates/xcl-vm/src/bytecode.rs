@@ -1,3 +1,54 @@
+//! Compact 64-bit bytecode instruction set, compiler, and peephole optimizer.
+//!
+//! # Overview
+//!
+//! The XCL bytecode system translates AST expressions into a high-density, cache-friendly
+//! stream of 64-bit instructions executed by the [`VM`](crate::vm::VM).
+//!
+//! # Instruction Encoding
+//!
+//! Every [`Instr`] is a single transparent 64-bit integer (`u64`) partitioned into four fields:
+//!
+//! ```text
+//!  63        56 55              40 39                              8 7        0
+//! +------------+------------------+---------------------------------+----------+
+//! |  c (8-bit) |    b (16-bit)    |           a (32-bit)            | op (8-bit|
+//! +------------+------------------+---------------------------------+----------+
+//! ```
+//!
+//! * **`op` (bits 0..8)**: 8-bit opcode identifying the instruction.
+//! * **`a` (bits 8..40)**: 32-bit primary operand (jump destination instruction pointer,
+//!   string pool index, wide operand table index, or local slot index).
+//! * **`b` (bits 40..56)**: 16-bit secondary operand (argument count, second local slot, or small immediate).
+//! * **`c` (bits 56..64)**: 8-bit auxiliary operand or configuration flag.
+//!
+//! # Superinstructions & Peephole Optimization
+//!
+//! The compiler includes an integrated peephole optimizer that fuses common instruction
+//! patterns into single superinstructions to eliminate stack traffic and branch penalties:
+//!
+//! * **Arithmetic fusion**: `LOAD_LOCAL $a; LOAD_LOCAL $b; ADD; STORE_LOCAL $c` is fused
+//!   into [`OP_ADD_LOCAL_LOCAL_STORE`](crate::bytecode::OP_ADD_LOCAL_LOCAL_STORE).
+//! * **Loop specialization**: Single-opcode numeric range loops use [`OP_FOR_NUMBER_LOOP`](crate::bytecode::OP_FOR_NUMBER_LOOP).
+//! * **Fused while branches**: [`OP_WHILE_LT_INT`](crate::bytecode::OP_WHILE_LT_INT) and [`OP_WHILE_LT_LOCAL`](crate::bytecode::OP_WHILE_LT_LOCAL) execute loop
+//!   comparisons and jumps in a single dispatch step.
+//!
+//! # Examples
+//!
+//! Compiling an AST into bytecode:
+//!
+//! ```
+//! use xcl_vm::lexer::lex;
+//! use xcl_vm::parser::parse;
+//! use xcl_vm::bytecode::{compile, OP_ADD};
+//!
+//! let tokens = lex("20 + 30", "<eval>");
+//! let ast = parse(&tokens, "20 + 30");
+//! let code = compile(&ast);
+//!
+//! assert!(!code.instructions.is_empty());
+//! ```
+
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 #[cfg(not(feature = "std"))]
@@ -7,199 +58,285 @@ use alloc::string::ToString;
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-#[cfg(not(feature = "std"))]
 use alloc::vec;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::sync::Arc;
 
-use crate::ast::{AstNode, BinaryOperator, UnaryOperator, TypeKind};
+use crate::ast::{AstNode, BinaryOperator, TypeKind, UnaryOperator};
 use crate::value::FuncValue;
 
-#[derive(Debug, Clone, Copy)]
+/// A 64-bit packed virtual machine instruction.
+///
+/// Encodes an 8-bit opcode, a 32-bit primary operand `a`, a 16-bit secondary operand `b`,
+/// and an 8-bit auxiliary operand `c` into a single machine word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Instr(pub u64);
 
 impl Instr {
-    #[inline(always)] pub const fn op(self) -> u8 { (self.0 & 0xFF) as u8 }
-    #[inline(always)] pub const fn a(self)  -> u32 { ((self.0 >> 8)  & 0xFFFF_FFFF) as u32 }
-    #[inline(always)] pub const fn b(self)  -> u16 { ((self.0 >> 40) & 0xFFFF) as u16 }
-    #[inline(always)] pub const fn c(self)  -> u8  { ((self.0 >> 56) & 0xFF) as u8 }
+    /// Extracts the 8-bit opcode (`bits 0..8`).
+    #[inline(always)]
+    pub const fn op(self) -> u8 {
+        (self.0 & 0xFF) as u8
+    }
 
+    /// Extracts the 32-bit primary operand `a` (`bits 8..40`).
+    #[inline(always)]
+    pub const fn a(self) -> u32 {
+        ((self.0 >> 8) & 0xFFFF_FFFF) as u32
+    }
+
+    /// Extracts the 16-bit secondary operand `b` (`bits 40..56`).
+    #[inline(always)]
+    pub const fn b(self) -> u16 {
+        ((self.0 >> 40) & 0xFFFF) as u16
+    }
+
+    /// Extracts the 8-bit auxiliary operand `c` (`bits 56..64`).
+    #[inline(always)]
+    pub const fn c(self) -> u8 {
+        ((self.0 >> 56) & 0xFF) as u8
+    }
+
+    /// Packs raw `op`, `a`, `b`, and `c` components into a 64-bit [`Instr`].
     #[inline(always)]
     pub const fn make(op: u8, a: u32, b: u16, c: u8) -> Self {
         Instr((op as u64) | ((a as u64) << 8) | ((b as u64) << 40) | ((c as u64) << 56))
     }
 
-    #[inline(always)] pub const fn none(op: u8)               -> Self { Self::make(op, 0, 0, 0) }
-    #[inline(always)] pub const fn a1(op: u8, a: u32)         -> Self { Self::make(op, a, 0, 0) }
-    #[inline(always)] pub const fn a2(op: u8, a: u32, b: u16) -> Self { Self::make(op, a, b, 0) }
+    /// Creates an instruction with no operands (`a = 0`, `b = 0`, `c = 0`).
+    #[inline(always)]
+    pub const fn none(op: u8) -> Self {
+        Self::make(op, 0, 0, 0)
+    }
+
+    /// Creates an instruction with a single 32-bit operand `a` (`b = 0`, `c = 0`).
+    #[inline(always)]
+    pub const fn a1(op: u8, a: u32) -> Self {
+        Self::make(op, a, 0, 0)
+    }
+
+    /// Creates an instruction with two operands `a` (32-bit) and `b` (16-bit) (`c = 0`).
+    #[inline(always)]
+    pub const fn a2(op: u8, a: u32, b: u16) -> Self {
+        Self::make(op, a, b, 0)
+    }
 }
 
-pub const OP_NOP:             u8 = 0;
-pub const OP_PUSH_NIL:        u8 = 1;
-pub const OP_PUSH_TRUE:       u8 = 2;
-pub const OP_PUSH_FALSE:      u8 = 3;
-pub const OP_PUSH_INT:        u8 = 4;
-pub const OP_PUSH_INT_WIDE:   u8 = 5;
-pub const OP_PUSH_FLOAT:      u8 = 6;
-pub const OP_PUSH_STR:        u8 = 7;
-pub const OP_LOAD_LOCAL:      u8 = 8;
-pub const OP_STORE_LOCAL:     u8 = 9;
-pub const OP_LOAD_GLOBAL:     u8 = 10;
-pub const OP_STORE_GLOBAL:    u8 = 11;
+/// No-operation opcode.
+pub const OP_NOP: u8 = 0;
+/// Pushes `nil` (`none`) onto the operand stack.
+pub const OP_PUSH_NIL: u8 = 1;
+/// Pushes boolean `true` onto the operand stack.
+pub const OP_PUSH_TRUE: u8 = 2;
+/// Pushes boolean `false` onto the operand stack.
+pub const OP_PUSH_FALSE: u8 = 3;
+/// Pushes a small integer constant encoded directly in operand `a`.
+pub const OP_PUSH_INT: u8 = 4;
+/// Pushes a 64-bit integer constant indexed from `wide_operands` by operand `a`.
+pub const OP_PUSH_INT_WIDE: u8 = 5;
+/// Pushes a 64-bit float constant indexed from `wide_operands` by operand `a`.
+pub const OP_PUSH_FLOAT: u8 = 6;
+/// Pushes an interned string indexed from `string_table` by operand `a`.
+pub const OP_PUSH_STR: u8 = 7;
+/// Loads a local variable from slot index `a` onto the stack.
+pub const OP_LOAD_LOCAL: u8 = 8;
+/// Pops a value from the stack and stores it into local slot index `a`.
+pub const OP_STORE_LOCAL: u8 = 9;
+/// Loads a global variable from slot index `a` onto the stack.
+pub const OP_LOAD_GLOBAL: u8 = 10;
+/// Pops a value from the stack and stores it into global slot index `a`.
+pub const OP_STORE_GLOBAL: u8 = 11;
 
-pub const OP_ADD:             u8 = 12;
-pub const OP_SUB:             u8 = 13;
-pub const OP_MUL:             u8 = 14;
-pub const OP_DIV:             u8 = 15;
-pub const OP_MOD:             u8 = 16;
-pub const OP_NEG:             u8 = 17;
+/// Pops two values, adds them, and pushes the result.
+pub const OP_ADD: u8 = 12;
+/// Pops two values, subtracts `top` from `second`, and pushes the result.
+pub const OP_SUB: u8 = 13;
+/// Pops two values, multiplies them, and pushes the result.
+pub const OP_MUL: u8 = 14;
+/// Pops two values, divides `second` by `top`, and pushes the result.
+pub const OP_DIV: u8 = 15;
+/// Pops two values, computes modulo remainder, and pushes the result.
+pub const OP_MOD: u8 = 16;
+/// Negates the value on the top of the stack.
+pub const OP_NEG: u8 = 17;
 
-pub const OP_EQ:              u8 = 18;
-pub const OP_NEQ:             u8 = 19;
-pub const OP_LT:              u8 = 20;
-pub const OP_GT:              u8 = 21;
-pub const OP_LE:              u8 = 22;
-pub const OP_GE:              u8 = 23;
-pub const OP_AND:             u8 = 24;
-pub const OP_OR:              u8 = 25;
-pub const OP_NOT:             u8 = 26;
-pub const OP_IN:              u8 = 27;
+/// Compares two top stack values for equality (`==`).
+pub const OP_EQ: u8 = 18;
+/// Compares two top stack values for inequality (`!=`).
+pub const OP_NEQ: u8 = 19;
+/// Tests if second stack value is less than top stack value (`<`).
+pub const OP_LT: u8 = 20;
+/// Tests if second stack value is greater than top stack value (`>`).
+pub const OP_GT: u8 = 21;
+/// Tests if second stack value is less than or equal to top stack value (`<=`).
+pub const OP_LE: u8 = 22;
+/// Tests if second stack value is greater than or equal to top stack value (`>=`).
+pub const OP_GE: u8 = 23;
+/// Logical AND of top two stack values.
+pub const OP_AND: u8 = 24;
+/// Logical OR of top two stack values.
+pub const OP_OR: u8 = 25;
+/// Logical inversion of top stack value (`!`).
+pub const OP_NOT: u8 = 26;
+/// Tests membership (`in`).
+pub const OP_IN: u8 = 27;
 
-pub const OP_JUMP:            u8 = 28;
-pub const OP_JUMP_IF_FALSE:   u8 = 29;
-pub const OP_JUMP_IF_NIL:     u8 = 30;
+/// Unconditional jump to instruction pointer address `a`.
+pub const OP_JUMP: u8 = 28;
+/// Conditional jump to address `a` if top of stack is falsy.
+pub const OP_JUMP_IF_FALSE: u8 = 29;
+/// Conditional jump to address `a` if top of stack is nil.
+pub const OP_JUMP_IF_NIL: u8 = 30;
 
-pub const OP_CALL:            u8 = 32;
-pub const OP_RETURN:          u8 = 33;
-pub const OP_HALT:            u8 = 34;
+/// Calls a function or closure. Operand `a` = argument count.
+pub const OP_CALL: u8 = 32;
+/// Returns from the current function call frame.
+pub const OP_RETURN: u8 = 33;
+/// Halts VM execution.
+pub const OP_HALT: u8 = 34;
 
-pub const OP_MAKE_ARRAY:      u8 = 35;
-pub const OP_MAKE_DICT:       u8 = 36;
-pub const OP_GET_INDEX:       u8 = 37;
-pub const OP_GET_FIELD:       u8 = 38;
-pub const OP_ARRAY_PUSH:      u8 = 39;
-pub const OP_LEN:             u8 = 41;
+/// Constructs an array from `a` elements on the stack.
+pub const OP_MAKE_ARRAY: u8 = 35;
+/// Constructs a dictionary map from `a` key-value pairs on the stack.
+pub const OP_MAKE_DICT: u8 = 36;
+/// Retrieves an element by indexing `target[index]`.
+pub const OP_GET_INDEX: u8 = 37;
+/// Accesses a field `target.field` using interned string index `a`.
+pub const OP_GET_FIELD: u8 = 38;
+/// Pushes an element onto an array.
+pub const OP_ARRAY_PUSH: u8 = 39;
+/// Computes the length of a string, array, or dictionary.
+pub const OP_LEN: u8 = 41;
 
-pub const OP_FOR_ITER_START:  u8 = 42;
-pub const OP_FOR_ITER_NEXT:   u8 = 43;
+/// Initializes iteration over an iterable collection.
+pub const OP_FOR_ITER_START: u8 = 42;
+/// Advances to the next item in an iterator.
+pub const OP_FOR_ITER_NEXT: u8 = 43;
+/// Initializes a numeric range loop.
 pub const OP_FOR_RANGE_START: u8 = 44;
-pub const OP_FOR_RANGE_NEXT:  u8 = 45;
+/// Advances to the next integer in a numeric range loop.
+pub const OP_FOR_RANGE_NEXT: u8 = 45;
 
-pub const OP_LOAD_LAMBDA:     u8 = 46;
+/// Loads a compiled lambda closure onto the stack. Operand `a` = closure index.
+pub const OP_LOAD_LAMBDA: u8 = 46;
 
-pub const OP_COALESCE:        u8 = 47;
+/// Null coalescing operator (`??`).
+pub const OP_COALESCE: u8 = 47;
 
-/// Type test: check if a value is of a given type (by tag field or type index)
-pub const OP_TYPE_TEST:         u8 = 52;
+/// Dynamic type test: checks if top of stack matches type index `a`.
+pub const OP_TYPE_TEST: u8 = 52;
 
+/// Fused instruction: loads two local variables sequentially (`locals[a]`, `locals[b]`).
 pub const OP_LOAD_LOCAL_LOAD_LOCAL: u8 = 60;
-pub const OP_ADD_LOCAL_LOCAL:       u8 = 61;
-pub const OP_SUB_LOCAL_LOCAL:       u8 = 62;
-pub const OP_LT_LOCAL_LOCAL:        u8 = 63;
-pub const OP_LOAD_LOCAL_PUSH_INT:   u8 = 64;
-pub const OP_LOAD_LOCAL_STORE_LOCAL:u8 = 65;
+/// Fused instruction: adds two local variables (`locals[a] + locals[b]`).
+pub const OP_ADD_LOCAL_LOCAL: u8 = 61;
+/// Fused instruction: subtracts two local variables (`locals[a] - locals[b]`).
+pub const OP_SUB_LOCAL_LOCAL: u8 = 62;
+/// Fused instruction: tests if `locals[a] < locals[b]`.
+pub const OP_LT_LOCAL_LOCAL: u8 = 63;
+/// Fused instruction: loads a local and pushes an integer constant.
+pub const OP_LOAD_LOCAL_PUSH_INT: u8 = 64;
+/// Fused instruction: copies `locals[a]` to `locals[b]`.
+pub const OP_LOAD_LOCAL_STORE_LOCAL: u8 = 65;
 
-/// Call a method on a value by looking up its type's domain.
-/// Stack: receiver, arg1, arg2, ... -> result
-/// Operand a = field name string index, b = arg count (excluding receiver)
+/// Calls a domain or native method on receiver with `b` arguments.
+///
+/// Stack layout: receiver, arg1, arg2, ... -> result.
+/// Operand `a` = method name string index in `string_table`, `b` = argument count.
 pub const OP_CALL_METHOD: u8 = 66;
 
-/// Integer-specialized arithmetic — bypasses Value type checking
-pub const OP_ADD_INT:       u8 = 70;
-pub const OP_SUB_INT:       u8 = 71;
-pub const OP_MUL_INT:       u8 = 72;
-pub const OP_LT_INT:        u8 = 73;
-pub const OP_GT_INT:        u8 = 74;
-pub const OP_EQ_INT:        u8 = 75;
+/// Specialized fast integer addition (bypasses type checking when types are proven integer).
+pub const OP_ADD_INT: u8 = 70;
+/// Specialized fast integer subtraction.
+pub const OP_SUB_INT: u8 = 71;
+/// Specialized fast integer multiplication.
+pub const OP_MUL_INT: u8 = 72;
+/// Specialized fast integer less-than comparison.
+pub const OP_LT_INT: u8 = 73;
+/// Specialized fast integer greater-than comparison.
+pub const OP_GT_INT: u8 = 74;
+/// Specialized fast integer equality comparison.
+pub const OP_EQ_INT: u8 = 75;
 
-/// Superinstructions for hot patterns
-pub const OP_INC_LOCAL:           u8 = 80;  /// $x = $x + 1
-pub const OP_DEC_LOCAL:           u8 = 81;  /// $x = $x - 1
-pub const OP_MUL_LOCAL_LOCAL:     u8 = 82;  /// $a * $b
-pub const OP_DIV_LOCAL_LOCAL:     u8 = 83;  /// $a / $b
-pub const OP_ADD_INT_STORE_LOCAL: u8 = 84;  /// $a = $b + c (a=dest, b=local, c=int)
-pub const OP_INC_LOCAL_INT:       u8 = 85;  /// $a = $a + c (a=local, c=int from b)
+/// Superinstruction: increments local variable in-place (`$x = $x + 1`).
+pub const OP_INC_LOCAL: u8 = 80;
+/// Superinstruction: decrements local variable in-place (`$x = $x - 1`).
+pub const OP_DEC_LOCAL: u8 = 81;
+/// Superinstruction: multiplies two locals (`$a * $b`).
+pub const OP_MUL_LOCAL_LOCAL: u8 = 82;
+/// Superinstruction: divides two locals (`$a / $b`).
+pub const OP_DIV_LOCAL_LOCAL: u8 = 83;
+/// Superinstruction: adds local to integer constant and stores (`locals[a] = locals[b] + c`).
+pub const OP_ADD_INT_STORE_LOCAL: u8 = 84;
+/// Superinstruction: adds integer constant to local in-place (`locals[a] = locals[a] + b`).
+pub const OP_INC_LOCAL_INT: u8 = 85;
 
-/// Single-opcode numeric for-loop (like Luau's FORNLOOP)
-/// Operand a = local slot index, b = jump offset (negative = backward), c = step (default 1)
-/// This replaces: FOR_RANGE_NEXT + STORE_LOCAL + body + JUMP
-pub const OP_FOR_NUMBER_LOOP:     u8 = 90;
+/// Single-opcode numeric for-loop iterator.
+///
+/// Operand `a` = local slot index, `b` = backward jump offset, `c` = step increment.
+pub const OP_FOR_NUMBER_LOOP: u8 = 90;
 
-/// Fused: load local + add int constant + store back (for $x = $x + c pattern)
-/// Operand a = local slot, b = int constant
-pub const OP_ADD_INT_LOCAL:       u8 = 91;
+/// Fused: load local, add integer constant, store back (`$x = $x + c`).
+pub const OP_ADD_INT_LOCAL: u8 = 91;
+/// Fused: load two locals, add, store to first (`$a = $a + $b`).
+pub const OP_ADD_LOCAL_STORE: u8 = 92;
+/// Fused: load local, sub integer constant, store back (`$x = $x - c`).
+pub const OP_SUB_INT_LOCAL: u8 = 93;
+/// Fused: load local, mul integer constant, store back (`$x = $x * c`).
+pub const OP_MUL_INT_LOCAL: u8 = 94;
 
-/// Fused: load two locals + add + store to first (for $a = $a + $b pattern)
-/// Operand a = dest slot, b = src slot
-pub const OP_ADD_LOCAL_STORE:     u8 = 92;
-
-/// Fused: load local + sub int constant + store back
-/// Operand a = local slot, b = int constant
-pub const OP_SUB_INT_LOCAL:       u8 = 93;
-
-/// Fused: load local + mul int constant + store back
-/// Operand a = local slot, b = int constant
-pub const OP_MUL_INT_LOCAL:       u8 = 94;
-
-/// Fused while-loop condition + jump: while $a < b { ... }
-/// Operand a = local slot, b = int constant to compare against
-/// If locals[a] < b, continue (Action::Next), else jump past body
-/// The body follows, ending with OP_JUMP back to this instruction
-pub const OP_WHILE_LT_INT:        u8 = 95;
-
-/// Fused: load local + mul local + store back (for $zr = $zr * $zr pattern)
-/// Operand a = dest slot, b = src slot
-pub const OP_MUL_LOCAL_STORE:     u8 = 96;
-
-/// Fused: load local + div local + store back (for $a = $a / $b pattern)
-/// Operand a = dest slot, b = src slot
-pub const OP_DIV_LOCAL_STORE:     u8 = 97;
-
-/// Fused: load local + sub local + store back (for $a = $a - $b pattern)
-/// Operand a = dest slot, b = src slot
-pub const OP_SUB_LOCAL_STORE:     u8 = 98;
-
-/// Fused: load local + add local + store to third (for $c = $a + $b pattern)
-/// Operand a = dest slot, b = src2 slot, c = src1 slot
+/// Fused while-loop condition and conditional jump (`while $a < b`).
+pub const OP_WHILE_LT_INT: u8 = 95;
+/// Fused: load local, mul local, store back (`$a = $a * $b`).
+pub const OP_MUL_LOCAL_STORE: u8 = 96;
+/// Fused: load local, div local, store back (`$a = $a / $b`).
+pub const OP_DIV_LOCAL_STORE: u8 = 97;
+/// Fused: load local, sub local, store back (`$a = $a - $b`).
+pub const OP_SUB_LOCAL_STORE: u8 = 98;
+/// Fused: load local, add local, store to third (`$c = $a + $b`).
 pub const OP_ADD_LOCAL_LOCAL_STORE: u8 = 99;
-
-/// Fused: load local + mul local + store to third (for $c = $a * $b pattern)
-/// Operand a = dest slot, b = src2 slot, c = src1 slot
+/// Fused: load local, mul local, store to third (`$c = $a * $b`).
 pub const OP_MUL_LOCAL_LOCAL_STORE: u8 = 100;
-
-/// Fused: load local + sub local + store to third (for $c = $a - $b pattern)
-/// Operand a = dest slot, b = src2 slot, c = src1 slot
+/// Fused: load local, sub local, store to third (`$c = $a - $b`).
 pub const OP_SUB_LOCAL_LOCAL_STORE: u8 = 101;
-
-/// Fused: load local + div local + store to third (for $c = $a / $b pattern)
-/// Operand a = dest slot, b = src2 slot, c = src1 slot
+/// Fused: load local, div local, store to third (`$c = $a / $b`).
 pub const OP_DIV_LOCAL_LOCAL_STORE: u8 = 102;
-
-/// Fused while-loop condition + jump: while $a < $b { ... } (both locals)
-/// Operand a = local slot (left), b = local slot (right), c = exit_wide_idx
+/// Fused while-loop condition and conditional jump comparing two locals (`while $a < $b`).
 pub const OP_WHILE_LT_LOCAL: u8 = 103;
 
+/// Compiled XCL bytecode unit ready for execution by the VM runtime.
+///
+/// Stores immutable instruction sequences, constant tables, interned identifier strings,
+/// and function metadata.
 #[derive(Debug, Clone)]
 pub struct Bytecode {
-    pub instructions:  Arc<[Instr]>,
+    /// Linear sequence of compiled 64-bit bytecode instructions.
+    pub instructions: Arc<[Instr]>,
+    /// Table of 64-bit wide numeric operands (large integers and IEEE-754 floats).
     pub wide_operands: Arc<[i64]>,
-    pub string_table:  Arc<[Box<str>]>,
-    pub local_names:   Arc<[Box<str>]>,
-    pub global_names:  Arc<[Box<str>]>,
+    /// Interned string literals and member/method names.
+    pub string_table: Arc<[Box<str>]>,
+    /// Local variable names mapped to slot indices.
+    pub local_names: Arc<[Box<str>]>,
+    /// Global variable names mapped to slot indices.
+    pub global_names: Arc<[Box<str>]>,
+    /// User-defined top-level function declarations.
     pub user_functions: Vec<(Box<str>, FuncValue)>,
-    pub closures:      Vec<FuncValue>,
+    /// Compiled nested closures and lambda bodies.
+    pub closures: Vec<FuncValue>,
 }
 
 struct Compiler {
-    code:      Vec<Instr>,
-    wide:      Vec<i64>,
-    strings:   Vec<Box<str>>,
-    locals:    Vec<Box<str>>,
-    globals:   Vec<Box<str>>,
+    code: Vec<Instr>,
+    wide: Vec<i64>,
+    strings: Vec<Box<str>>,
+    locals: Vec<Box<str>>,
+    globals: Vec<Box<str>>,
     functions: Vec<(Box<str>, FuncValue)>,
-    closures:  Vec<FuncValue>,
+    closures: Vec<FuncValue>,
 }
 
 impl Compiler {
@@ -215,8 +352,14 @@ impl Compiler {
         }
     }
 
-    #[inline(always)] fn emit(&mut self, i: Instr) { self.code.push(i); }
-    #[inline(always)] fn ip(&self) -> u32 { self.code.len() as u32 }
+    #[inline(always)]
+    fn emit(&mut self, i: Instr) {
+        self.code.push(i);
+    }
+    #[inline(always)]
+    fn ip(&self) -> u32 {
+        self.code.len() as u32
+    }
 
     fn patch_jump(&mut self, at: u32, target: u32) {
         let i = &mut self.code[at as usize];
@@ -225,7 +368,9 @@ impl Compiler {
 
     #[inline]
     fn intern(&mut self, s: &str) -> u32 {
-        if let Some(i) = self.strings.iter().position(|x| &**x == s) { return i as u32; }
+        if let Some(i) = self.strings.iter().position(|x| &**x == s) {
+            return i as u32;
+        }
         let i = self.strings.len() as u32;
         self.strings.push(s.into());
         i
@@ -233,7 +378,9 @@ impl Compiler {
 
     #[inline]
     fn local(&mut self, name: &str) -> u32 {
-        if let Some(i) = self.locals.iter().position(|x| &**x == name) { return i as u32; }
+        if let Some(i) = self.locals.iter().position(|x| &**x == name) {
+            return i as u32;
+        }
         let i = self.locals.len() as u32;
         self.locals.push(name.into());
         i
@@ -241,7 +388,9 @@ impl Compiler {
 
     #[inline]
     fn global(&mut self, name: &str) -> u32 {
-        if let Some(i) = self.globals.iter().position(|x| &**x == name) { return i as u32; }
+        if let Some(i) = self.globals.iter().position(|x| &**x == name) {
+            return i as u32;
+        }
         let i = self.globals.len() as u32;
         self.globals.push(name.into());
         i
@@ -267,7 +416,12 @@ impl Compiler {
     ///   SUB_LL_ST(temp1, temp1, temp2)
     ///   ADD_LL_ST(zr, temp1, cr)
     fn try_emit_binary_fused(&mut self, dest_slot: u32, node: &AstNode) -> bool {
-        let AstNode::BinaryOp { left, op, right, .. } = node else { return false };
+        let AstNode::BinaryOp {
+            left, op, right, ..
+        } = node
+        else {
+            return false;
+        };
 
         // Case 1: $dest = $dest op $b (simple self-assignment)
         if let AstNode::Ident { name, .. } = left.as_ref() {
@@ -302,8 +456,8 @@ impl Compiler {
         }
 
         // Case 2: $dest = $a op $b (both distinct locals)
-        if let (AstNode::Ident { name: ln, .. }, AstNode::Ident { name: rn, .. })
-            = (left.as_ref(), right.as_ref())
+        if let (AstNode::Ident { name: ln, .. }, AstNode::Ident { name: rn, .. }) =
+            (left.as_ref(), right.as_ref())
         {
             let lslot = self.local(ln);
             let rslot = self.local(rn);
@@ -324,10 +478,16 @@ impl Compiler {
 
         // Case 3: Nested binary — recursively emit left and right into temps, then combine
         // This handles `$zr = $zr*$zr - $zi*$zi + $cr`
-        if let BinaryOperator::Add | BinaryOperator::Sub | BinaryOperator::Mul | BinaryOperator::Div = op {
+        if let BinaryOperator::Add
+        | BinaryOperator::Sub
+        | BinaryOperator::Mul
+        | BinaryOperator::Div = op
+        {
             // Check if both sides are simple (ident or int) or nested binary
-            let left_is_simple = matches!(left.as_ref(), AstNode::Ident { .. } | AstNode::Int { .. });
-            let right_is_simple = matches!(right.as_ref(), AstNode::Ident { .. } | AstNode::Int { .. });
+            let left_is_simple =
+                matches!(left.as_ref(), AstNode::Ident { .. } | AstNode::Int { .. });
+            let right_is_simple =
+                matches!(right.as_ref(), AstNode::Ident { .. } | AstNode::Int { .. });
 
             if left_is_simple && right_is_simple {
                 // Already handled by Case 1 and 2 above
@@ -365,7 +525,9 @@ impl Compiler {
             }
         }
         // Fallback: two consecutive LOAD_LOCAL instructions
-        if self.code.len() < 2 { return false; }
+        if self.code.len() < 2 {
+            return false;
+        }
         let l2 = self.code[self.code.len() - 1].op();
         let l1 = self.code[self.code.len() - 2].op();
         if l1 == OP_LOAD_LOCAL && l2 == OP_LOAD_LOCAL {
@@ -389,7 +551,9 @@ impl Compiler {
             }
         }
         // Fallback: two consecutive LOAD_LOCAL instructions
-        if self.code.len() < 2 { return false; }
+        if self.code.len() < 2 {
+            return false;
+        }
         let l2 = self.code[self.code.len() - 1].op();
         let l1 = self.code[self.code.len() - 2].op();
         if l1 == OP_LOAD_LOCAL && l2 == OP_LOAD_LOCAL {
@@ -403,13 +567,15 @@ impl Compiler {
     }
 
     fn compile(&mut self, ast: &[AstNode]) -> Bytecode {
-        for n in ast { self.node(n); }
+        for n in ast {
+            self.node(n);
+        }
         self.emit(Instr::none(OP_HALT));
-        
+
         // Run peephole optimizer to fuse common patterns
         let mut code: Vec<Instr> = core::mem::take(&mut self.code);
         peephole_optimize_once(&mut code, &self.wide);
-        
+
         Bytecode {
             instructions: code.into(),
             wide_operands: core::mem::take(&mut self.wide).into(),
@@ -433,8 +599,14 @@ impl Compiler {
                     }
                 }
                 // Try to fuse hot patterns: $x = $x + 1, $x = $x - 1, $x = $x + c, $a = $a + $b
-                if let AstNode::BinaryOp { left, op, right, .. } = value.as_ref() {
-                    if let AstNode::Ident { name: left_name, .. } = left.as_ref() {
+                if let AstNode::BinaryOp {
+                    left, op, right, ..
+                } = value.as_ref()
+                {
+                    if let AstNode::Ident {
+                        name: left_name, ..
+                    } = left.as_ref()
+                    {
                         if left_name == name {
                             // $x = $x op something
                             match op {
@@ -445,12 +617,24 @@ impl Compiler {
                                         return;
                                     } else if let AstNode::Int { value: c, .. } = right.as_ref() {
                                         // $x = $x + c → OP_INC_LOCAL_INT
-                                        self.emit(Instr::make(OP_INC_LOCAL_INT, slot, *c as u16, 0));
+                                        self.emit(Instr::make(
+                                            OP_INC_LOCAL_INT,
+                                            slot,
+                                            *c as u16,
+                                            0,
+                                        ));
                                         return;
-                                    } else if let AstNode::Ident { name: right_name, .. } = right.as_ref() {
+                                    } else if let AstNode::Ident {
+                                        name: right_name, ..
+                                    } = right.as_ref()
+                                    {
                                         // $x = $x + $y → OP_ADD_LOCAL_STORE (direct local-to-local)
                                         let right_slot = self.local(right_name);
-                                        self.emit(Instr::a2(OP_ADD_LOCAL_STORE, slot, right_slot as u16));
+                                        self.emit(Instr::a2(
+                                            OP_ADD_LOCAL_STORE,
+                                            slot,
+                                            right_slot as u16,
+                                        ));
                                         return;
                                     }
                                 }
@@ -459,10 +643,17 @@ impl Compiler {
                                         // $x = $x - 1 → OP_DEC_LOCAL
                                         self.emit(Instr::a1(OP_DEC_LOCAL, slot));
                                         return;
-                                    } else if let AstNode::Ident { name: right_name, .. } = right.as_ref() {
+                                    } else if let AstNode::Ident {
+                                        name: right_name, ..
+                                    } = right.as_ref()
+                                    {
                                         // $x = $x - $y → OP_SUB_LOCAL_STORE
                                         let right_slot = self.local(right_name);
-                                        self.emit(Instr::a2(OP_SUB_LOCAL_STORE, slot, right_slot as u16));
+                                        self.emit(Instr::a2(
+                                            OP_SUB_LOCAL_STORE,
+                                            slot,
+                                            right_slot as u16,
+                                        ));
                                         return;
                                     }
                                 }
@@ -471,10 +662,17 @@ impl Compiler {
                                         // $x = $x * c → OP_MUL_INT_LOCAL
                                         self.emit(Instr::a2(OP_MUL_INT_LOCAL, slot, *c as u16));
                                         return;
-                                    } else if let AstNode::Ident { name: right_name, .. } = right.as_ref() {
+                                    } else if let AstNode::Ident {
+                                        name: right_name, ..
+                                    } = right.as_ref()
+                                    {
                                         // $x = $x * $y → OP_MUL_LOCAL_STORE
                                         let right_slot = self.local(right_name);
-                                        self.emit(Instr::a2(OP_MUL_LOCAL_STORE, slot, right_slot as u16));
+                                        self.emit(Instr::a2(
+                                            OP_MUL_LOCAL_STORE,
+                                            slot,
+                                            right_slot as u16,
+                                        ));
                                         return;
                                     }
                                 }
@@ -489,8 +687,8 @@ impl Compiler {
                         }
                     }
                     // NEW: $z = $a op $b (both operands are distinct locals)
-                    if let (AstNode::Ident { name: ln, .. }, AstNode::Ident { name: rn, .. })
-                        = (left.as_ref(), right.as_ref())
+                    if let (AstNode::Ident { name: ln, .. }, AstNode::Ident { name: rn, .. }) =
+                        (left.as_ref(), right.as_ref())
                     {
                         let lslot = self.local(ln);
                         let rslot = self.local(rn);
@@ -513,23 +711,35 @@ impl Compiler {
                 self.emit(Instr::a1(OP_STORE_LOCAL, slot));
             }
             AstNode::Return { value, .. } => {
-                if let Some(v) = value { self.node(v); }
-                else { self.emit(Instr::none(OP_PUSH_NIL)); }
+                if let Some(v) = value {
+                    self.node(v);
+                } else {
+                    self.emit(Instr::none(OP_PUSH_NIL));
+                }
                 self.emit(Instr::none(OP_RETURN));
             }
             AstNode::Break { .. } | AstNode::Continue { .. } => {}
 
-            AstNode::If { condition, then_branch, else_branch, .. } => {
+            AstNode::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 self.node(condition);
                 let j = self.ip();
                 self.emit(Instr::a1(OP_JUMP_IF_FALSE, 0));
-                for s in then_branch { self.node(s); }
+                for s in then_branch {
+                    self.node(s);
+                }
                 if let Some(e) = else_branch {
                     let j2 = self.ip();
                     self.emit(Instr::a1(OP_JUMP, 0));
                     let t = self.ip();
                     self.patch_jump(j, t);
-                    for s in e { self.node(s); }
+                    for s in e {
+                        self.node(s);
+                    }
                     let end = self.ip();
                     self.patch_jump(j2, end);
                 } else {
@@ -538,7 +748,12 @@ impl Compiler {
                 }
             }
 
-            AstNode::For { variable, iterable, body, .. } => {
+            AstNode::For {
+                variable,
+                iterable,
+                body,
+                ..
+            } => {
                 if let AstNode::Range { start, end, .. } = iterable.as_ref() {
                     // Check if start and end are integer constants — if so, use OP_FOR_NUMBER_LOOP
                     let start_val = match start.as_ref().map(|n| n.as_ref()) {
@@ -562,22 +777,32 @@ impl Compiler {
                         let a_combined = var << 16 | (start_wide & 0xFFFF);
                         self.emit(Instr::a2(OP_FOR_NUMBER_LOOP, a_combined, end_wide as u16));
                         let loop_start = self.ip();
-                        for s in body { self.node(s); }
+                        for s in body {
+                            self.node(s);
+                        }
                         // Jump back to FOR_NUMBER_LOOP
                         self.emit(Instr::a1(OP_JUMP, loop_start));
                     } else {
                         // Fallback: use FOR_RANGE_START/NEXT for non-constant ranges
-                        if let Some(s) = start { self.node(s); }
-                        else { self.emit(Instr::a1(OP_PUSH_INT, 0)); }
-                        if let Some(e) = end { self.node(e); }
-                        else { self.emit(Instr::a1(OP_PUSH_INT, 0)); }
+                        if let Some(s) = start {
+                            self.node(s);
+                        } else {
+                            self.emit(Instr::a1(OP_PUSH_INT, 0));
+                        }
+                        if let Some(e) = end {
+                            self.node(e);
+                        } else {
+                            self.emit(Instr::a1(OP_PUSH_INT, 0));
+                        }
                         self.emit(Instr::none(OP_FOR_RANGE_START));
                         let start_ip = self.ip();
                         let next = self.ip();
                         self.emit(Instr::a1(OP_FOR_RANGE_NEXT, 0));
                         let var = self.local(variable);
                         self.emit(Instr::a1(OP_STORE_LOCAL, var));
-                        for s in body { self.node(s); }
+                        for s in body {
+                            self.node(s);
+                        }
                         self.emit(Instr::a1(OP_JUMP, start_ip));
                         let end = self.ip();
                         self.patch_jump(next, end);
@@ -590,36 +815,65 @@ impl Compiler {
                     self.emit(Instr::a1(OP_FOR_ITER_NEXT, 0));
                     let var = self.local(variable);
                     self.emit(Instr::a1(OP_STORE_LOCAL, var));
-                    for s in body { self.node(s); }
+                    for s in body {
+                        self.node(s);
+                    }
                     self.emit(Instr::a1(OP_JUMP, start_ip));
                     let end = self.ip();
                     self.patch_jump(next, end);
                 }
             }
 
-            AstNode::While { condition, body, .. } => {
+            AstNode::While {
+                condition, body, ..
+            } => {
                 // Try to fuse: while $i < N { ... } → OP_WHILE_LT_INT
                 // Or: while $a < $b { ... } → OP_WHILE_LT_LOCAL
                 match condition.as_ref() {
-                    AstNode::BinaryOp { left, op: BinaryOperator::Lt, right, .. } => {
-                        if let AstNode::Ident { name: left_name, .. } = left.as_ref() {
+                    AstNode::BinaryOp {
+                        left,
+                        op: BinaryOperator::Lt,
+                        right,
+                        ..
+                    } => {
+                        if let AstNode::Ident {
+                            name: left_name, ..
+                        } = left.as_ref()
+                        {
                             if let AstNode::Int { value: limit, .. } = right.as_ref() {
                                 let slot = self.local(left_name);
                                 let exit_wide = self.wide(0);
                                 let loop_start = self.ip();
-                                self.emit(Instr::make(OP_WHILE_LT_INT, slot, *limit as u16, exit_wide as u8));
-                                for s in body { self.node(s); }
+                                self.emit(Instr::make(
+                                    OP_WHILE_LT_INT,
+                                    slot,
+                                    *limit as u16,
+                                    exit_wide as u8,
+                                ));
+                                for s in body {
+                                    self.node(s);
+                                }
                                 self.emit(Instr::a1(OP_JUMP, loop_start));
                                 let exit_ip = self.ip();
                                 self.wide[exit_wide as usize] = exit_ip as i64;
                                 return;
-                            } else if let AstNode::Ident { name: right_name, .. } = right.as_ref() {
+                            } else if let AstNode::Ident {
+                                name: right_name, ..
+                            } = right.as_ref()
+                            {
                                 let left_slot = self.local(left_name);
                                 let right_slot = self.local(right_name);
                                 let exit_wide = self.wide(0);
                                 let loop_start = self.ip();
-                                self.emit(Instr::make(OP_WHILE_LT_LOCAL, left_slot, right_slot as u16, exit_wide as u8));
-                                for s in body { self.node(s); }
+                                self.emit(Instr::make(
+                                    OP_WHILE_LT_LOCAL,
+                                    left_slot,
+                                    right_slot as u16,
+                                    exit_wide as u8,
+                                ));
+                                for s in body {
+                                    self.node(s);
+                                }
                                 self.emit(Instr::a1(OP_JUMP, loop_start));
                                 let exit_ip = self.ip();
                                 self.wide[exit_wide as usize] = exit_ip as i64;
@@ -635,16 +889,24 @@ impl Compiler {
                 self.node(condition);
                 let j = self.ip();
                 self.emit(Instr::a1(OP_JUMP_IF_FALSE, 0));
-                for s in body { self.node(s); }
+                for s in body {
+                    self.node(s);
+                }
                 self.emit(Instr::a1(OP_JUMP, start));
                 let end = self.ip();
                 self.patch_jump(j, end);
             }
 
-            AstNode::FunctionDef { body, name, params, .. } => {
+            AstNode::FunctionDef {
+                body, name, params, ..
+            } => {
                 let mut sub = Compiler::new();
-                for p in params { sub.local(&p.name); }
-                for s in body { sub.node(s); }
+                for p in params {
+                    sub.local(&p.name);
+                }
+                for s in body {
+                    sub.node(s);
+                }
                 sub.emit(Instr::none(OP_RETURN));
                 sub.emit(Instr::none(OP_HALT));
 
@@ -679,40 +941,65 @@ impl Compiler {
                         let method_name = parts.last().copied().unwrap_or(&name);
                         let field_idx = self.intern(method_name);
                         // Load the receiver (the local variable)
-                        if let Some(slot) = self.locals.iter().position(|n| n.as_ref() == base_unprefixed).map(|i| i as u32) {
+                        if let Some(slot) = self
+                            .locals
+                            .iter()
+                            .position(|n| n.as_ref() == base_unprefixed)
+                            .map(|i| i as u32)
+                        {
                             self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
                         }
                         // Push args
-                        for a in args { self.node(&a.value); }
+                        for a in args {
+                            self.node(&a.value);
+                        }
                         self.emit(Instr::a2(OP_CALL_METHOD, field_idx, args.len() as u16));
                     } else if is_local && parts.len() == 1 {
                         // Single-part local variable call: $f() or $f arg
-                        if let Some(slot) = self.locals.iter().position(|n| **n == *base).map(|i| i as u32) {
+                        if let Some(slot) = self
+                            .locals
+                            .iter()
+                            .position(|n| **n == *base)
+                            .map(|i| i as u32)
+                        {
                             self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
                         }
-                        for a in args { self.node(&a.value); }
+                        for a in args {
+                            self.node(&a.value);
+                        }
                         self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
                     } else {
                         // It's a domain call: net.tcp.connect or io.read
                         let i = self.intern(&name);
                         self.emit(Instr::a1(OP_PUSH_STR, i));
-                        for a in args { self.node(&a.value); }
+                        for a in args {
+                            self.node(&a.value);
+                        }
                         self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
                     }
                 } else if let AstNode::Ident { name, .. } = callee.as_ref() {
                     // If the name was originally a $-prefixed variable, load from local
                     // Otherwise push the name string for global/builtin lookup
-                    if let Some(slot) = self.locals.iter().position(|n| **n == *name).map(|i| i as u32) {
+                    if let Some(slot) = self
+                        .locals
+                        .iter()
+                        .position(|n| **n == *name)
+                        .map(|i| i as u32)
+                    {
                         self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
                     } else {
                         let i = self.intern(name);
                         self.emit(Instr::a1(OP_PUSH_STR, i));
                     }
-                    for a in args { self.node(&a.value); }
+                    for a in args {
+                        self.node(&a.value);
+                    }
                     self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
                 } else {
                     self.node(callee);
-                    for a in args { self.node(&a.value); }
+                    for a in args {
+                        self.node(&a.value);
+                    }
                     self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
                 }
             }
@@ -734,7 +1021,11 @@ impl Compiler {
                 self.emit(Instr::a1(OP_PUSH_STR, i));
             }
             AstNode::Bool { value, .. } => {
-                self.emit(Instr::none(if *value { OP_PUSH_TRUE } else { OP_PUSH_FALSE }));
+                self.emit(Instr::none(if *value {
+                    OP_PUSH_TRUE
+                } else {
+                    OP_PUSH_FALSE
+                }));
             }
             AstNode::Nil { .. } => self.emit(Instr::none(OP_PUSH_NIL)),
 
@@ -751,7 +1042,9 @@ impl Compiler {
                 }
             }
 
-            AstNode::BinaryOp { left, op, right, .. } => {
+            AstNode::BinaryOp {
+                left, op, right, ..
+            } => {
                 self.node(left);
                 self.node(right);
                 // Try superinstructions AFTER emitting operands
@@ -808,7 +1101,9 @@ impl Compiler {
             }
 
             AstNode::ArrayLit { elements, .. } => {
-                for e in elements { self.node(e); }
+                for e in elements {
+                    self.node(e);
+                }
                 self.emit(Instr::a1(OP_MAKE_ARRAY, elements.len() as u32));
             }
 
@@ -821,7 +1116,11 @@ impl Compiler {
                 self.emit(Instr::a1(OP_MAKE_DICT, entries.len() as u32));
             }
 
-            AstNode::Block { statements, .. } => for s in statements { self.node(s); },
+            AstNode::Block { statements, .. } => {
+                for s in statements {
+                    self.node(s);
+                }
+            }
 
             AstNode::Index { target, index, .. } => {
                 self.node(target);
@@ -838,18 +1137,33 @@ impl Compiler {
             AstNode::Range { start, end, .. } => {
                 let i = self.intern("range");
                 self.emit(Instr::a1(OP_PUSH_STR, i));
-                if let Some(s) = start { self.node(s); } else { self.emit(Instr::none(OP_PUSH_NIL)); }
-                if let Some(e) = end { self.node(e); } else { self.emit(Instr::none(OP_PUSH_NIL)); }
+                if let Some(s) = start {
+                    self.node(s);
+                } else {
+                    self.emit(Instr::none(OP_PUSH_NIL));
+                }
+                if let Some(e) = end {
+                    self.node(e);
+                } else {
+                    self.emit(Instr::none(OP_PUSH_NIL));
+                }
                 self.emit(Instr::a2(OP_CALL, 2, 0));
             }
 
-            AstNode::Lambda { params, body, implicit_it, .. } => {
+            AstNode::Lambda {
+                params,
+                body,
+                implicit_it,
+                ..
+            } => {
                 let mut sub = Compiler::new();
                 // If implicit_it is true, add "it" as the first parameter
                 if *implicit_it {
                     sub.local("it");
                 }
-                for p in params { sub.local(p); }
+                for p in params {
+                    sub.local(p);
+                }
                 sub.node(body);
                 sub.emit(Instr::none(OP_RETURN));
                 sub.emit(Instr::none(OP_HALT));
@@ -880,14 +1194,19 @@ impl Compiler {
                 for stage in stages {
                     let i = self.intern(&stage.name);
                     self.emit(Instr::a1(OP_PUSH_STR, i));
-                    if let Some(a) = &stage.arg { self.node(a); }
-                    else { self.emit(Instr::none(OP_PUSH_NIL)); }
+                    if let Some(a) = &stage.arg {
+                        self.node(a);
+                    } else {
+                        self.emit(Instr::none(OP_PUSH_NIL));
+                    }
                     self.emit(Instr::a2(OP_CALL, 2, 0));
                 }
             }
 
             // Type definition: compile body (fields + methods), register type name as a global
-            AstNode::TypeDef { name, kind, body, .. } => {
+            AstNode::TypeDef {
+                name, kind, body, ..
+            } => {
                 // Compile any methods in the body
                 for s in body {
                     if let AstNode::FunctionDef { .. } = s {
@@ -911,7 +1230,12 @@ impl Compiler {
             }
 
             // Impl block: compile methods, associate with type
-            AstNode::ImplDef { type_name, trait_name, body, .. } => {
+            AstNode::ImplDef {
+                type_name,
+                trait_name,
+                body,
+                ..
+            } => {
                 // Compile all methods in the impl body
                 for s in body {
                     if let AstNode::FunctionDef { .. } = s {
@@ -926,7 +1250,9 @@ impl Compiler {
             }
 
             // Type test: $x is TypeName
-            AstNode::TypeTest { value, type_name, .. } => {
+            AstNode::TypeTest {
+                value, type_name, ..
+            } => {
                 self.node(value);
                 let type_idx = self.intern(type_name);
                 self.emit(Instr::a1(OP_PUSH_STR, type_idx));
@@ -950,6 +1276,32 @@ fn collect_dotted_name(node: &AstNode) -> Option<String> {
     }
 }
 
+/// Compiles an Abstract Syntax Tree (AST) slice into an executable [`Bytecode`] bundle.
+///
+/// Translates AST nodes into 64-bit [`Instr`] instructions, performs string interning,
+/// registers wide numeric operands, and runs the peephole optimizer.
+///
+/// # Arguments
+///
+/// * `ast` - A slice of top-level [`AstNode`] statements to compile.
+///
+/// # Returns
+///
+/// A fully optimized [`Bytecode`] ready for execution by [`VM::run`](crate::vm::VM::run).
+///
+/// # Examples
+///
+/// ```
+/// use xcl_vm::lexer::lex;
+/// use xcl_vm::parser::parse;
+/// use xcl_vm::bytecode::compile;
+///
+/// let tokens = lex("$x = 10; $x + 5", "example.xcl");
+/// let ast = parse(&tokens, "$x = 10; $x + 5");
+/// let bytecode = compile(&ast);
+///
+/// assert!(!bytecode.instructions.is_empty());
+/// ```
 pub fn compile(ast: &[AstNode]) -> Bytecode {
     let mut c = Compiler::new();
     c.compile(ast)
@@ -991,7 +1343,7 @@ fn peephole_at(code: &mut Vec<Instr>, i: usize, instr: Instr) -> bool {
                 OP_SUB => Some(OP_SUB_LOCAL_LOCAL),
                 OP_MUL => Some(OP_MUL_LOCAL_LOCAL),
                 OP_DIV => Some(OP_DIV_LOCAL_LOCAL),
-                OP_LT  => Some(OP_LT_LOCAL_LOCAL),
+                OP_LT => Some(OP_LT_LOCAL_LOCAL),
                 _ => None,
             };
             if let Some(fused) = arith_op {
@@ -1076,8 +1428,11 @@ fn peephole_at(code: &mut Vec<Instr>, i: usize, instr: Instr) -> bool {
         let next = code[i + 1];
         let next2 = code[i + 2];
         let next3 = code[i + 3];
-        if next.op() == OP_PUSH_INT && next.a() == 1 && next2.op() == OP_ADD
-            && next3.op() == OP_STORE_LOCAL && next3.a() == instr.a()
+        if next.op() == OP_PUSH_INT
+            && next.a() == 1
+            && next2.op() == OP_ADD
+            && next3.op() == OP_STORE_LOCAL
+            && next3.a() == instr.a()
         {
             code[i] = Instr::a1(OP_INC_LOCAL, instr.a());
             code.drain(i + 1..=i + 3);
@@ -1112,8 +1467,10 @@ fn peephole_at(code: &mut Vec<Instr>, i: usize, instr: Instr) -> bool {
         let next2 = code[i + 2];
         let next3 = code[i + 3];
         let next4 = code[i + 4];
-        if next.op() == OP_LOAD_LOCAL && next2.op() == OP_LOAD_LOCAL
-            && next3.op() == OP_ADD && next4.op() == OP_ADD
+        if next.op() == OP_LOAD_LOCAL
+            && next2.op() == OP_LOAD_LOCAL
+            && next3.op() == OP_ADD
+            && next4.op() == OP_ADD
         {
             // LOAD a; LOAD b; LOAD c; ADD; ADD → ADD_LL a,b; LOAD c; ADD
             code[i] = Instr::make(OP_ADD_LOCAL_LOCAL, instr.a(), next.a() as u16, 0);
@@ -1157,7 +1514,12 @@ fn peephole_at(code: &mut Vec<Instr>, i: usize, instr: Instr) -> bool {
             if next2.op() == OP_ADD {
                 code[i] = Instr::a2(OP_ADD_INT_STORE_LOCAL, next3.a(), next.a() as u16);
                 // encode src local in c
-                code[i] = Instr::make(OP_ADD_INT_STORE_LOCAL, next3.a(), next.a() as u16, instr.a() as u8);
+                code[i] = Instr::make(
+                    OP_ADD_INT_STORE_LOCAL,
+                    next3.a(),
+                    next.a() as u16,
+                    instr.a() as u8,
+                );
                 code.drain(i + 1..=i + 3);
                 return true;
             }
@@ -1169,8 +1531,11 @@ fn peephole_at(code: &mut Vec<Instr>, i: usize, instr: Instr) -> bool {
         let next = code[i + 1];
         let next2 = code[i + 2];
         let next3 = code[i + 3];
-        if next.op() == OP_PUSH_INT && next.a() == 1 && next2.op() == OP_SUB
-            && next3.op() == OP_STORE_LOCAL && next3.a() == instr.a()
+        if next.op() == OP_PUSH_INT
+            && next.a() == 1
+            && next2.op() == OP_SUB
+            && next3.op() == OP_STORE_LOCAL
+            && next3.a() == instr.a()
         {
             code[i] = Instr::a1(OP_DEC_LOCAL, instr.a());
             code.drain(i + 1..=i + 3);

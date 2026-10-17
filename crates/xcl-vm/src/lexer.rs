@@ -1,3 +1,57 @@
+//! Lexical analyzer (tokenizer) for XCL source code.
+//!
+//! # Overview
+//!
+//! The lexer transforms raw UTF-8 source text into a stream of structured [`Token`](crate::lexer::Token) instances
+//! tagged with precise source location metadata ([`Span`]).
+//!
+//! Built upon the [`logos`] regular expression lexer generator, tokenization is
+//! zero-allocation for punctuation and keywords, reserving memory only for token
+//! text slices and location tracking.
+//!
+//! # Lexical Grammar
+//!
+//! * **Identifiers**:
+//!   - Variable identifiers begin with `$` (e.g., `$count`, `$user_id`).
+//!   - Plain identifiers represent type names, function names, and keywords (e.g., `Point`, `len`, `map`).
+//! * **Literals**:
+//!   - Integers: decimal (`42`), hexadecimal (`0x2A`), binary (`0b101010`), octal (`0o52`), with optional underscores (`1_000_000`).
+//!   - Floats: standard decimal notation (`3.14159`, `0.5`).
+//!   - Booleans: `true`, `false`.
+//!   - Nil: `none`.
+//!   - Strings:
+//!     - Double-quoted: `"hello \n world"` with escape sequences (`\n`, `\t`, `\r`, `\\`, `\"`).
+//!     - Raw strings: `r"C:\path\to\file"` without escape processing.
+//!     - Multiline strings: `"""line 1\nline 2"""`.
+//! * **Comments**:
+//!   - Single-line comments begin with `#` and extend to end of line: `# this is a comment`.
+//! * **Pipelining and Operators**:
+//!   - Pipelines: `|>` (pipeline), `|` (lambda pipe).
+//!   - Arithmetic: `+`, `-`, `*`, `/`, `%`.
+//!   - Comparisons: `==`, `!=`, `<`, `>`, `<=`, `>=`.
+//!   - Assignment & Compound: `=`, `+=`, `-=`, `*=`, `/=`, `??=`, `:=`.
+//!   - Null coalescing: `??`.
+//!   - Safe navigation: `?.`.
+//!
+//! # Examples
+//!
+//! Tokenizing an XCL expression:
+//!
+//! ```
+//! use xcl_vm::lexer::{lex, Token};
+//!
+//! let tokens = lex("$x = 10 + 20;", "script.xcl");
+//! assert_eq!(tokens[0].token, Token::Ident);
+//! assert_eq!(tokens[0].text, "$x");
+//! assert_eq!(tokens[1].token, Token::Assign);
+//! assert_eq!(tokens[2].token, Token::Int);
+//! assert_eq!(tokens[2].text, "10");
+//! assert_eq!(tokens[3].token, Token::Add);
+//! assert_eq!(tokens[4].token, Token::Int);
+//! assert_eq!(tokens[4].text, "20");
+//! assert_eq!(tokens[5].token, Token::Semi);
+//! ```
+
 #[cfg(not(feature = "std"))]
 use alloc::string::String;
 #[cfg(not(feature = "std"))]
@@ -8,164 +62,242 @@ use alloc::vec::Vec;
 use crate::span::Span;
 use logos::Logos;
 
-#[derive(Debug, Clone, PartialEq, Logos)]
+/// Tokens produced by the XCL lexer.
+///
+/// Generated with [`logos::Logos`] for fast deterministic finite automaton (DFA) matching.
+#[derive(Debug, Clone, PartialEq, Eq, Logos)]
 pub enum Token {
+    /// Whitespace (skipped automatically by the lexer).
     #[regex(r"[ \t\r\n]+", logos::skip)]
+    /// Single-line comment starting with `#` (skipped automatically by the lexer).
     #[regex(r"#[^\n]*", logos::skip, allow_greedy = true)]
+    /// `if` keyword.
     #[token("if")]
     If,
+    /// `else` keyword.
     #[token("else")]
     Else,
+    /// `for` keyword.
     #[token("for")]
     For,
+    /// `in` keyword.
     #[token("in")]
     In,
+    /// `while` keyword.
     #[token("while")]
     While,
+    /// `break` keyword.
     #[token("break")]
     Break,
+    /// `continue` keyword.
     #[token("continue")]
     Continue,
+    /// `return` keyword.
     #[token("return")]
     Return,
+    /// `true` boolean literal.
     #[token("true")]
     True,
+    /// `false` boolean literal.
     #[token("false")]
     False,
+    /// `none` nil literal.
     #[token("none")]
     None_,
 
+    /// `and` logical conjunction keyword.
     #[token("and")]
     And,
+    /// `or` logical disjunction keyword.
     #[token("or")]
     Or,
+    /// `not` logical inversion keyword.
     #[token("not")]
     Not,
+    /// `is` type test/implementation keyword.
     #[token("is")]
     Is,
+    /// `as` type cast keyword.
     #[token("as")]
     As,
 
+    /// `fn` function definition keyword.
     #[token("fn")]
     Fn,
+    /// `bool` type keyword.
     #[token("bool")]
     Bool,
+    /// `any` dynamic type keyword.
     #[token("any")]
     Any,
 
+    /// Variable identifier prefixed with `$` (e.g. `$total`, `$x_1`).
     #[regex(r"\$[a-zA-Z_][a-zA-Z0-9_]*")]
     Ident,
+    /// Plain identifier without `$` prefix (e.g. function or type name).
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
     IdentPlain,
 
+    /// Hexadecimal integer literal (e.g. `0xFF`, `0x10_00`).
     #[regex(r"0x[0-9a-fA-F_]+")]
     IntHex,
+    /// Binary integer literal (e.g. `0b1010`, `0b1111_0000`).
     #[regex(r"0b[01_]+")]
     IntBin,
+    /// Octal integer literal (e.g. `0o755`, `0o644`).
     #[regex(r"0o[0-7_]+")]
     IntOct,
+    /// Floating-point number literal (e.g. `3.1415`, `0.0`).
     #[regex(r"\d[\d_]*\.\d[\d_]*")]
     Float,
+    /// Decimal integer literal (e.g. `42`, `10_000`).
     #[regex(r"\d[\d_]*")]
     Int,
 
+    /// Multi-line triple-quoted string literal (e.g. `"""line1\nline2"""`).
     #[regex(r#""""[\s\S]*?""""#)]
     MultiLineString,
+    /// Raw unescaped string literal (e.g. `r"raw\path"`).
     #[regex(r##"r\"[^\"]*\""##)]
     RawString,
+    /// Standard double-quoted string literal (e.g. `"hello world"`).
     #[regex(r##""([^"\\]|\\.)*""##)]
     String,
 
+    /// Logical OR operator `||`.
     #[token("||")]
     OrOp,
+    /// Single pipe `|` (used in lambda definitions or sum variants).
     #[token("|")]
     Pipe,
+    /// Logical AND operator `&&`.
     #[token("&&")]
     AndOp,
+    /// Equality operator `==`.
     #[token("==")]
     Eq,
+    /// Inequality operator `!=`.
     #[token("!=")]
     NotEq,
+    /// Less than or equal operator `<=`.
     #[token("<=")]
     Le,
+    /// Greater than or equal operator `>=`.
     #[token(">=")]
     Ge,
+    /// Less than operator `<`.
     #[token("<")]
     Lt,
+    /// Greater than operator `>`.
     #[token(">")]
     Gt,
+    /// Addition assignment operator `+=`.
     #[token("+=")]
     AddAssign,
+    /// Subtraction assignment operator `-=`.
     #[token("-=")]
     SubAssign,
+    /// Multiplication assignment operator `*=`.
     #[token("*=")]
     MulAssign,
+    /// Division assignment operator `/=`.
     #[token("/=")]
     DivAssign,
+    /// Null coalescing assignment operator `??=`.
     #[token("??=")]
     CoalesceAssign,
+    /// Null coalescing operator `??`.
     #[token("??")]
     Coalesce,
+    /// Return type arrow `->`.
     #[token("->")]
     RArrow,
+    /// Match / function arrow `=>`.
     #[token("=>")]
     Arrow,
+    /// Pipeline operator `|>`.
     #[token("|>")]
     Pipeline,
+    /// Range operator `..`.
     #[token("..")]
     Range,
+    /// Addition operator `+`.
     #[token("+")]
     Add,
+    /// Subtraction / negation operator `-`.
     #[token("-")]
     Sub,
+    /// Multiplication operator `*`.
     #[token("*")]
     Mul,
+    /// Division operator `/`.
     #[token("/")]
     Div,
+    /// Modulo operator `%`.
     #[token("%")]
     Mod,
+    /// Assignment operator `=`.
     #[token("=")]
     Assign,
+    /// Logical NOT operator `!`.
     #[token("!")]
     Bang,
+    /// Walrus / declaration binding operator `:=`.
     #[token(":=")]
     Binding,
 
+    /// Opening parenthesis `(`.
     #[token("(")]
     LParen,
+    /// Closing parenthesis `)`.
     #[token(")")]
     RParen,
+    /// Opening bracket `[`.
     #[token("[")]
     LBracket,
+    /// Closing bracket `]`.
     #[token("]")]
     RBracket,
+    /// Opening brace `{`.
     #[token("{")]
     LBrace,
+    /// Closing brace `}`.
     #[token("}")]
     RBrace,
+    /// Comma `,`.
     #[token(",")]
     Comma,
+    /// Semicolon `;`.
     #[token(";")]
     Semi,
+    /// Colon `:`.
     #[token(":")]
     Colon,
+    /// Member access dot `.`.
     #[token(".")]
     Dot,
+    /// Optional chaining dot `?.`.
     #[token("?.")]
     OptionalDot,
+    /// Question mark `?` (error unwrapping or optional types).
     #[token("?")]
     Question,
 }
 
-#[derive(Clone, Debug)]
+/// A token enriched with its raw source text, location span, and byte offset.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TokenWithText {
+    /// The token kind recognized by the lexer.
     pub token: Token,
+    /// The exact substring from the source file corresponding to this token.
     pub text: String,
+    /// Diagnostic source location ([`Span`]) containing file, line, and column.
     pub span: Span,
+    /// Zero-based byte offset in the input source buffer.
     pub byte_offset: usize,
 }
 
-/// Precomputed line-start offsets for O(1) offset-to-line conversion.
+/// Precomputed line-start offsets for O(1) / O(log n) offset-to-line conversion.
 /// Built once during lexing to avoid O(n) per-token scanning.
 struct LineMap {
     offsets: Vec<usize>,
@@ -210,6 +342,32 @@ impl LineMap {
     }
 }
 
+/// Tokenizes an XCL source string into a sequence of [`TokenWithText`] elements.
+///
+/// Line numbers and column numbers are computed using a fast line-map lookup table.
+/// Any invalid or unrecognized characters are gracefully skipped.
+///
+/// # Arguments
+///
+/// * `source` - The complete source code to tokenize.
+/// * `file` - The file path or buffer name to associate with the tokens.
+///
+/// # Returns
+///
+/// A vector of [`TokenWithText`] structs containing tokens, source text, spans, and offsets.
+///
+/// # Examples
+///
+/// ```
+/// use xcl_vm::lexer::{lex, Token};
+///
+/// let source = "fn add(a, b) { a + b }";
+/// let tokens = lex(source, "math.xcl");
+///
+/// assert_eq!(tokens[0].token, Token::Fn);
+/// assert_eq!(tokens[1].text, "add");
+/// assert_eq!(tokens[2].token, Token::LParen);
+/// ```
 #[inline]
 pub fn lex(source: &str, file: &str) -> Vec<TokenWithText> {
     let line_map = LineMap::new(source);
@@ -235,6 +393,30 @@ pub fn lex(source: &str, file: &str) -> Vec<TokenWithText> {
     tokens
 }
 
+/// Unescapes and extracts the inner string value from raw literal text.
+///
+/// Handles three types of string syntax:
+/// 1. Multiline triple-quoted strings: `"""content"""` -> `"content"`
+/// 2. Raw strings: `r"content"` -> `"content"` (no escape decoding)
+/// 3. Standard double-quoted strings: `"content\n"` -> `"content\n"` (with `\n`, `\t`, `\r`, `\\`, `\"` decoded)
+///
+/// # Arguments
+///
+/// * `source` - The raw string literal text including surrounding quotes.
+///
+/// # Returns
+///
+/// The decoded inner string.
+///
+/// # Examples
+///
+/// ```
+/// use xcl_vm::lexer::extract_string;
+///
+/// assert_eq!(extract_string(r#""hello\nworld""#), "hello\nworld");
+/// assert_eq!(extract_string(r#"r"raw\path""#), r#"raw\path"#);
+/// assert_eq!(extract_string(r#""""multiline text""""#), "multiline text");
+/// ```
 #[inline]
 pub fn extract_string(source: &str) -> String {
     let s = source.trim();

@@ -1,27 +1,126 @@
-//! # XCL Virtual Machine
+//! Core Virtual Machine and compiler infrastructure for the XCL scripting language.
 //!
-//! Core VM for the XCL scripting language: lexer, parser, bytecode compiler, and runtime.
+//! The `xcl-vm` crate provides the complete language pipeline for XCL: a high-speed
+//! regular-expression lexer, a Pratt/recursive-descent parser, a bytecode compiler with
+//! peephole optimization, and a stack-based virtual machine runtime with NaN-boxed values.
 //!
-//! ## Overview
+//! # Overview
 //!
-//! XCL compiles source code through four stages:
+//! XCL is an expression-oriented, embeddable scripting language designed for automation,
+//! configuration, and CLI workflows. `xcl-vm` implements the core VM engine without
+//! hard-coding heavyweight standard libraries.
 //!
-//! 1. **Lexer** — tokenizes source text into a stream of tokens
-//! 2. **Parser** — builds an AST from tokens
-//! 3. **Bytecode compiler** — translates the AST into bytecode instructions
-//! 4. **VM runtime** — executes bytecode on a stack-based virtual machine
+//! Higher-level functionality (such as filesystem I/O, process execution, networking, and
+//! standard library functions) is provided via plugins in `xcl-plugins`.
 //!
-//! ## Quick start
+//! # Compilation and Execution Pipeline
 //!
-//! ```rust
-//! use xcl_vm::{VM, Value, evaluate};
+//! Source code passes through four distinct phases:
+//!
+//! 1. **Lexical Analysis ([`lexer`])**
+//!    Transforms raw UTF-8 source text into a linear token stream ([`TokenWithText`](lexer::TokenWithText))
+//!    using [`logos`]. Source locations are tracked via [`Span`].
+//!
+//! 2. **Parsing ([`parser`] & [`ast`])**
+//!    Converts the token stream into an Abstract Syntax Tree ([`AstNode`](ast::AstNode)).
+//!    Statements and expressions are parsed using recursive descent and Pratt operator-precedence climbing.
+//!
+//! 3. **Bytecode Compilation ([`bytecode`])**
+//!    Translates AST nodes into 64-bit packed instructions ([`Instr`]).
+//!    Applies peephole optimization to fuse common arithmetic and loop patterns into single superinstructions.
+//!
+//! 4. **Runtime Execution ([`vm`] & [`value`])**
+//!    Executes bytecode on a stack-based virtual machine ([`VM`]) operating on 64-bit
+//!    NaN-boxed [`Value`] words.
+//!
+//! # Representation and Memory Architecture
+//!
+//! * **NaN-Boxed Values ([`Value`])**:
+//!   All runtime values fit into an 8-byte machine word. Primitives (integers up to 48 bits, floats,
+//!   booleans, and nil) require zero heap allocation. Heap objects (strings, arrays, maps, closures,
+//!   and OS handles) store their pointer addresses in the lower 48 bits of a quiet NaN payload.
+//!
+//! * **Bump Allocation ([`bumpalo::Bump`])**:
+//!   Temporary heap allocations generated during execution are serviced by the VM's internal
+//!   bump arena ([`VM::arena`](vm::VM::arena)), ensuring microsecond allocation speeds and instant
+//!   batch deallocation.
+//!
+//! * **Compact 64-bit Instructions ([`Instr`])**:
+//!   Bytecode instructions pack an 8-bit opcode, 32-bit primary operand `a`, 16-bit operand `b`,
+//!   and 8-bit operand `c` into a single 64-bit word for optimal CPU cache utilization.
+//!
+//! # Extensibility and Native Registries
+//!
+//! Native Rust functions and custom types can be registered into compile-time distributed
+//! slices using [`linkme`]:
+//!
+//! * [`NATIVE_REGISTRY`] — Static slice of native functions and methods.
+//! * [`TYPE_REGISTRY`] — Static slice of custom type definitions.
+//! * [`IMPL_REGISTRY`] — Static slice of trait implementation blocks.
+//!
+//! Calling [`VM::register_all`](vm::VM::register_all) loads all registered extensions into the VM.
+//!
+//! # Examples
+//!
+//! ### Basic Expression Evaluation
+//!
+//! ```
+//! use xcl_vm::{VM, evaluate};
 //!
 //! let mut vm = VM::new();
-//! let result = evaluate(r#"42 + 1"#, &mut vm);
-//! assert_eq!(result.as_i48(), 43);
+//! let result = evaluate(r#"40 + 2"#, &mut vm);
+//! assert_eq!(result.as_i48(), 42);
 //! ```
 //!
-//! For the plugin library (I/O, `Result`, `print`, etc.), use [`xcl_plugins`](../xcl_plugins/index.html) instead.
+//! ### Variable Assignments and Arithmetic
+//!
+//! ```
+//! use xcl_vm::{VM, evaluate};
+//!
+//! let mut vm = VM::new();
+//! let result = evaluate(
+//!     r#"
+//!     $base = 10;
+//!     $height = 5;
+//!     ($base * $height) / 2
+//!     "#,
+//!     &mut vm,
+//! );
+//! assert_eq!(result.as_i48(), 25);
+//! ```
+//!
+//! ### Conditional Expressions
+//!
+//! ```
+//! use xcl_vm::{VM, evaluate};
+//!
+//! let mut vm = VM::new();
+//! let result = evaluate(
+//!     r#"
+//!     $score = 85;
+//!     if $score >= 60 { "pass" } else { "fail" }
+//!     "#,
+//!     &mut vm,
+//! );
+//! assert_eq!(result.as_str(), Some("pass"));
+//! ```
+//!
+//! ### Manual Pipeline Execution
+//!
+//! You can also drive each stage of the compilation pipeline individually:
+//!
+//! ```
+//! use xcl_vm::{VM, lexer, parser, bytecode};
+//!
+//! let source = "$total = 10 * 3; $total";
+//! let tokens = lexer::lex(source, "calc.xcl");
+//! let ast = parser::parse(&tokens, source);
+//! let code = bytecode::compile(&ast);
+//!
+//! let mut vm = VM::new();
+//! let output = vm.run(&code);
+//! assert_eq!(output.as_i48(), 30);
+//! ```
 
 // Strict clippy lints — no dead code, no duplicate code, no default allows
 #![deny(clippy::all, clippy::pedantic, clippy::nursery)]
@@ -120,11 +219,12 @@
 #![allow(clippy::explicit_iter_loop)]
 #![allow(clippy::assigning_clones)]
 #![allow(clippy::branches_sharing_code)]
-
 #![cfg_attr(not(feature = "std"), no_std)]
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+/// Argument parsing utilities for named and positional arguments.
+pub mod args;
 /// Abstract syntax tree nodes representing parsed XCL code.
 pub mod ast;
 /// Bytecode compiler and instruction set for the XCL VM.
@@ -133,6 +233,8 @@ pub mod bytecode;
 pub mod errors;
 /// Lexer that tokenizes XCL source code into tokens.
 pub mod lexer;
+/// Native function registry and built-in function infrastructure.
+pub mod native;
 /// Parser that builds an AST from tokenized XCL source.
 pub mod parser;
 /// Source location spans for error reporting and debugging.
@@ -141,35 +243,41 @@ pub mod span;
 pub mod value;
 /// Virtual machine runtime for executing XCL bytecode.
 pub mod vm;
-/// Native function registry and built-in function infrastructure.
-pub mod native;
-/// Argument parsing utilities for named and positional arguments.
-pub mod args;
 /// Well-known types and their metadata.
 pub mod wellknown;
 
-pub use bytecode::{Bytecode, Instr};
-pub use value::{
-    Value, FuncValue, HandleKind, RawPtr,
-    NativeEntry, NamedParam, NativeKind, BuiltinImpl,
-    TypeDescriptor, TypeKind, TypeField, TypeVariant,
-    DomainCtx, NativeArg, extract_arg,
-    SUBTYPE_NONE, SUBTYPE_RESULT, SUBTYPE_ERROR, SUBTYPE_HANDLE, SUBTYPE_USER_BASE,
-    VARIANT_OK, VARIANT_ERR, VARIANT_DEFAULT,
-};
-pub use vm::{VM, DomainSlot};
-pub use native::{NATIVE_REGISTRY, TYPE_REGISTRY, IMPL_REGISTRY};
 pub use args::split_named_args;
-pub use wellknown::WellKnown;
-pub use span::Span;
+pub use bytecode::{Bytecode, Instr};
 pub use errors::{Group, is_known_kind};
+pub use native::{IMPL_REGISTRY, NATIVE_REGISTRY, TYPE_REGISTRY};
+pub use span::Span;
+pub use value::{
+    BuiltinImpl, DomainCtx, FuncValue, HandleKind, NamedParam, NativeArg, NativeEntry, NativeKind,
+    RawPtr, SUBTYPE_ERROR, SUBTYPE_HANDLE, SUBTYPE_NONE, SUBTYPE_RESULT, SUBTYPE_USER_BASE,
+    TypeDescriptor, TypeField, TypeKind, TypeVariant, VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK,
+    Value, extract_arg,
+};
+pub use vm::{DomainSlot, VM};
+pub use wellknown::WellKnown;
 
-/// Evaluate XCL source code using the provided VM.
+/// Evaluates XCL source code using the provided virtual machine.
 ///
-/// This function runs the full pipeline: lexing, parsing, bytecode compilation,
-/// and execution. The VM's bump arena is reset before each call.
+/// Runs the complete execution pipeline:
+/// 1. Tokenizes `source` using [`lexer::lex`].
+/// 2. Builds an AST using [`parser::parse`].
+/// 3. Compiles the AST into bytecode using [`bytecode::compile`].
+/// 4. Executes the bytecode on `vm` via [`VM::run`].
 ///
-/// # Example
+/// # Arguments
+///
+/// * `source` - The XCL script or expression to evaluate.
+/// * `vm` - Mutable reference to the [`VM`] runtime instance.
+///
+/// # Returns
+///
+/// The evaluated [`Value`] result.
+///
+/// # Examples
 ///
 /// ```
 /// use xcl_vm::{VM, evaluate};

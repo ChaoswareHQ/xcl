@@ -1,3 +1,44 @@
+//! Abstract Syntax Tree (AST) node definitions for XCL.
+//!
+//! # Overview
+//!
+//! The AST represents the syntactic structure of an XCL program produced by the
+//! [`parser`](crate::parser) and consumed by the [`bytecode`](crate::bytecode) compiler.
+//!
+//! Every AST node records a [`Span`] indicating its original source location for
+//! accurate error diagnostics, debugging symbols, and stack traces.
+//!
+//! # Expression-Oriented Design
+//!
+//! In XCL, almost all constructs can be used as expressions:
+//!
+//! * [`AstNode::If`](crate::ast::AstNode::If) evaluates to the value of its executed branch.
+//! * [`AstNode::Block`](crate::ast::AstNode::Block) evaluates to the value of its trailing statement.
+//! * [`AstNode::Pipeline`](crate::ast::AstNode::Pipeline) chains expressions through sequential function stages.
+//!
+//! # Examples
+//!
+//! Matching on an AST node to inspect its type:
+//!
+//! ```
+//! use xcl_vm::ast::{AstNode, BinaryOperator};
+//! use xcl_vm::Span;
+//!
+//! let node = AstNode::BinaryOp {
+//!     span: Span::empty(),
+//!     left: Box::new(AstNode::Int { span: Span::empty(), value: 10 }),
+//!     op: BinaryOperator::Add,
+//!     right: Box::new(AstNode::Int { span: Span::empty(), value: 20 }),
+//! };
+//!
+//! match &node {
+//!     AstNode::BinaryOp { op: BinaryOperator::Add, left, right, .. } => {
+//!         println!("Addition expression with left={:?}, right={:?}", left, right);
+//!     }
+//!     _ => {}
+//! }
+//! ```
+
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 #[cfg(not(feature = "std"))]
@@ -8,9 +49,11 @@ use alloc::vec::Vec;
 use crate::span::Span;
 
 /// Abstract syntax tree node representing a parsed XCL language construct.
-#[derive(Debug, Clone)]
+///
+/// Each variant models a specific statement or expression in the XCL grammar.
+#[derive(Debug, Clone, PartialEq)]
 pub enum AstNode {
-    /// Variable assignment: `x = 42` or `x: i64 = 42`.
+    /// Variable assignment or binding: `x = 42` or `x: i64 = 42`.
     Assign {
         /// Source location of the assignment.
         span: Span,
@@ -25,37 +68,37 @@ pub enum AstNode {
     Return {
         /// Source location of the return statement.
         span: Span,
-        /// Optional return value expression.
+        /// Optional return value expression (`None` evaluates to `none`/unit).
         value: Option<Box<AstNode>>,
     },
-    /// Break statement to exit a loop.
+    /// Break statement to prematurely exit a loop: `break`.
     Break {
         /// Source location of the break statement.
         span: Span,
     },
-    /// Continue statement to skip to the next loop iteration.
+    /// Continue statement to jump to the next loop iteration: `continue`.
     Continue {
         /// Source location of the continue statement.
         span: Span,
     },
-    /// Conditional: `if cond { ... } else { ... }`.
+    /// Conditional branch: `if cond { ... } else { ... }`.
     If {
         /// Source location of the if statement.
         span: Span,
         /// Condition expression that determines which branch executes.
         condition: Box<AstNode>,
-        /// Statements executed when the condition is true.
+        /// Statements executed when the condition evaluates to truthy.
         then_branch: Vec<AstNode>,
-        /// Optional statements executed when the condition is false.
+        /// Optional statements executed when the condition evaluates to falsy.
         else_branch: Option<Vec<AstNode>>,
     },
-    /// For loop: `for item in iterable { ... }`.
+    /// For-in loop over a collection or range: `for item in iterable { ... }`.
     For {
         /// Source location of the for loop.
         span: Span,
-        /// Loop variable name.
+        /// Loop variable identifier.
         variable: String,
-        /// Expression producing the iterable collection.
+        /// Expression producing the iterable collection or range.
         iterable: Box<AstNode>,
         /// Body statements executed for each iteration.
         body: Vec<AstNode>,
@@ -64,80 +107,80 @@ pub enum AstNode {
     While {
         /// Source location of the while loop.
         span: Span,
-        /// Condition expression checked before each iteration.
+        /// Condition expression evaluated before each iteration.
         condition: Box<AstNode>,
-        /// Body statements executed while the condition is true.
+        /// Body statements executed while the condition remains truthy.
         body: Vec<AstNode>,
     },
     /// Function definition: `fn name(params) -> type { ... }`.
     FunctionDef {
         /// Source location of the function definition.
         span: Span,
-        /// Function name.
+        /// Function identifier name.
         name: String,
-        /// Parameter list.
+        /// List of formal parameters.
         params: Vec<Param>,
-        /// Optional return type annotation.
+        /// Optional declared return type annotation.
         return_type: Option<String>,
-        /// Function body statements.
+        /// Body statements comprising the function execution.
         body: Vec<AstNode>,
     },
-    /// Lambda expression: `|x, y| x + y`.
+    /// Anonymous lambda expression: `|x, y| x + y` or `|x| { ... }`.
     Lambda {
-        /// Source location of the lambda.
+        /// Source location of the lambda expression.
         span: Span,
-        /// Parameter names.
+        /// Parameter names captured by the lambda.
         params: Vec<String>,
-        /// Lambda body expression.
+        /// Expression evaluated when the lambda is called.
         body: Box<AstNode>,
-        /// Whether the lambda has an implicit `$it` parameter.
+        /// Whether the lambda references the implicit `$it` parameter.
         implicit_it: bool,
     },
-    /// Function call: `foo(a, b, c)` or `foo(a: 1, b: 2)`.
+    /// Function or method invocation: `foo(a, b, c)` or `foo(a: 1, b: 2)`.
     Call {
         /// Source location of the call expression.
         span: Span,
-        /// Expression being called (function, method, etc.).
+        /// Expression evaluated to obtain the callable object.
         callee: Box<AstNode>,
-        /// Positional and/or named arguments.
+        /// Positional and named arguments passed to the call.
         args: Vec<CallArg>,
     },
-    /// Variable or function identifier reference.
+    /// Variable or symbol identifier reference (e.g., `$x`, `print`).
     Ident {
         /// Source location of the identifier.
         span: Span,
-        /// Identifier name.
+        /// Identifier name text.
         name: String,
     },
-    /// Integer literal: `42`, `-100`.
+    /// 64-bit signed integer literal: `42`, `-100`, `0xFF`.
     Int {
         /// Source location of the literal.
         span: Span,
-        /// Integer value.
+        /// Parsed integer value.
         value: i64,
     },
-    /// Floating-point literal: `3.14`, `1.0e-5`.
+    /// 64-bit double-precision floating-point literal: `3.14`, `1.0e-5`.
     Float {
         /// Source location of the literal.
         span: Span,
-        /// Floating-point value.
+        /// Parsed floating-point value.
         value: f64,
     },
-    /// String literal: `"hello"`, `"""multiline"""`.
+    /// UTF-8 string literal: `"hello"`, `"""multiline"""`, `r"raw"`.
     Str {
         /// Source location of the literal.
         span: Span,
-        /// String value.
+        /// String contents.
         value: String,
     },
-    /// Boolean literal: `true`, `false`.
+    /// Boolean literal: `true` or `false`.
     Bool {
         /// Source location of the literal.
         span: Span,
-        /// Boolean value.
+        /// Boolean truth value.
         value: bool,
     },
-    /// Nil literal representing absence of a value.
+    /// Nil literal (`none`) representing the absence of a value or unit.
     Nil {
         /// Source location of the nil literal.
         span: Span,
@@ -146,170 +189,170 @@ pub enum AstNode {
     BinaryOp {
         /// Source location of the operation.
         span: Span,
-        /// Left-hand side operand.
+        /// Left-hand side operand expression.
         left: Box<AstNode>,
-        /// Operator (add, sub, eq, and, etc.).
+        /// Binary operator kind.
         op: BinaryOperator,
-        /// Right-hand side operand.
+        /// Right-hand side operand expression.
         right: Box<AstNode>,
     },
     /// Unary operation: `-x`, `!flag`.
     UnaryOp {
         /// Source location of the operation.
         span: Span,
-        /// Operator (neg, not).
+        /// Unary operator kind.
         op: UnaryOperator,
         /// Operand expression.
         operand: Box<AstNode>,
     },
-    /// Pipeline expression: `input | stage1 | stage2`.
+    /// Pipeline transformation expression: `input |> stage1 |> stage2`.
     Pipeline {
         /// Source location of the pipeline.
         span: Span,
-        /// Initial input expression piped through stages.
+        /// Initial input expression piped into the first stage.
         input: Box<AstNode>,
-        /// Sequence of pipeline stages applied to the input.
+        /// Ordered sequence of pipeline stages applied to the input.
         stages: Vec<PipelineStage>,
     },
     /// Array literal: `[1, 2, 3]`.
     ArrayLit {
         /// Source location of the literal.
         span: Span,
-        /// Array element expressions.
+        /// Array element expressions in order.
         elements: Vec<AstNode>,
     },
-    /// Dictionary/map literal: `{ key: value }`.
+    /// Dictionary/map literal: `{ "key": value, "other": 42 }`.
     DictLit {
         /// Source location of the literal.
         span: Span,
-        /// Key-value pairs.
+        /// Key-value pair expressions.
         entries: Vec<(String, AstNode)>,
     },
-    /// Indexing expression: `arr[i]`.
+    /// Indexing expression: `target[index]`.
     Index {
         /// Source location of the index expression.
         span: Span,
         /// Target collection being indexed.
         target: Box<AstNode>,
-        /// Index expression.
+        /// Index key or offset expression.
         index: Box<AstNode>,
     },
-    /// Field/property access: `obj.field`.
+    /// Field or property access: `obj.field`.
     FieldAccess {
         /// Source location of the field access.
         span: Span,
         /// Target object expression.
         target: Box<AstNode>,
-        /// Field name.
+        /// Field name string.
         field: String,
     },
     /// Range expression: `1..10`, `..end`, `start..`.
     Range {
         /// Source location of the range.
         span: Span,
-        /// Optional start expression (inclusive).
+        /// Optional inclusive start expression.
         start: Option<Box<AstNode>>,
-        /// Optional end expression (exclusive).
+        /// Optional exclusive end expression.
         end: Option<Box<AstNode>>,
     },
-    /// Block of statements: `{ stmt1; stmt2; stmt3 }`.
+    /// Lexical block of statements: `{ stmt1; stmt2; expr }`.
     Block {
         /// Source location of the block.
         span: Span,
-        /// Ordered sequence of statements.
+        /// Ordered statements evaluated within the block.
         statements: Vec<AstNode>,
     },
-    /// Type definition: `Point = { x: f64; y: f64; dist() -> f64 { ... } }`.
+    /// Type definition: `Point = { x: f64, y: f64 }`.
     TypeDef {
         /// Source location of the type definition.
         span: Span,
-        /// Type name.
+        /// Defined type identifier name.
         name: String,
-        /// Kind of type (record, sum, trait).
+        /// Kind of type (record, sum type, or trait).
         kind: TypeKind,
-        /// Body containing fields and methods.
+        /// Body definitions (fields, variants, or methods).
         body: Vec<AstNode>,
     },
-    /// Impl block: `Circle is Shape { area() -> f64 { ... } }`.
+    /// Trait implementation block: `Circle is Shape { area() -> f64 { ... } }`.
     ImplDef {
         /// Source location of the impl block.
         span: Span,
-        /// Name of the type being implemented.
+        /// Name of the implementing type.
         type_name: String,
-        /// Name of the trait being implemented.
+        /// Name of the implemented trait.
         trait_name: String,
-        /// Method implementations.
+        /// Method implementation definitions.
         body: Vec<AstNode>,
     },
-    /// Type test expression: `$x is Shape`.
+    /// Dynamic type test expression: `$x is Shape`.
     TypeTest {
         /// Source location of the type test.
         span: Span,
-        /// Value expression being tested.
+        /// Value expression whose runtime type is being checked.
         value: Box<AstNode>,
-        /// Name of the type to test against.
+        /// Target type name to test against.
         type_name: String,
     },
 }
 
-/// Kind of type definition in XCL.
-#[derive(Debug, Clone)]
+/// Classification of custom type definitions in XCL.
+#[derive(Debug, Clone, PartialEq)]
 pub enum TypeKind {
     /// Record type with named fields: `Point = { x: f64; y: f64 }`.
     Record,
-    /// Sum type with multiple variants: `Shape = | Circle { r: f64 } | Square { s: f64 }`.
+    /// Sum type (tagged union) with variants: `Shape = | Circle { r: f64 } | Square { s: f64 }`.
     Sum {
-        /// The list of variants in the sum type.
+        /// The list of variants comprising this sum type.
         variants: Vec<SumVariant>,
     },
     /// Trait/interface definition: `Printable = { to_string() -> str }`.
     Trait,
 }
 
-/// A variant in a sum type definition.
-#[derive(Debug, Clone)]
+/// A single variant within a sum type definition.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SumVariant {
-    /// Name of the variant (e.g., `Circle`, `Square`).
+    /// Variant constructor name (e.g., `Circle`, `Square`).
     pub name: String,
-    /// Fields contained in this variant.
+    /// Fields contained within this variant.
     pub fields: Vec<TypeField>,
 }
 
-/// A field in a type definition.
-#[derive(Debug, Clone)]
+/// A field within a record or variant definition.
+#[derive(Debug, Clone, PartialEq)]
 pub struct TypeField {
-    /// Field name.
+    /// Field identifier name.
     pub name: String,
-    /// Field type annotation (e.g., `f64`, `str`).
+    /// Type annotation string (e.g., `"f64"`, `"str"`).
     pub ty: String,
-    /// Whether the field is mutable.
+    /// Whether the field is declared mutable.
     pub mutable: bool,
 }
 
-/// Function parameter definition.
-#[derive(Debug, Clone)]
+/// Formal parameter in a function or method definition.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Param {
-    /// Parameter name.
+    /// Parameter identifier name.
     pub name: String,
     /// Optional type annotation.
     pub type_annotation: Option<String>,
-    /// Optional default value expression.
+    /// Optional default value expression if omitted at the call site.
     pub default_value: Option<Box<AstNode>>,
-    /// Source location of the parameter.
+    /// Source location of the parameter definition.
     pub span: Span,
 }
 
-/// Function call argument (positional or named).
-#[derive(Debug, Clone)]
+/// Function call argument, supporting positional and named forms.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CallArg {
     /// Argument value expression.
     pub value: AstNode,
-    /// Optional parameter name for named arguments.
+    /// Optional parameter name for named arguments (e.g. `timeout: 5000`).
     pub name: Option<String>,
 }
 
-/// Binary operators supported by XCL.
-#[derive(Debug, Clone, Copy)]
+/// Binary operators supported by XCL expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOperator {
     /// Addition: `+`.
     Add,
@@ -319,11 +362,11 @@ pub enum BinaryOperator {
     Mul,
     /// Division: `/`.
     Div,
-    /// Modulo: `%`.
+    /// Modulo / remainder: `%`.
     Mod,
-    /// Equality: `==`.
+    /// Equality comparison: `==`.
     Eq,
-    /// Inequality: `!=`.
+    /// Inequality comparison: `!=`.
     NotEq,
     /// Less than: `<`.
     Lt,
@@ -333,30 +376,32 @@ pub enum BinaryOperator {
     Le,
     /// Greater than or equal: `>=`.
     Ge,
-    /// Logical AND: `&&`.
+    /// Short-circuiting logical AND: `&&` or `and`.
     And,
-    /// Logical OR: `||`.
+    /// Short-circuiting logical OR: `||` or `or`.
     Or,
-    /// Null coalescing: `??`.
+    /// Null coalescing operator: `??`.
     Coalesce,
     /// Membership test: `in`.
     In,
 }
 
-/// Unary operators supported by XCL.
-#[derive(Debug, Clone, Copy)]
+/// Unary operators supported by XCL expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOperator {
-    /// Negation: `-x`.
+    /// Arithmetic negation: `-x`.
     Neg,
-    /// Logical NOT: `!x`.
+    /// Logical inversion: `!x` or `not x`.
     Not,
 }
 
-/// A single stage in a pipeline expression.
-#[derive(Debug, Clone)]
+/// A single step in a pipeline expression.
+///
+/// In `data |> filter(|x| x > 0) |> sum()`, each method call is a `PipelineStage`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PipelineStage {
-    /// Name of the function/method to call.
+    /// Name of the target function or method to call.
     pub name: String,
-    /// Optional additional argument (input is piped as the first argument).
+    /// Optional additional argument passed after the piped input value.
     pub arg: Option<Box<AstNode>>,
 }
