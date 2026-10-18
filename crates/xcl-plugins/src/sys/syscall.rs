@@ -26,7 +26,7 @@ use xcl_vm::Value;
 /// // Linux: gettid syscall (number 186 on x86_64)
 /// sys.syscall(186, [])
 /// ```
-#[xcl_fn("sys.syscall", signature = "(syscall_num: int, args: array) -> result")]
+#[xcl_fn]
 pub fn syscall(_syscall_num: i64, _args: &[Value]) -> Value {
     // Raw syscall support is platform-specific and requires unsafe FFI
     // For now, return a not-implemented error
@@ -45,7 +45,7 @@ pub fn syscall(_syscall_num: i64, _args: &[Value]) -> Value {
 /// ```xcl
 /// sys.last_error()
 /// ```
-#[xcl_fn("sys.last_error", signature = "() -> int")]
+#[xcl_fn]
 pub fn last_error() -> Value {
     #[cfg(unix)]
     {
@@ -71,7 +71,7 @@ pub fn last_error() -> Value {
 /// ```xcl
 /// sys.last_error_str()
 /// ```
-#[xcl_fn("sys.last_error_str", signature = "() -> str")]
+#[xcl_fn]
 pub fn last_error_str() -> Value {
     #[cfg(unix)]
     {

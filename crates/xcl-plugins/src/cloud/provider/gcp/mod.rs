@@ -68,12 +68,7 @@ use xcl_vm::{Value, DomainCtx};
 ///     # Uses project-a again
 /// }
 /// ```
-#[xcl_fn(
-    name = "gcp",
-    args = "project: str; f: any",
-    ret = "any",
-    summary = "Run a closure within a GCP project context."
-)]
+#[xcl_fn(name = "gcp")]
 fn gcp_run(ctx: &mut DomainCtx) -> Value {
     let project = ctx.arg(0).as_str().unwrap_or("");
     let closure = ctx.arg(1);
@@ -101,11 +96,7 @@ fn gcp_run(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// fn gcp.config() -> map
 /// ```
-#[xcl_fn(
-    name = "gcp.config",
-    ret = "map",
-    summary = "Get the current GCP configuration."
-)]
+#[xcl_fn]
 fn gcp_config(ctx: &mut DomainCtx) -> Value {
     let mut config = HashMap::new();
 
@@ -131,11 +122,7 @@ fn gcp_config(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// fn gcp.credential() -> map
 /// ```
-#[xcl_fn(
-    name = "gcp.credential",
-    ret = "map",
-    summary = "Get the current GCP credentials."
-)]
+#[xcl_fn]
 fn gcp_credential(ctx: &mut DomainCtx) -> Value {
     match ctx.get_context("gcp.credentials") {
         Some(creds) => creds,

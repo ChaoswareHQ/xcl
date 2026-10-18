@@ -44,12 +44,7 @@ use crate::core::result::{ok_result, err_result};
 ///
 /// A Result with an array of IP address strings in the `value` field.
 /// Returns the first resolved address if multiple exist.
-#[xcl_fn(
-    name = "net.dns.resolve",
-    args = "host: str",
-    ret = "Result",
-    summary = "Resolve a hostname to IP addresses using the OS resolver."
-)]
+#[xcl_fn(name = "net.dns.resolve")]
 fn dns_resolve(ctx: &mut DomainCtx) -> Value {
     let host = ctx.arg(0).as_str().unwrap_or("");
 
@@ -86,12 +81,7 @@ fn dns_resolve(ctx: &mut DomainCtx) -> Value {
 /// $r = net.dns.resolve_first "example.com"
 /// $ip = $r.value   # "93.184.216.34"
 /// ```
-#[xcl_fn(
-    name = "net.dns.resolve_first",
-    args = "host: str",
-    ret = "Result",
-    summary = "Resolve a hostname to the first IP address found."
-)]
+#[xcl_fn(name = "net.dns.resolve_first")]
 fn dns_resolve_first(ctx: &mut DomainCtx) -> Value {
     let host = ctx.arg(0).as_str().unwrap_or("");
 
@@ -124,12 +114,7 @@ fn dns_resolve_first(ctx: &mut DomainCtx) -> Value {
 ///     print "host exists"
 /// }
 /// ```
-#[xcl_fn(
-    name = "net.dns.check",
-    args = "host: str",
-    ret = "Result",
-    summary = "Check if a hostname resolves to any address."
-)]
+#[xcl_fn(name = "net.dns.check")]
 fn dns_check(ctx: &mut DomainCtx) -> Value {
     let host = ctx.arg(0).as_str().unwrap_or("");
 
@@ -164,12 +149,7 @@ fn dns_check(ctx: &mut DomainCtx) -> Value {
 /// ## RETURNS
 ///
 /// A Result with a map `{ip: str, port: int, version: str}` in the `value` field.
-#[xcl_fn(
-    name = "net.dns.lookup",
-    args = "host: str",
-    ret = "Result",
-    summary = "Resolve a hostname and return detailed address information."
-)]
+#[xcl_fn(name = "net.dns.lookup")]
 fn dns_lookup(ctx: &mut DomainCtx) -> Value {
     let host = ctx.arg(0).as_str().unwrap_or("");
 

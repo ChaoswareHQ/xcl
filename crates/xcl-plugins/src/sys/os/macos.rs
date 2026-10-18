@@ -15,7 +15,7 @@ use xcl_vm::Value;
 /// ```xcl
 /// sys.os.macos_version()
 /// ```
-#[xcl_fn("sys.os.macos_version", signature = "() -> map")]
+#[xcl_fn]
 pub fn macos_version() -> Value {
     #[cfg(target_os = "macos")]
     {
@@ -49,7 +49,7 @@ pub fn macos_version() -> Value {
 /// ```xcl
 /// sys.os.system_profiler("SPHardwareDataType")
 /// ```
-#[xcl_fn("sys.os.system_profiler", signature = "(type_name: str) -> str")]
+#[xcl_fn]
 pub fn system_profiler(type_name: &str) -> Value {
     #[cfg(target_os = "macos")]
     {
@@ -81,7 +81,7 @@ pub fn system_profiler(type_name: &str) -> Value {
 /// ```xcl
 /// sys.os.energy_info()
 /// ```
-#[xcl_fn("sys.os.energy_info", signature = "() -> map")]
+#[xcl_fn]
 pub fn energy_info() -> Value {
     #[cfg(target_os = "macos")]
     {
@@ -118,7 +118,7 @@ pub fn energy_info() -> Value {
 /// ```xcl
 /// sys.os.launchd_status("com.apple.Safari")
 /// ```
-#[xcl_fn("sys.os.launchd_status", signature = "(service_name: str) -> map")]
+#[xcl_fn]
 pub fn launchd_status(service_name: &str) -> Value {
     #[cfg(target_os = "macos")]
     {
@@ -157,7 +157,7 @@ pub fn launchd_status(service_name: &str) -> Value {
 /// ```xcl
 /// sys.os.disk_info("/")
 /// ```
-#[xcl_fn("sys.os.disk_info", signature = "(mount_point: str) -> map")]
+#[xcl_fn]
 pub fn disk_info(mount_point: &str) -> Value {
     #[cfg(target_os = "macos")]
     {
@@ -190,7 +190,7 @@ pub fn disk_info(mount_point: &str) -> Value {
 /// ```xcl
 /// sys.os.memory_pressure()
 /// ```
-#[xcl_fn("sys.os.memory_pressure", signature = "() -> map")]
+#[xcl_fn]
 pub fn memory_pressure() -> Value {
     #[cfg(target_os = "macos")]
     {
@@ -230,7 +230,7 @@ pub fn memory_pressure() -> Value {
 /// ```xcl
 /// sys.os.spotlight_metadata("/path/to/file")
 /// ```
-#[xcl_fn("sys.os.spotlight_metadata", signature = "(path: str) -> map")]
+#[xcl_fn]
 pub fn spotlight_metadata(path: &str) -> Value {
     #[cfg(target_os = "macos")]
     {
@@ -270,7 +270,7 @@ pub fn spotlight_metadata(path: &str) -> Value {
 /// ```xcl
 /// sys.os.net_interfaces()
 /// ```
-#[xcl_fn("sys.os.net_interfaces", signature = "() -> array")]
+#[xcl_fn]
 pub fn net_interfaces() -> Value {
     #[cfg(target_os = "macos")]
     {

@@ -21,7 +21,7 @@ use xcl_vm::Value;
 /// ```xcl
 /// callback = ffi.create_callback("my_callback", my_function)
 /// ```
-#[xcl_fn("ffi.create_callback", signature = "(name: str, func: fn) -> int")]
+#[xcl_fn]
 pub fn create_callback(_name: &str, _func: &Value) -> Value {
     // Callback creation requires storing function pointers
     // For now, return a placeholder
@@ -40,7 +40,7 @@ pub fn create_callback(_name: &str, _func: &Value) -> Value {
 /// ```xcl
 /// ffi.remove_callback(handle)
 /// ```
-#[xcl_fn("ffi.remove_callback", signature = "(handle: int) -> result")]
+#[xcl_fn]
 pub fn remove_callback(_handle: i64) -> Value {
     Value::from_i48(0)
 }
@@ -57,7 +57,7 @@ pub fn remove_callback(_handle: i64) -> Value {
 /// ```xcl
 /// ffi.callback_info(handle)
 /// ```
-#[xcl_fn("ffi.callback_info", signature = "(handle: int) -> map")]
+#[xcl_fn]
 pub fn callback_info(_handle: i64) -> Value {
     Value::from_map(std::collections::HashMap::new())
 }
@@ -71,7 +71,7 @@ pub fn callback_info(_handle: i64) -> Value {
 /// ```xcl
 /// ffi.list_callbacks()
 /// ```
-#[xcl_fn("ffi.list_callbacks", signature = "() -> array")]
+#[xcl_fn]
 pub fn list_callbacks() -> Value {
     Value::from_array(vec![])
 }

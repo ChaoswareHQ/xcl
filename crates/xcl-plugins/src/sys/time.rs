@@ -22,7 +22,7 @@ static START_INSTANT: LazyLock<Instant> = LazyLock::new(Instant::now);
 /// ```xcl
 /// sys.monotonic_ns()
 /// ```
-#[xcl_fn("sys.monotonic_ns", signature = "() -> int")]
+#[xcl_fn]
 pub fn monotonic_ns() -> Value {
     let now = Instant::now();
     Value::from_i48(now.duration_since(*START_INSTANT).as_nanos() as i64)
@@ -37,7 +37,7 @@ pub fn monotonic_ns() -> Value {
 /// ```xcl
 /// sys.monotonic_ms()
 /// ```
-#[xcl_fn("sys.monotonic_ms", signature = "() -> int")]
+#[xcl_fn]
 pub fn monotonic_ms() -> Value {
     let now = Instant::now();
     Value::from_i48(now.duration_since(*START_INSTANT).as_millis() as i64)
@@ -52,7 +52,7 @@ pub fn monotonic_ms() -> Value {
 /// ```xcl
 /// sys.unix_time()
 /// ```
-#[xcl_fn("sys.unix_time", signature = "() -> int")]
+#[xcl_fn]
 pub fn unix_time() -> Value {
     let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     Value::from_i48(duration.as_secs() as i64)
@@ -67,7 +67,7 @@ pub fn unix_time() -> Value {
 /// ```xcl
 /// sys.unix_time_ms()
 /// ```
-#[xcl_fn("sys.unix_time_ms", signature = "() -> int")]
+#[xcl_fn]
 pub fn unix_time_ms() -> Value {
     let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     Value::from_i48(duration.as_millis() as i64)
@@ -82,7 +82,7 @@ pub fn unix_time_ms() -> Value {
 /// ```xcl
 /// sys.unix_time_ns()
 /// ```
-#[xcl_fn("sys.unix_time_ns", signature = "() -> int")]
+#[xcl_fn]
 pub fn unix_time_ns() -> Value {
     let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     Value::from_i48(duration.as_nanos() as i64)
@@ -97,7 +97,7 @@ pub fn unix_time_ns() -> Value {
 /// ```xcl
 /// sys.clock_resolution()
 /// ```
-#[xcl_fn("sys.clock_resolution", signature = "() -> int")]
+#[xcl_fn]
 pub fn clock_resolution() -> Value {
     let duration = std::time::Duration::from_nanos(1);
     Value::from_i48(duration.as_nanos() as i64)
@@ -112,7 +112,7 @@ pub fn clock_resolution() -> Value {
 /// ```xcl
 /// sys.sleep_ns(1_000_000)  // Sleep for 1ms
 /// ```
-#[xcl_fn("sys.sleep_ns", signature = "(nanos: int) -> nil")]
+#[xcl_fn]
 pub fn sleep_ns(nanos: i64) -> Value {
     std::thread::sleep(std::time::Duration::from_nanos(nanos as u64));
     Value::nil()
@@ -127,7 +127,7 @@ pub fn sleep_ns(nanos: i64) -> Value {
 /// ```xcl
 /// sys.uptime()
 /// ```
-#[xcl_fn("sys.uptime", signature = "() -> int")]
+#[xcl_fn]
 pub fn uptime() -> Value {
     #[cfg(target_os = "linux")]
     {

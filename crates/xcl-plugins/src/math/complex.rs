@@ -23,85 +23,85 @@ fn tc(v: Value) -> num_complex::Complex64 {
 
 // ─── Constructors ───
 
-#[xcl_fn(name = "math.complex", args = "re: float; im: float", ret = "complex")]
+#[xcl_fn]
 fn math_complex(args: &[Value]) -> Value {
     cm(num_complex::Complex64::new(args[0].as_float(), args[1].as_float()))
 }
 
-#[xcl_fn(name = "math.complex_polar", args = "magnitude: float; phase: float", ret = "complex")]
+#[xcl_fn]
 fn math_complex_polar(args: &[Value]) -> Value {
     cm(num_complex::Complex64::from_polar(args[0].as_float(), args[1].as_float()))
 }
 
 // ─── Properties ───
 
-#[xcl_fn(name = "complex.abs", args = "c: complex", ret = "float")]
+#[xcl_fn]
 fn complex_abs(args: &[Value]) -> Value {
     Value::from_f64(tc(args[0]).norm())
 }
 
-#[xcl_fn(name = "complex.phase", args = "c: complex", ret = "float")]
+#[xcl_fn]
 fn complex_phase(args: &[Value]) -> Value {
     Value::from_f64(tc(args[0]).arg())
 }
 
 // ─── Arithmetic ───
 
-#[xcl_fn(name = "complex.add", args = "a: complex; b: complex", ret = "complex")]
+#[xcl_fn]
 fn complex_add(args: &[Value]) -> Value {
     cm(tc(args[0]) + tc(args[1]))
 }
 
-#[xcl_fn(name = "complex.sub", args = "a: complex; b: complex", ret = "complex")]
+#[xcl_fn]
 fn complex_sub(args: &[Value]) -> Value {
     cm(tc(args[0]) - tc(args[1]))
 }
 
-#[xcl_fn(name = "complex.mul", args = "a: complex; b: complex", ret = "complex")]
+#[xcl_fn]
 fn complex_mul(args: &[Value]) -> Value {
     cm(tc(args[0]) * tc(args[1]))
 }
 
-#[xcl_fn(name = "complex.div", args = "a: complex; b: complex", ret = "complex")]
+#[xcl_fn]
 fn complex_div(args: &[Value]) -> Value {
     cm(tc(args[0]) / tc(args[1]))
 }
 
 // ─── Trig ───
 
-#[xcl_fn(name = "complex.sin", args = "c: complex", ret = "complex")]
+#[xcl_fn]
 fn complex_sin(args: &[Value]) -> Value {
     cm(tc(args[0]).sin())
 }
 
-#[xcl_fn(name = "complex.cos", args = "c: complex", ret = "complex")]
+#[xcl_fn]
 fn complex_cos(args: &[Value]) -> Value {
     cm(tc(args[0]).cos())
 }
 
-#[xcl_fn(name = "complex.tan", args = "c: complex", ret = "complex")]
+#[xcl_fn]
 fn complex_tan(args: &[Value]) -> Value {
     cm(tc(args[0]).tan())
 }
 
 // ─── Utility ───
 
-#[xcl_fn(name = "complex.conj", args = "c: complex", ret = "complex")]
+#[xcl_fn]
 fn complex_conj(args: &[Value]) -> Value {
     cm(tc(args[0]).conj())
 }
 
-#[xcl_fn(name = "complex.log", args = "c: complex", ret = "complex")]
+#[xcl_fn]
 fn complex_log(args: &[Value]) -> Value {
     cm(tc(args[0]).ln())
 }
 
-#[xcl_fn(name = "complex.sqrt", args = "c: complex", ret = "complex")]
+#[xcl_fn]
 fn complex_sqrt(args: &[Value]) -> Value {
     cm(tc(args[0]).sqrt())
 }
 
-#[xcl_fn(name = "complex.exp", args = "c: complex", ret = "complex")]
+#[xcl_fn]
 fn complex_exp(args: &[Value]) -> Value {
     cm(tc(args[0]).exp())
 }

@@ -15,7 +15,7 @@ use xcl_vm::Value;
 /// ```xcl
 /// sys.os.kernel_version()
 /// ```
-#[xcl_fn("sys.os.kernel_version", signature = "() -> str")]
+#[xcl_fn]
 pub fn kernel_version() -> Value {
     #[cfg(target_os = "linux")]
     {
@@ -46,7 +46,7 @@ pub fn kernel_version() -> Value {
 /// ```xcl
 /// loads = sys.os.load_average()
 /// ```
-#[xcl_fn("sys.os.load_average", signature = "() -> array")]
+#[xcl_fn]
 pub fn load_average() -> Value {
     #[cfg(target_os = "linux")]
     {
@@ -77,7 +77,7 @@ pub fn load_average() -> Value {
 /// ```xcl
 /// mem = sys.os.meminfo()
 /// ```
-#[xcl_fn("sys.os.meminfo", signature = "() -> map")]
+#[xcl_fn]
 pub fn meminfo() -> Value {
     #[cfg(target_os = "linux")]
     {
@@ -116,7 +116,7 @@ pub fn meminfo() -> Value {
 /// ```xcl
 /// cpu = sys.os.cpuinfo()
 /// ```
-#[xcl_fn("sys.os.cpuinfo", signature = "() -> map")]
+#[xcl_fn]
 pub fn cpuinfo() -> Value {
     #[cfg(target_os = "linux")]
     {
@@ -163,7 +163,7 @@ pub fn cpuinfo() -> Value {
 /// ```xcl
 /// disk = sys.os.disk_usage("/")
 /// ```
-#[xcl_fn("sys.os.disk_usage", signature = "(path: str) -> map")]
+#[xcl_fn]
 pub fn disk_usage(path: &str) -> Value {
     #[cfg(target_os = "linux")]
     {
@@ -196,7 +196,7 @@ pub fn disk_usage(path: &str) -> Value {
 /// ```xcl
 /// sys.os.cgroup_info()
 /// ```
-#[xcl_fn("sys.os.cgroup_info", signature = "() -> map")]
+#[xcl_fn]
 pub fn cgroup_info() -> Value {
     #[cfg(target_os = "linux")]
     {
@@ -231,7 +231,7 @@ pub fn cgroup_info() -> Value {
 /// ```xcl
 /// sys.os.net_interfaces()
 /// ```
-#[xcl_fn("sys.os.net_interfaces", signature = "() -> array")]
+#[xcl_fn]
 pub fn net_interfaces() -> Value {
     #[cfg(target_os = "linux")]
     {

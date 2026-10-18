@@ -2,8 +2,63 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{FnArg, ItemFn, ItemImpl, LitStr, Type, parse_macro_input};
 
+/// Extract the first line of `///` doc comments as a summary string.
+fn extract_doc_summary(attrs: &[syn::Attribute]) -> Option<String> {
+    for attr in attrs {
+        if attr.path().is_ident("doc") {
+            if let syn::Meta::NameValue(nv) = &attr.meta {
+                if let syn::Expr::Lit(el) = &nv.value {
+                    if let syn::Lit::Str(lit) = &el.lit {
+                        let line = lit.value().trim().to_string();
+                        if !line.is_empty() {
+                            return Some(line);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Infer the domain from the source file path using proc_macro2's span-locations.
+/// For example, `src/io/mod.rs` → `"io"`, `src/proc.rs` → `"proc"`.
+fn infer_domain_from_span(span: proc_macro2::Span) -> Option<String> {
+    let path = span.local_file()?;
+    let path_str = path.to_string_lossy().to_string();
+    
+    // Normalize path separators
+    let normalized = path_str.replace('\\', "/");
+    let parts: Vec<&str> = normalized.split('/').collect();
+    
+    // Find the module name from the file path
+    // e.g., ".../src/io/mod.rs" -> "io"
+    // e.g., ".../src/proc.rs" -> "proc"
+    for i in (0..parts.len()).rev() {
+        let part = parts[i];
+        if part == "mod.rs" {
+            // Look at the parent directory
+            if i > 0 {
+                let parent = parts[i - 1];
+                if parent != "src" && !parent.is_empty() {
+                    return Some(parent.to_string());
+                }
+            }
+        } else if part.ends_with(".rs") && !part.is_empty() {
+            // e.g., "proc.rs" -> "proc"
+            let name = part.trim_end_matches(".rs");
+            if !name.is_empty() && name != "lib" {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Parse helper attributes `#[xcl(domain = "...", kind = "...", summary = "...")]`
 /// from a DeriveInput's attrs.
+/// If `#[xcl(...)]` is absent, auto-detect domain from the source file path
+/// and summary from `///` doc comments.
 fn parse_xcl_helper_attrs(input: &syn::DeriveInput) -> (Option<String>, Option<String>, Option<String>) {
     let mut domain = None;
     let mut kind = None;
@@ -42,6 +97,16 @@ fn parse_xcl_helper_attrs(input: &syn::DeriveInput) -> (Option<String>, Option<S
         }
     }
 
+    // Auto-detect domain from source file path if not provided
+    if domain.is_none() {
+        domain = infer_domain_from_span(input.ident.span());
+    }
+
+    // Auto-detect summary from /// doc comments if not provided
+    if summary.is_none() {
+        summary = extract_doc_summary(&input.attrs);
+    }
+
     (domain, kind, summary)
 }
 
@@ -75,28 +140,32 @@ fn rust_type_to_xcl_type(ty: &Type) -> String {
 ///   If it's a unit struct, it's an Opaque type.
 /// - On an `enum`: registers as a Sum type in `TYPE_REGISTRY`.
 ///
-/// Use `#[xcl(domain = "...", kind = "...", summary = "...")]` for optional metadata.
+/// The derive macro auto-detects:
+/// - **domain** from the source file path (e.g., `src/io/mod.rs` → `"io"`).
+/// - **kind** from the type shape (unit struct → Opaque, named fields → Record, enum → Sum).
+/// - **summary** from the first `///` doc comment line.
+///
+/// Use `#[xcl(domain = "...", kind = "...", summary = "...")]` to override any auto-detected value.
 ///
 /// # Example
 ///
 /// ```ignore
+/// // In src/io/mod.rs — domain auto-detected as "io"
+/// /// A handle to an open file.
 /// #[derive(Xcl)]
-/// pub trait CloudService {
-///     fn bucket_create();
-///     fn bucket_list();
-/// }
+/// pub struct FileType;
 ///
+/// /// A stream handle for standard I/O.
 /// #[derive(Xcl)]
-/// pub struct CloudflareProvider;
+/// pub struct StreamType;
 ///
+/// // In src/proc.rs — domain auto-detected as "proc"
+/// /// A handle to a spawned child process.
 /// #[derive(Xcl)]
-/// #[xcl(domain = "io", kind = "Record", summary = "A file handle.")]
-/// pub struct FileType {
-///     handle: u64,
-/// }
+/// pub struct ProcessType;
 ///
+/// /// Success or failure result.
 /// #[derive(Xcl)]
-/// #[xcl(kind = "Sum", summary = "Success or failure.")]
 /// pub enum ResultType {
 ///     Ok(Value),
 ///     Err(Error),
@@ -344,22 +413,70 @@ pub fn xcl_trait(_attr: TokenStream, item: TokenStream) -> TokenStream {
     expanded.into()
 }
 
+/// `#[xcl_fn]` — Auto-registers a function in `NATIVE_REGISTRY`.
+///
+/// Zero arguments required — everything is auto-detected:
+/// - **domain + method** from the function name (e.g., `io_open` → domain="io", method="open").
+/// - **kind** from the signature (`&mut DomainCtx` → Ctx, `&[Value]` → Pure).
+/// - **summary** from the first `///` doc comment line.
+///
+/// Optional override attributes are still supported:
+/// - `name = "domain.method"` — override the auto-detected name.
+/// - `domain = "..."` — override the auto-detected domain.
+/// - `impl_type = "..."` — for trait implementation methods.
+/// - `override_method = "..."` — for trait method override.
+/// - `args = "..."` — manual arg signature string.
+/// - `ret = "..."` — manual return type string.
+/// - `summary = "..."` — override auto-detected summary.
+///
+/// # Example
+///
+/// ```ignore
+/// /// Open a file with the given mode.
+/// #[xcl_fn]
+/// pub fn io_open(ctx: &mut DomainCtx) -> Value { ... }
+///
+/// /// Get the first element of an array.
+/// #[xcl_fn]
+/// fn arr_first(args: &[Value]) -> Value { ... }
+/// ```
 #[proc_macro_attribute]
 pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
     let fn_ident = &func.sig.ident;
     let vis = &func.vis;
 
+    // Parse optional override attributes
     let parsed: NativeAttr = parse_macro_input!(attr);
-    let method_name = parsed.method;
-    let domain = parsed.domain;
-    let impl_type = parsed.impl_type;
-    let override_method = parsed.override_method;
-    let args_attr = parsed.args;
-    let ret_attr = parsed.ret;
-    let summary = parsed.summary;
-    let arg_descs = parsed.arg_desc;
-    let named_params = parsed.named;
+
+    // Auto-detect domain and method from function name
+    // e.g., "io_open" -> domain="io", method="open"
+    // e.g., "arr_first" -> domain="arr", method="first"
+    let fn_name_str = fn_ident.to_string();
+    let (auto_domain, auto_method) = fn_name_to_domain_method(&fn_name_str);
+
+    // Use explicit values if provided, otherwise auto-detect
+    let method_name = if parsed.method.is_empty() {
+        auto_method
+    } else {
+        parsed.method.clone()
+    };
+    
+    let domain = if !parsed.method.is_empty() {
+        // Explicit name provided — extract domain from dotted name if present
+        parsed.domain.clone().or_else(|| domain_from_name(&method_name).map(|s| s.to_string()))
+    } else {
+        // No explicit name — use auto-detected domain, but allow explicit override
+        parsed.domain.clone().or(Some(auto_domain))
+    };
+
+    let impl_type = parsed.impl_type.clone();
+    let override_method = parsed.override_method.clone();
+    let args_attr = parsed.args.clone();
+    let ret_attr = parsed.ret.clone();
+
+    // Auto-detect summary from doc comments if not explicitly provided
+    let summary = parsed.summary.clone().or_else(|| extract_doc_summary(&func.attrs));
 
     let statik = syn::Ident::new(
         &format!("__XCL_FN_{}", fn_ident),
@@ -384,39 +501,35 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote!(None)
     };
 
-    let args_expr: Option<String> = args_attr;
-    let ret_expr: Option<String> = ret_attr;
-
-    let args_static = match &args_expr {
+    let args_static = match &args_attr {
         Some(s) => quote!(Some(#s)),
         None => quote!(None),
     };
-    let ret_static = match &ret_expr {
+    let ret_static = match &ret_attr {
         Some(s) => quote!(Some(#s)),
         None => quote!(None),
     };
 
-    // Generate summary tokens
     let summary_static = match &summary {
         Some(s) => quote!(Some(#s)),
         None => quote!(None),
     };
 
     // Generate arg_desc tokens
-    let arg_desc_static = if arg_descs.is_empty() {
+    let arg_desc_static = if parsed.arg_desc.is_empty() {
         quote!(&[])
     } else {
-        let entries = arg_descs.iter().map(|(name, desc)| {
+        let entries = parsed.arg_desc.iter().map(|(name, desc)| {
             quote!((#name, #desc))
         });
         quote!(&[#(#entries),*])
     };
 
     // Generate named params tokens
-    let named_static = if named_params.is_empty() {
+    let named_static = if parsed.named.is_empty() {
         quote!(&[])
     } else {
-        let entries = named_params.iter().map(|np| {
+        let entries = parsed.named.iter().map(|np| {
             let n = &np.name;
             let t = &np.ty;
             let d = &np.default;
@@ -441,7 +554,7 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
             fn_ident.span(),
         );
 
-        let (arg_conversions, arg_vars) = generate_arg_conversions(&func, &args_expr);
+        let (arg_conversions, arg_vars) = generate_arg_conversions(&func, &args_attr);
 
         let expanded = quote! {
             #func
@@ -471,7 +584,6 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         expanded.into()
     } else {
-        // Legacy: function takes &[Value] or &mut DomainCtx directly
         let kind = detect_kind(&func);
 
         let expanded = quote! {
@@ -495,6 +607,31 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
         };
 
         expanded.into()
+    }
+}
+
+/// Convert a snake_case function name to (domain, method).
+/// e.g., "io_open" -> ("io", "open")
+/// e.g., "arr_first" -> ("arr", "first")
+/// e.g., "proc_spawn" -> ("proc", "spawn")
+/// e.g., "complex_abs" -> ("complex", "abs")
+fn fn_name_to_domain_method(fn_name: &str) -> (String, String) {
+    if let Some(underscore_pos) = fn_name.find('_') {
+        let domain = fn_name[..underscore_pos].to_string();
+        let method = fn_name[underscore_pos + 1..].to_string();
+        (domain, method)
+    } else {
+        // No underscore — treat the whole name as the method with no domain
+        (String::new(), fn_name.to_string())
+    }
+}
+
+/// Extract domain from a dotted name like "io.open" -> Some("io").
+fn domain_from_name(name: &str) -> Option<&str> {
+    if let Some(dot_pos) = name.find('.') {
+        Some(&name[..dot_pos])
+    } else {
+        None
     }
 }
 

@@ -32,12 +32,7 @@ use xcl_macros::xcl_fn;
 use xcl_vm::{Value, DomainCtx};
 
 /// Run a closure within a GitHub context.
-#[xcl_fn(
-    name = "github",
-    args = "org: str; f: any",
-    ret = "any",
-    summary = "Run a closure within a GitHub organization context."
-)]
+#[xcl_fn(name = "github")]
 fn github_run(ctx: &mut DomainCtx) -> Value {
     let org = ctx.arg(0).as_str().unwrap_or("");
     let closure = ctx.arg(1);
@@ -52,11 +47,7 @@ fn github_run(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Get the current GitHub configuration.
-#[xcl_fn(
-    name = "github.config",
-    ret = "map",
-    summary = "Get the current GitHub configuration."
-)]
+#[xcl_fn]
 fn github_config(ctx: &mut DomainCtx) -> Value {
     let mut config = HashMap::new();
     if let Some(org) = ctx.get_context("github.org") {
@@ -66,11 +57,7 @@ fn github_config(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Get the current GitHub credentials.
-#[xcl_fn(
-    name = "github.credential",
-    ret = "map",
-    summary = "Get the current GitHub credentials."
-)]
+#[xcl_fn]
 fn github_credential(ctx: &mut DomainCtx) -> Value {
     match ctx.get_context("github.credentials") {
         Some(creds) => creds,

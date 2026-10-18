@@ -21,19 +21,19 @@ fn make_array(ctx: &DomainCtx, elements: Vec<Value>) -> Value {
 // ═══════════════════════════════════════════════════════════
 
 /// Get the first element of an array.
-#[xcl_fn(name = "arr.first", args = "a: array", ret = "any")]
+#[xcl_fn]
 fn arr_first(args: &[Value]) -> Value {
     get_array(args[0]).first().copied().unwrap_or(Value::nil())
 }
 
 /// Get the last element of an array.
-#[xcl_fn(name = "arr.last", args = "a: array", ret = "any")]
+#[xcl_fn]
 fn arr_last(args: &[Value]) -> Value {
     get_array(args[0]).last().copied().unwrap_or(Value::nil())
 }
 
 /// Get element at index, or nil if out of bounds.
-#[xcl_fn(name = "arr.get", args = "a: array; i: int", ret = "any")]
+#[xcl_fn]
 fn arr_get(args: &[Value]) -> Value {
     let arr = get_array(args[0]);
     let idx = args[1].as_i48() as usize;
@@ -41,13 +41,13 @@ fn arr_get(args: &[Value]) -> Value {
 }
 
 /// Get the length of an array.
-#[xcl_fn(name = "arr.len", args = "a: array", ret = "int")]
+#[xcl_fn]
 fn arr_len(args: &[Value]) -> Value {
     Value::from_i48(get_array(args[0]).len() as i64)
 }
 
 /// Check if array is empty.
-#[xcl_fn(name = "arr.is_empty", args = "a: array", ret = "bool")]
+#[xcl_fn]
 fn arr_is_empty(args: &[Value]) -> Value {
     Value::bool_(get_array(args[0]).is_empty())
 }
@@ -57,7 +57,7 @@ fn arr_is_empty(args: &[Value]) -> Value {
 // ═══════════════════════════════════════════════════════════
 
 /// Transform each element: `arr.map $arr (($x) => $x * 2)`.
-#[xcl_fn(name = "arr.map", args = "a: array; f: any", ret = "array")]
+#[xcl_fn]
 fn arr_map(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
     let f = ctx.arg(1);
@@ -69,7 +69,7 @@ fn arr_map(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Filter elements by predicate: `arr.filter $arr (($x) => $x > 0)`.
-#[xcl_fn(name = "arr.filter", args = "a: array; f: any", ret = "array")]
+#[xcl_fn]
 fn arr_filter(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
     let f = ctx.arg(1);
@@ -84,7 +84,7 @@ fn arr_filter(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Reduce to a single value: `arr.reduce $arr 0 (($acc, $x) => $acc + $x)`.
-#[xcl_fn(name = "arr.reduce", args = "a: array; init: any; f: any", ret = "any")]
+#[xcl_fn]
 fn arr_reduce(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
     let mut acc = ctx.arg(1);
@@ -96,7 +96,7 @@ fn arr_reduce(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Partition into two arrays: `arr.partition $arr (($x) => $x > 0)`.
-#[xcl_fn(name = "arr.partition", args = "a: array; f: any", ret = "array")]
+#[xcl_fn]
 fn arr_partition(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
     let f = ctx.arg(1);
@@ -119,7 +119,7 @@ fn arr_partition(ctx: &mut DomainCtx) -> Value {
 // ═══════════════════════════════════════════════════════════
 
 /// Sort array in ascending order.
-#[xcl_fn(name = "arr.sort", args = "a: array", ret = "array")]
+#[xcl_fn]
 fn arr_sort(ctx: &mut DomainCtx) -> Value {
     let mut arr = get_array(ctx.arg(0));
     arr.sort_by(|a, b| {
@@ -136,7 +136,7 @@ fn arr_sort(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Sort array using a custom key function.
-#[xcl_fn(name = "arr.sort_by", args = "a: array; f: any", ret = "array")]
+#[xcl_fn]
 fn arr_sort_by(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
     let f = ctx.arg(1);
@@ -156,7 +156,7 @@ fn arr_sort_by(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Reverse the array.
-#[xcl_fn(name = "arr.reverse", args = "a: array", ret = "array")]
+#[xcl_fn]
 fn arr_reverse(ctx: &mut DomainCtx) -> Value {
     let mut arr = get_array(ctx.arg(0));
     arr.reverse();
@@ -168,7 +168,7 @@ fn arr_reverse(ctx: &mut DomainCtx) -> Value {
 // ═══════════════════════════════════════════════════════════
 
 /// Check if array contains a value.
-#[xcl_fn(name = "arr.contains", args = "a: array; v: any", ret = "bool")]
+#[xcl_fn]
 fn arr_contains(args: &[Value]) -> Value {
     let arr = get_array(args[0]);
     let v = args[1];
@@ -176,7 +176,7 @@ fn arr_contains(args: &[Value]) -> Value {
 }
 
 /// Count elements matching a predicate.
-#[xcl_fn(name = "arr.count", args = "a: array; f: any", ret = "int")]
+#[xcl_fn]
 fn arr_count(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
     let f = ctx.arg(1);
@@ -191,7 +191,7 @@ fn arr_count(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Find first element matching a predicate.
-#[xcl_fn(name = "arr.find", args = "a: array; f: any", ret = "any")]
+#[xcl_fn]
 fn arr_find(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
     let f = ctx.arg(1);
@@ -205,7 +205,7 @@ fn arr_find(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Find index of first element matching a predicate.
-#[xcl_fn(name = "arr.find_index", args = "a: array; f: any", ret = "int")]
+#[xcl_fn]
 fn arr_find_index(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
     let f = ctx.arg(1);
@@ -223,7 +223,7 @@ fn arr_find_index(ctx: &mut DomainCtx) -> Value {
 // ═══════════════════════════════════════════════════════════
 
 /// Sum all numeric elements.
-#[xcl_fn(name = "arr.sum", args = "a: array", ret = "float")]
+#[xcl_fn]
 fn arr_sum(args: &[Value]) -> Value {
     let arr = get_array(args[0]);
     let sum: f64 = arr.iter().map(|v| {
@@ -233,7 +233,7 @@ fn arr_sum(args: &[Value]) -> Value {
 }
 
 /// Product of all numeric elements.
-#[xcl_fn(name = "arr.product", args = "a: array", ret = "float")]
+#[xcl_fn]
 fn arr_product(args: &[Value]) -> Value {
     let arr = get_array(args[0]);
     let product: f64 = arr.iter().map(|v| {
@@ -243,7 +243,7 @@ fn arr_product(args: &[Value]) -> Value {
 }
 
 /// Minimum value.
-#[xcl_fn(name = "arr.min", args = "a: array", ret = "any")]
+#[xcl_fn]
 fn arr_min(args: &[Value]) -> Value {
     let arr = get_array(args[0]);
     let mut min = arr.first().copied().unwrap_or(Value::nil());
@@ -256,7 +256,7 @@ fn arr_min(args: &[Value]) -> Value {
 }
 
 /// Maximum value.
-#[xcl_fn(name = "arr.max", args = "a: array", ret = "any")]
+#[xcl_fn]
 fn arr_max(args: &[Value]) -> Value {
     let arr = get_array(args[0]);
     let mut max = arr.first().copied().unwrap_or(Value::nil());
@@ -273,7 +273,7 @@ fn arr_max(args: &[Value]) -> Value {
 // ═══════════════════════════════════════════════════════════
 
 /// Check if any element matches a predicate.
-#[xcl_fn(name = "arr.any", args = "a: array; f: any", ret = "bool")]
+#[xcl_fn]
 fn arr_any(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
     let f = ctx.arg(1);
@@ -287,7 +287,7 @@ fn arr_any(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Check if all elements match a predicate.
-#[xcl_fn(name = "arr.all", args = "a: array; f: any", ret = "bool")]
+#[xcl_fn]
 fn arr_all(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
     let f = ctx.arg(1);
@@ -305,7 +305,7 @@ fn arr_all(ctx: &mut DomainCtx) -> Value {
 // ═══════════════════════════════════════════════════════════
 
 /// Take first n elements.
-#[xcl_fn(name = "arr.take", args = "a: array; n: int", ret = "array")]
+#[xcl_fn]
 fn arr_take(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
     let n = ctx.arg(1).as_i48() as usize;
@@ -313,7 +313,7 @@ fn arr_take(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Drop first n elements.
-#[xcl_fn(name = "arr.drop", args = "a: array; n: int", ret = "array")]
+#[xcl_fn]
 fn arr_drop(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
     let n = ctx.arg(1).as_i48() as usize;
@@ -321,7 +321,7 @@ fn arr_drop(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Slice from start to end (exclusive).
-#[xcl_fn(name = "arr.slice", args = "a: array; start: int; end: int", ret = "array")]
+#[xcl_fn]
 fn arr_slice(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
     let start = ctx.arg(1).as_i48() as usize;
@@ -337,7 +337,7 @@ fn arr_slice(ctx: &mut DomainCtx) -> Value {
 // ═══════════════════════════════════════════════════════════
 
 /// Flatten nested arrays one level.
-#[xcl_fn(name = "arr.flatten", args = "a: array", ret = "array")]
+#[xcl_fn]
 fn arr_flatten(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
     let mut result = Vec::new();
@@ -352,7 +352,7 @@ fn arr_flatten(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Zip two arrays into pairs.
-#[xcl_fn(name = "arr.zip", args = "a: array; b: array", ret = "array")]
+#[xcl_fn]
 fn arr_zip(ctx: &mut DomainCtx) -> Value {
     let a = get_array(ctx.arg(0));
     let b = get_array(ctx.arg(1));
@@ -365,7 +365,7 @@ fn arr_zip(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Remove duplicates, preserving order.
-#[xcl_fn(name = "arr.unique", args = "a: array", ret = "array")]
+#[xcl_fn]
 fn arr_unique(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
     let mut result = Vec::new();
@@ -378,7 +378,7 @@ fn arr_unique(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Chunk array into groups of size n.
-#[xcl_fn(name = "arr.chunk", args = "a: array; n: int", ret = "array")]
+#[xcl_fn]
 fn arr_chunk(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
     let n = ctx.arg(1).as_i48() as usize;
@@ -391,7 +391,7 @@ fn arr_chunk(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Interleave two arrays.
-#[xcl_fn(name = "arr.interleave", args = "a: array; b: array", ret = "array")]
+#[xcl_fn]
 fn arr_interleave(ctx: &mut DomainCtx) -> Value {
     let a = get_array(ctx.arg(0));
     let b = get_array(ctx.arg(1));
@@ -410,7 +410,7 @@ fn arr_interleave(ctx: &mut DomainCtx) -> Value {
 // ═══════════════════════════════════════════════════════════
 
 /// Group elements by a key function, returns a dict of arrays.
-#[xcl_fn(name = "arr.group_by", args = "a: array; f: any", ret = "map")]
+#[xcl_fn]
 fn arr_group_by(ctx: &mut DomainCtx) -> Value {
     let arr = get_array(ctx.arg(0));
     let f = ctx.arg(1);

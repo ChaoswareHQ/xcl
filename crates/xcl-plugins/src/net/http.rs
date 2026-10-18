@@ -85,12 +85,7 @@ fn build_response_result(status: i64, headers: HashMap<String, String>, body: St
 /// ## NOTES
 ///
 /// Only HTTPS URLs are supported. Plain HTTP returns an error.
-#[xcl_fn(
-    name = "net.http.get",
-    args = "url: str",
-    ret = "Result",
-    summary = "Perform an HTTPS GET request and return status, headers, and body."
-)]
+#[xcl_fn(name = "net.http.get")]
 fn http_get(ctx: &mut DomainCtx) -> Value {
     let url = ctx.arg(0).as_str().unwrap_or("");
 
@@ -119,12 +114,7 @@ fn http_get(ctx: &mut DomainCtx) -> Value {
 /// ## RETURNS
 ///
 /// A Result with a map `{status: int, headers: map, body: str}` in the `value` field.
-#[xcl_fn(
-    name = "net.http.post",
-    args = "url: str; body: str",
-    ret = "Result",
-    summary = "Perform an HTTPS POST request and return status, headers, and body."
-)]
+#[xcl_fn(name = "net.http.post")]
 fn http_post(ctx: &mut DomainCtx) -> Value {
     let url = ctx.arg(0).as_str().unwrap_or("");
     let body = ctx.arg(1).as_str().unwrap_or("");
@@ -153,12 +143,7 @@ fn http_post(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// $r = net.http.request "PUT" "https://example.com/api/1" { Authorization: "Bearer token" } "data"
 /// ```
-#[xcl_fn(
-    name = "net.http.request",
-    args = "method: str; url: str; headers: map; body: str",
-    ret = "Result",
-    summary = "Perform a custom HTTPS request with method, headers, and body."
-)]
+#[xcl_fn(name = "net.http.request")]
 fn http_request(ctx: &mut DomainCtx) -> Value {
     let method = ctx.arg(0).as_str().unwrap_or("GET");
     let url = ctx.arg(1).as_str().unwrap_or("");

@@ -76,12 +76,7 @@ fn udp_registry() -> &'static Mutex<UdpHandleRegistry> {
 /// ## RETURNS
 ///
 /// A Result with the integer handle in the `value` field on success.
-#[xcl_fn(
-    name = "net.udp.bind",
-    args = "host: str; port: int",
-    ret = "Result",
-    summary = "Bind a UDP socket to a local address."
-)]
+#[xcl_fn(name = "net.udp.bind")]
 fn udp_bind(ctx: &mut DomainCtx) -> Value {
     let host = ctx.arg(0).as_str().unwrap_or("127.0.0.1");
     let port = ctx.arg(1).as_i48() as u16;
@@ -114,12 +109,7 @@ fn udp_bind(ctx: &mut DomainCtx) -> Value {
 /// ## RETURNS
 ///
 /// A Result with the number of bytes sent in the `value` field.
-#[xcl_fn(
-    name = "net.udp.send",
-    args = "id: int; host: str; port: int; data: str",
-    ret = "Result",
-    summary = "Send data to a remote address via UDP."
-)]
+#[xcl_fn(name = "net.udp.send")]
 fn udp_send(ctx: &mut DomainCtx) -> Value {
     let id = ctx.arg(0).as_i48();
     let host = ctx.arg(1).as_str().unwrap_or("");
@@ -159,12 +149,7 @@ fn udp_send(ctx: &mut DomainCtx) -> Value {
 /// ## RETURNS
 ///
 /// A Result with a map `{data: str, from: str}` in the `value` field.
-#[xcl_fn(
-    name = "net.udp.recv",
-    args = "id: int; max_bytes: int",
-    ret = "Result",
-    summary = "Receive data from a UDP socket."
-)]
+#[xcl_fn(name = "net.udp.recv")]
 fn udp_recv(ctx: &mut DomainCtx) -> Value {
     let id = ctx.arg(0).as_i48();
     let max_bytes = ctx.arg(1).as_i48() as usize;
@@ -197,12 +182,7 @@ fn udp_recv(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// fn net.udp.close(id: int) -> Result
 /// ```
-#[xcl_fn(
-    name = "net.udp.close",
-    args = "id: int",
-    ret = "Result",
-    summary = "Close a UDP socket and release the handle."
-)]
+#[xcl_fn(name = "net.udp.close")]
 fn udp_close(ctx: &mut DomainCtx) -> Value {
     let id = ctx.arg(0).as_i48();
 
@@ -221,12 +201,7 @@ fn udp_close(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// fn net.udp.local_addr(id: int) -> Result
 /// ```
-#[xcl_fn(
-    name = "net.udp.local_addr",
-    args = "id: int",
-    ret = "Result",
-    summary = "Get the local address of a UDP socket."
-)]
+#[xcl_fn(name = "net.udp.local_addr")]
 fn udp_local_addr(ctx: &mut DomainCtx) -> Value {
     let id = ctx.arg(0).as_i48();
 

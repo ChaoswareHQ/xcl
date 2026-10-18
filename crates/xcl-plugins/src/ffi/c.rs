@@ -17,7 +17,7 @@ use xcl_vm::Value;
 /// ```xcl
 /// ffi.c_size("c_int")  // Returns 4 on most platforms
 /// ```
-#[xcl_fn("ffi.c_size", signature = "(type_name: str) -> int")]
+#[xcl_fn]
 pub fn c_size(type_name: &str) -> Value {
     let size = match type_name {
         "c_char" => std::mem::size_of::<std::ffi::c_char>(),
@@ -53,7 +53,7 @@ pub fn c_size(type_name: &str) -> Value {
 /// ```xcl
 /// ffi.c_align("c_double")
 /// ```
-#[xcl_fn("ffi.c_align", signature = "(type_name: str) -> int")]
+#[xcl_fn]
 pub fn c_align(type_name: &str) -> Value {
     let align = match type_name {
         "c_char" => std::mem::align_of::<std::ffi::c_char>(),
@@ -76,7 +76,7 @@ pub fn c_align(type_name: &str) -> Value {
 /// ```xcl
 /// ffi.pointer_size()
 /// ```
-#[xcl_fn("ffi.pointer_size", signature = "() -> int")]
+#[xcl_fn]
 pub fn pointer_size() -> Value {
     Value::from_i48(std::mem::size_of::<*mut std::ffi::c_void>() as i64)
 }
@@ -90,7 +90,7 @@ pub fn pointer_size() -> Value {
 /// ```xcl
 /// ffi.byte_order()
 /// ```
-#[xcl_fn("ffi.byte_order", signature = "() -> str")]
+#[xcl_fn]
 pub fn byte_order() -> Value {
     let order = if cfg!(target_endian = "little") {
         "little_endian"
@@ -112,7 +112,7 @@ pub fn byte_order() -> Value {
 /// ```xcl
 /// ffi.c_type_info("c_int")
 /// ```
-#[xcl_fn("ffi.c_type_info", signature = "(type_name: str) -> map")]
+#[xcl_fn]
 pub fn c_type_info(type_name: &str) -> Value {
     let mut info = std::collections::HashMap::new();
     info.insert("name".to_string(), Value::from_str_boxed(type_name.to_string()));
@@ -135,7 +135,7 @@ pub fn c_type_info(type_name: &str) -> Value {
 /// ```xcl
 /// ffi.c_types()
 /// ```
-#[xcl_fn("ffi.c_types", signature = "() -> array")]
+#[xcl_fn]
 pub fn c_types() -> Value {
     let types = vec![
         "c_char", "c_schar", "c_uchar",

@@ -43,13 +43,7 @@ use xcl_vm::{Value, DomainCtx};
 /// in reverse order of registration (LIFO, like Go's defer).
 ///
 /// Returns nil.
-#[xcl_fn(
-    name = "defer",
-    args = "f: any",
-    ret = "nil",
-    summary = "Schedule a closure to run when the current function returns. \
-               Multiple defers execute in reverse (LIFO) order."
-)]
+#[xcl_fn(name = "defer")]
 fn std_defer(ctx: &mut DomainCtx) -> Value {
     let closure = ctx.arg(0);
     ctx.defer(closure);

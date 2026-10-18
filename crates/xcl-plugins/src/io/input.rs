@@ -222,19 +222,7 @@ fn emit_prompt(prompt: &str) {
 /// - The returned string in line mode has trailing `\n` and `\r` characters removed.
 /// - On EOF, returns `none` (except `--all`, which returns an empty string).
 /// - The prompt is written to stdout and flushed before reading begins.
-#[xcl_fn(
-    name = "input",
-    ret = "any",
-    args = "prompt: str",
-    named(
-        { name = "bool", ty = "bool", default = "false" },
-        { name = "int", ty = "bool", default = "false" },
-        { name = "float", ty = "bool", default = "false" },
-        { name = "word", ty = "bool", default = "false" },
-        { name = "line", ty = "bool", default = "false" },
-        { name = "all", ty = "bool", default = "false" },
-    ),
-)]
+#[xcl_fn(name = "input")]
 pub fn io_input_fn(args: &[Value]) -> Value {
     // Parse positional prompt arg
     let prompt = args.first().and_then(|v| v.as_str()).unwrap_or("");

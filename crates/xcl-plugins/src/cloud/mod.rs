@@ -152,12 +152,7 @@ impl CloudService for AwsProvider {
 ///     print $provider
 /// }
 /// ```
-#[xcl_fn(
-    name = "cloud.run",
-    args = "provider: str; region: str; f: any",
-    ret = "any",
-    summary = "Run a closure within a cloud provider context scope."
-)]
+#[xcl_fn]
 fn cloud_run(ctx: &mut DomainCtx) -> Value {
     let provider = ctx.arg(0).as_str().unwrap_or("");
     let region = ctx.arg(1).as_str().unwrap_or("");
@@ -185,11 +180,7 @@ fn cloud_run(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// fn cloud.get() -> str
 /// ```
-#[xcl_fn(
-    name = "cloud.get",
-    ret = "str",
-    summary = "Get the current cloud provider name."
-)]
+#[xcl_fn]
 fn cloud_get(ctx: &mut DomainCtx) -> Value {
     ctx.get_context("cloud.provider").unwrap_or(Value::nil())
 }
@@ -204,11 +195,7 @@ fn cloud_get(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// fn cloud.config() -> map
 /// ```
-#[xcl_fn(
-    name = "cloud.config",
-    ret = "map",
-    summary = "Get the current cloud provider configuration map."
-)]
+#[xcl_fn]
 fn cloud_config(ctx: &mut DomainCtx) -> Value {
     ctx.get_context("cloud.config").unwrap_or(Value::nil())
 }

@@ -44,12 +44,7 @@ use super::tcp_registry;
 /// ## RETURNS
 ///
 /// A Result with the integer handle in the `value` field on success.
-#[xcl_fn(
-    name = "net.tcp.connect",
-    args = "host: str; port: int",
-    ret = "Result",
-    summary = "Connect to a TCP server and return an opaque handle."
-)]
+#[xcl_fn(name = "net.tcp.connect")]
 fn tcp_connect(ctx: &mut DomainCtx) -> Value {
     let host = ctx.arg(0).as_str().unwrap_or("");
     let port = ctx.arg(1).as_i48() as u16;
@@ -78,12 +73,7 @@ fn tcp_connect(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// $r = net.tcp.connect_timeout "127.0.0.1" 8080 5000
 /// ```
-#[xcl_fn(
-    name = "net.tcp.connect_timeout",
-    args = "host: str; port: int; timeout_ms: int",
-    ret = "Result",
-    summary = "Connect to a TCP server with a timeout in milliseconds."
-)]
+#[xcl_fn(name = "net.tcp.connect_timeout")]
 fn tcp_connect_timeout(ctx: &mut DomainCtx) -> Value {
     let host = ctx.arg(0).as_str().unwrap_or("");
     let port = ctx.arg(1).as_i48() as u16;
@@ -117,12 +107,7 @@ fn tcp_connect_timeout(ctx: &mut DomainCtx) -> Value {
 /// ## RETURNS
 ///
 /// A Result with the number of bytes written in the `value` field.
-#[xcl_fn(
-    name = "net.tcp.write",
-    args = "id: int; data: str",
-    ret = "Result",
-    summary = "Write data to a TCP connection."
-)]
+#[xcl_fn(name = "net.tcp.write")]
 fn tcp_write(ctx: &mut DomainCtx) -> Value {
     let id = ctx.arg(0).as_i48();
     let data = ctx.arg(1).as_str().unwrap_or("");
@@ -160,12 +145,7 @@ fn tcp_write(ctx: &mut DomainCtx) -> Value {
 /// ## RETURNS
 ///
 /// A Result with the read string in the `value` field. Empty string on EOF.
-#[xcl_fn(
-    name = "net.tcp.read",
-    args = "id: int; max_bytes: int",
-    ret = "Result",
-    summary = "Read up to max_bytes from a TCP connection."
-)]
+#[xcl_fn(name = "net.tcp.read")]
 fn tcp_read(ctx: &mut DomainCtx) -> Value {
     let id = ctx.arg(0).as_i48();
     let max_bytes = ctx.arg(1).as_i48() as usize;
@@ -203,12 +183,7 @@ fn tcp_read(ctx: &mut DomainCtx) -> Value {
 /// $r = net.tcp.readline $id
 /// $line = $r.value
 /// ```
-#[xcl_fn(
-    name = "net.tcp.readline",
-    args = "id: int",
-    ret = "Result",
-    summary = "Read a single line from a TCP connection."
-)]
+#[xcl_fn(name = "net.tcp.readline")]
 fn tcp_readline(ctx: &mut DomainCtx) -> Value {
     let id = ctx.arg(0).as_i48();
 
@@ -259,12 +234,7 @@ fn tcp_readline(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// net.tcp.close $id
 /// ```
-#[xcl_fn(
-    name = "net.tcp.close",
-    args = "id: int",
-    ret = "Result",
-    summary = "Close a TCP connection and release the handle."
-)]
+#[xcl_fn(name = "net.tcp.close")]
 fn tcp_close(ctx: &mut DomainCtx) -> Value {
     let id = ctx.arg(0).as_i48();
 
@@ -283,12 +253,7 @@ fn tcp_close(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// fn net.tcp.local_addr(id: int) -> Result
 /// ```
-#[xcl_fn(
-    name = "net.tcp.local_addr",
-    args = "id: int",
-    ret = "Result",
-    summary = "Get the local address of a TCP connection."
-)]
+#[xcl_fn(name = "net.tcp.local_addr")]
 fn tcp_local_addr(ctx: &mut DomainCtx) -> Value {
     let id = ctx.arg(0).as_i48();
 
@@ -312,12 +277,7 @@ fn tcp_local_addr(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// fn net.tcp.peer_addr(id: int) -> Result
 /// ```
-#[xcl_fn(
-    name = "net.tcp.peer_addr",
-    args = "id: int",
-    ret = "Result",
-    summary = "Get the peer address of a TCP connection."
-)]
+#[xcl_fn(name = "net.tcp.peer_addr")]
 fn tcp_peer_addr(ctx: &mut DomainCtx) -> Value {
     let id = ctx.arg(0).as_i48();
 
@@ -341,12 +301,7 @@ fn tcp_peer_addr(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// fn net.tcp.set_read_timeout(id: int; timeout_ms: int) -> Result
 /// ```
-#[xcl_fn(
-    name = "net.tcp.set_read_timeout",
-    args = "id: int; timeout_ms: int",
-    ret = "Result",
-    summary = "Set the read timeout for a TCP connection."
-)]
+#[xcl_fn(name = "net.tcp.set_read_timeout")]
 fn tcp_set_read_timeout(ctx: &mut DomainCtx) -> Value {
     let id = ctx.arg(0).as_i48();
     let timeout_ms = ctx.arg(1).as_i48() as u64;
@@ -371,12 +326,7 @@ fn tcp_set_read_timeout(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// fn net.tcp.set_write_timeout(id: int; timeout_ms: int) -> Result
 /// ```
-#[xcl_fn(
-    name = "net.tcp.set_write_timeout",
-    args = "id: int; timeout_ms: int",
-    ret = "Result",
-    summary = "Set the write timeout for a TCP connection."
-)]
+#[xcl_fn(name = "net.tcp.set_write_timeout")]
 fn tcp_set_write_timeout(ctx: &mut DomainCtx) -> Value {
     let id = ctx.arg(0).as_i48();
     let timeout_ms = ctx.arg(1).as_i48() as u64;

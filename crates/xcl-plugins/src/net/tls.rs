@@ -95,12 +95,7 @@ fn tls_registry() -> &'static Mutex<TlsHandleRegistry> {
 /// ## RETURNS
 ///
 /// A Result with an integer handle in the `value` field.
-#[xcl_fn(
-    name = "net.tls.connect",
-    args = "host: str; port: int",
-    ret = "Result",
-    summary = "Open a TLS connection to host:port and return an opaque handle."
-)]
+#[xcl_fn(name = "net.tls.connect")]
 fn tls_connect(ctx: &mut DomainCtx) -> Value {
     let host = ctx.arg(0).as_str().unwrap_or("");
     let port = ctx.arg(1).as_i48() as u16;
@@ -130,12 +125,7 @@ fn tls_connect(ctx: &mut DomainCtx) -> Value {
 /// ## RETURNS
 ///
 /// A Result with the read data as a string in the `value` field.
-#[xcl_fn(
-    name = "net.tls.read",
-    args = "id: int; max_bytes: int",
-    ret = "Result",
-    summary = "Read up to max_bytes from a TLS connection."
-)]
+#[xcl_fn(name = "net.tls.read")]
 fn tls_read(ctx: &mut DomainCtx) -> Value {
     let id = ctx.arg(0).as_i48() as usize;
     let max_bytes = ctx.arg(1).as_i48() as usize;
@@ -184,12 +174,7 @@ fn tls_read(ctx: &mut DomainCtx) -> Value {
 /// ## RETURNS
 ///
 /// A Result with the number of bytes written in the `value` field.
-#[xcl_fn(
-    name = "net.tls.write",
-    args = "id: int; data: str",
-    ret = "Result",
-    summary = "Write data to a TLS connection."
-)]
+#[xcl_fn(name = "net.tls.write")]
 fn tls_write(ctx: &mut DomainCtx) -> Value {
     let _id = ctx.arg(0).as_i48() as usize;
     let _data = ctx.arg(1).as_str().unwrap_or("");
@@ -209,12 +194,7 @@ fn tls_write(ctx: &mut DomainCtx) -> Value {
 /// ## RETURNS
 ///
 /// A Result indicating success or failure.
-#[xcl_fn(
-    name = "net.tls.close",
-    args = "id: int",
-    ret = "Result",
-    summary = "Close a TLS connection."
-)]
+#[xcl_fn(name = "net.tls.close")]
 fn tls_close(ctx: &mut DomainCtx) -> Value {
     let id = ctx.arg(0).as_i48() as usize;
 

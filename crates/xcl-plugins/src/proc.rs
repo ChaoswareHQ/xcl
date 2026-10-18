@@ -83,7 +83,7 @@ pub struct ProcessType;
 /// - Returns `Err` if the command cannot be found or executed.
 /// - The process runs asynchronously; use `proc.wait` to wait for completion.
 /// - On Windows, the command is looked up in PATH.
-#[xcl_fn(name = "proc.spawn", args = "command: str; args: arr", ret = "Result")]
+#[xcl_fn]
 pub fn proc_spawn(ctx: &mut DomainCtx) -> Value {
     let command = ctx.arg(0).as_str().unwrap_or("");
     let args_val = ctx.arg(1);
@@ -146,7 +146,7 @@ pub fn proc_spawn(ctx: &mut DomainCtx) -> Value {
 /// - Blocks until the process completes.
 /// - Captures stdout and stderr from the process.
 /// - Returns a dict with `exit_code`, `stdout`, and `stderr` fields.
-#[xcl_fn(name = "proc.run", args = "command: str; args: arr", ret = "Result")]
+#[xcl_fn]
 pub fn proc_run(ctx: &mut DomainCtx) -> Value {
     let command = ctx.arg(0).as_str().unwrap_or("");
     let args_val = ctx.arg(1);
@@ -206,7 +206,7 @@ pub fn proc_run(ctx: &mut DomainCtx) -> Value {
 /// - Blocks until the process completes.
 /// - Returns the exit code as an integer.
 /// - If the process was killed, the exit code may be -1 or platform-specific.
-#[xcl_fn(name = "proc.wait", args = "process: Process", ret = "Result")]
+#[xcl_fn]
 pub fn proc_wait(ctx: &mut DomainCtx) -> Value {
     let handle = ctx.arg(0);
     let Some(hkind) = handle.as_handle_mut() else {
@@ -261,7 +261,7 @@ pub fn proc_wait(ctx: &mut DomainCtx) -> Value {
 ///
 /// - Forcefully terminates the process using SIGKILL (Unix) or TerminateProcess (Windows).
 /// - After killing, the process handle should not be reused.
-#[xcl_fn(name = "proc.kill", args = "process: Process", ret = "Result")]
+#[xcl_fn]
 pub fn proc_kill(ctx: &mut DomainCtx) -> Value {
     let handle = ctx.arg(0);
     let Some(hkind) = handle.as_handle_mut() else {
@@ -313,7 +313,7 @@ pub fn proc_kill(ctx: &mut DomainCtx) -> Value {
 /// ## NOTES
 ///
 /// - The PID can be used with external tools to monitor or manage the process.
-#[xcl_fn(name = "proc.pid", args = "process: Process", ret = "int")]
+#[xcl_fn]
 pub fn proc_pid(ctx: &mut DomainCtx) -> Value {
     let handle = ctx.arg(0);
     let Some(hkind) = handle.as_handle() else {
@@ -346,7 +346,7 @@ pub fn proc_pid(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `int`
-#[xcl_fn(name = "proc.get_pid", ret = "int")]
+#[xcl_fn]
 pub fn proc_get_pid(_ctx: &mut DomainCtx) -> Value {
     Value::from_i48(std::process::id() as i64)
 }
@@ -389,7 +389,7 @@ pub fn proc_get_pid(_ctx: &mut DomainCtx) -> Value {
 ///
 /// - Captures stdout and stderr using pipes.
 /// - Use `proc.wait` to wait for completion.
-#[xcl_fn(name = "proc.spawn_capture", args = "command: str; args: arr", ret = "Result")]
+#[xcl_fn]
 pub fn proc_spawn_capture(ctx: &mut DomainCtx) -> Value {
     let command = ctx.arg(0).as_str().unwrap_or("");
     let args_val = ctx.arg(1);

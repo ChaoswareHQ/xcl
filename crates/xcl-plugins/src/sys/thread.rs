@@ -17,7 +17,7 @@ use xcl_vm::Value;
 /// ```xcl
 /// sys.thread_id()
 /// ```
-#[xcl_fn("sys.thread_id", signature = "() -> int")]
+#[xcl_fn]
 pub fn thread_id() -> Value {
     Value::from_i48(thread::current().id().as_u128() as i64)
 }
@@ -31,7 +31,7 @@ pub fn thread_id() -> Value {
 /// ```xcl
 /// sys.thread_name()
 /// ```
-#[xcl_fn("sys.thread_name", signature = "() -> str")]
+#[xcl_fn]
 pub fn thread_name() -> Value {
     let name = thread::current().name().unwrap_or("").to_string();
     Value::from_str_boxed(name)
@@ -45,7 +45,7 @@ pub fn thread_name() -> Value {
 /// ```xcl
 /// sys.thread_yield()
 /// ```
-#[xcl_fn("sys.thread_yield", signature = "() -> nil")]
+#[xcl_fn]
 pub fn thread_yield() -> Value {
     thread::yield_now();
     Value::nil()
@@ -60,7 +60,7 @@ pub fn thread_yield() -> Value {
 /// ```xcl
 /// sys.thread_park(100)  // Sleep for 100ms
 /// ```
-#[xcl_fn("sys.thread_park", signature = "(duration_ms: int) -> nil")]
+#[xcl_fn]
 pub fn thread_park(duration_ms: i64) -> Value {
     let duration = Duration::from_millis(duration_ms as u64);
     thread::park_timeout(duration);
@@ -76,7 +76,7 @@ pub fn thread_park(duration_ms: i64) -> Value {
 /// ```xcl
 /// sys.cpu_count()
 /// ```
-#[xcl_fn("sys.cpu_count", signature = "() -> int")]
+#[xcl_fn]
 pub fn cpu_count() -> Value {
     let count = thread::available_parallelism().unwrap_or_else(|_| thread::available_parallelism().unwrap()).get();
     Value::from_i48(count as i64)
@@ -91,7 +91,7 @@ pub fn cpu_count() -> Value {
 /// ```xcl
 /// sys.thread_count()
 /// ```
-#[xcl_fn("sys.thread_count", signature = "() -> int")]
+#[xcl_fn]
 pub fn thread_count() -> Value {
     #[cfg(target_os = "linux")]
     {
@@ -123,7 +123,7 @@ pub fn thread_count() -> Value {
 /// ```xcl
 /// sys.stack_size()
 /// ```
-#[xcl_fn("sys.stack_size", signature = "() -> int")]
+#[xcl_fn]
 pub fn stack_size() -> Value {
     #[cfg(unix)]
     {

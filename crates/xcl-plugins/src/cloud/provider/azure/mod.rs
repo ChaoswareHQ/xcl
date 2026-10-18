@@ -65,12 +65,7 @@ use xcl_vm::{Value, DomainCtx};
 ///     # Uses sub-a again
 /// }
 /// ```
-#[xcl_fn(
-    name = "azure",
-    args = "subscription: str; f: any",
-    ret = "any",
-    summary = "Run a closure within an Azure subscription context."
-)]
+#[xcl_fn(name = "azure")]
 fn azure_run(ctx: &mut DomainCtx) -> Value {
     let subscription = ctx.arg(0).as_str().unwrap_or("");
     let closure = ctx.arg(1);
@@ -98,11 +93,7 @@ fn azure_run(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// fn azure.config() -> map
 /// ```
-#[xcl_fn(
-    name = "azure.config",
-    ret = "map",
-    summary = "Get the current Azure configuration."
-)]
+#[xcl_fn]
 fn azure_config(ctx: &mut DomainCtx) -> Value {
     let mut config = HashMap::new();
 
@@ -128,11 +119,7 @@ fn azure_config(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// fn azure.credential() -> map
 /// ```
-#[xcl_fn(
-    name = "azure.credential",
-    ret = "map",
-    summary = "Get the current Azure credentials."
-)]
+#[xcl_fn]
 fn azure_credential(ctx: &mut DomainCtx) -> Value {
     match ctx.get_context("azure.credentials") {
         Some(creds) => creds,

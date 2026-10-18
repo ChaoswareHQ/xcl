@@ -20,7 +20,7 @@ use xcl_vm::Value;
 /// ```xcl
 /// fd = sys.fd_open("/tmp/test.txt", 64)  // O_CREAT
 /// ```
-#[xcl_fn("sys.fd_open", signature = "(path: str, flags: int) -> result")]
+#[xcl_fn]
 pub fn fd_open(path: &str, flags: i64) -> Value {
     #[cfg(unix)]
     {
@@ -49,7 +49,7 @@ pub fn fd_open(path: &str, flags: i64) -> Value {
 /// ```xcl
 /// sys.fd_close(3)
 /// ```
-#[xcl_fn("sys.fd_close", signature = "(fd: int) -> result")]
+#[xcl_fn]
 pub fn fd_close(fd: i64) -> Value {
     #[cfg(unix)]
     {
@@ -79,7 +79,7 @@ pub fn fd_close(fd: i64) -> Value {
 /// ```xcl
 /// data = sys.fd_read(0, 1024)  // Read 1KB from stdin
 /// ```
-#[xcl_fn("sys.fd_read", signature = "(fd: int, size: int) -> result")]
+#[xcl_fn]
 pub fn fd_read(fd: i64, size: i64) -> Value {
     #[cfg(unix)]
     {
@@ -111,7 +111,7 @@ pub fn fd_read(fd: i64, size: i64) -> Value {
 /// ```xcl
 /// sys.fd_write(1, "Hello, World!")  // Write to stdout
 /// ```
-#[xcl_fn("sys.fd_write", signature = "(fd: int, data: str) -> result")]
+#[xcl_fn]
 pub fn fd_write(fd: i64, data: &str) -> Value {
     #[cfg(unix)]
     {
@@ -148,7 +148,7 @@ pub fn fd_write(fd: i64, data: &str) -> Value {
 /// ```xcl
 /// data = sys.mmap("/tmp/large_file.bin", 0, 1024)
 /// ```
-#[xcl_fn("sys.mmap", signature = "(path: str, offset: int, length: int) -> result")]
+#[xcl_fn]
 pub fn mmap(path: &str, offset: i64, length: i64) -> Value {
     #[cfg(unix)]
     {
@@ -200,7 +200,7 @@ pub fn mmap(path: &str, offset: i64, length: i64) -> Value {
 /// ```xcl
 /// new_fd = sys.fd_dup(0)  // Duplicate stdin
 /// ```
-#[xcl_fn("sys.fd_dup", signature = "(fd: int) -> result")]
+#[xcl_fn]
 pub fn fd_dup(fd: i64) -> Value {
     #[cfg(unix)]
     {
@@ -229,7 +229,7 @@ pub fn fd_dup(fd: i64) -> Value {
 /// ```xcl
 /// sys.fd_stat(0)
 /// ```
-#[xcl_fn("sys.fd_stat", signature = "(fd: int) -> result")]
+#[xcl_fn]
 pub fn fd_stat(fd: i64) -> Value {
     #[cfg(unix)]
     {

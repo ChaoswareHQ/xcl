@@ -75,7 +75,7 @@ pub struct ResultType;
 /// ```xcl
 /// $err = make_error "not_found" "file missing" 2
 /// ```
-#[xcl_fn(name = "make_error", args = "kind: str; message: str; code: int", ret = "Error")]
+#[xcl_fn(name = "make_error")]
 pub fn make_error(args: &[Value]) -> Value {
     let kind = args[0].as_str().unwrap_or("").to_string();
     let message = args[1].as_str().unwrap_or("").to_string();
@@ -102,7 +102,7 @@ pub fn make_error(args: &[Value]) -> Value {
 /// $r = Ok 42
 /// io.print $r.value  // 42
 /// ```
-#[xcl_fn(name = "Ok", args = "value: any", ret = "Result")]
+#[xcl_fn(name = "Ok")]
 pub fn ok_variant(args: &[Value]) -> Value {
     ok_result(args[0])
 }
@@ -121,7 +121,7 @@ pub fn ok_variant(args: &[Value]) -> Value {
 /// $r = Err (make_error "not_found" "missing" 2)
 /// io.print $r.error.message  // "missing"
 /// ```
-#[xcl_fn(name = "Err", args = "error: Error", ret = "Result")]
+#[xcl_fn(name = "Err")]
 pub fn err_variant(args: &[Value]) -> Value {
     let error = args[0];
     let mut m = HashMap::new();
@@ -143,7 +143,7 @@ pub fn err_variant(args: &[Value]) -> Value {
 /// $r = result.map (Ok 10) (($x) => $x * 2)
 /// io.print $r.value  // 20
 /// ```
-#[xcl_fn(name = "result.map", args = "result: Result; f: any", ret = "Result")]
+#[xcl_fn]
 pub fn result_map(ctx: &mut DomainCtx) -> Value {
     let result = ctx.arg(0);
     let f = ctx.arg(1);
@@ -174,7 +174,7 @@ pub fn result_map(ctx: &mut DomainCtx) -> Value {
 /// $r = result.and_then (Ok 5) $double
 /// io.print $r.value  // 10
 /// ```
-#[xcl_fn(name = "result.and_then", args = "result: Result; f: any", ret = "Result")]
+#[xcl_fn]
 pub fn result_and_then(ctx: &mut DomainCtx) -> Value {
     let result = ctx.arg(0);
     let f = ctx.arg(1);
@@ -203,7 +203,7 @@ pub fn result_and_then(ctx: &mut DomainCtx) -> Value {
 /// $wrapper = ($e) => make_error "wrapped" $e.message $e.code
 /// $r = result.map_err (Err (make_error "not_found" "file" 2)) $wrapper
 /// ```
-#[xcl_fn(name = "result.map_err", args = "result: Result; f: any", ret = "Result")]
+#[xcl_fn]
 pub fn result_map_err(ctx: &mut DomainCtx) -> Value {
     let result = ctx.arg(0);
     let f = ctx.arg(1);
@@ -236,7 +236,7 @@ pub fn result_map_err(ctx: &mut DomainCtx) -> Value {
 /// $r = result.or_else (Err (make_error "x" "y" 0)) $fallback
 /// io.print $r.value  // 99
 /// ```
-#[xcl_fn(name = "result.or_else", args = "result: Result; f: any", ret = "Result")]
+#[xcl_fn]
 pub fn result_or_else(ctx: &mut DomainCtx) -> Value {
     let result = ctx.arg(0);
     let f = ctx.arg(1);
@@ -268,7 +268,7 @@ pub fn result_or_else(ctx: &mut DomainCtx) -> Value {
 /// $r = result.unwrap_or (Err (make_error "x" "y" 0)) 99
 /// io.print $r  // 99
 /// ```
-#[xcl_fn(name = "result.unwrap_or", args = "result: Result; fallback: any", ret = "any")]
+#[xcl_fn]
 pub fn result_unwrap_or(args: &[Value]) -> Value {
     let result = args[0];
     let fallback = args[1];
@@ -297,7 +297,7 @@ pub fn result_unwrap_or(args: &[Value]) -> Value {
 /// $r = result.unwrap_or_else (Err (make_error "x" "y" 0)) $fallback
 /// io.print $r  // 77
 /// ```
-#[xcl_fn(name = "result.unwrap_or_else", args = "result: Result; f: any", ret = "any")]
+#[xcl_fn]
 pub fn result_unwrap_or_else(ctx: &mut DomainCtx) -> Value {
     let result = ctx.arg(0);
     let f = ctx.arg(1);
@@ -331,7 +331,7 @@ pub fn result_unwrap_or_else(ctx: &mut DomainCtx) -> Value {
 ///     io.print $r.value  // 42
 /// }
 /// ```
-#[xcl_fn(name = "result.is_ok", args = "result: Result", ret = "bool")]
+#[xcl_fn]
 pub fn result_is_ok(args: &[Value]) -> Value {
     let result = args[0];
     Value::bool_(result.map_variant() == Some(VARIANT_OK))
@@ -353,7 +353,7 @@ pub fn result_is_ok(args: &[Value]) -> Value {
 ///     io.print $r.error.message  // "missing"
 /// }
 /// ```
-#[xcl_fn(name = "result.is_err", args = "result: Result", ret = "bool")]
+#[xcl_fn]
 pub fn result_is_err(args: &[Value]) -> Value {
     let result = args[0];
     Value::bool_(result.map_variant() == Some(VARIANT_ERR))

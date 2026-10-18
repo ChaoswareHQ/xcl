@@ -19,7 +19,7 @@ use xcl_vm::Value;
 /// ```xcl
 /// ffi.winapi.call("GetLastError", [])
 /// ```
-#[xcl_fn("ffi.winapi.call", signature = "(function: str, args: array) -> result")]
+#[xcl_fn]
 pub fn call(_function: &str, _args: &[Value]) -> Value {
     #[cfg(target_os = "windows")]
     {
@@ -40,7 +40,7 @@ pub fn call(_function: &str, _args: &[Value]) -> Value {
 /// ```xcl
 /// ffi.winapi.version()
 /// ```
-#[xcl_fn("ffi.winapi.version", signature = "() -> str")]
+#[xcl_fn]
 pub fn version() -> Value {
     #[cfg(target_os = "windows")]
     {
@@ -61,7 +61,7 @@ pub fn version() -> Value {
 /// ```xcl
 /// ffi.winapi.functions()
 /// ```
-#[xcl_fn("ffi.winapi.functions", signature = "() -> array")]
+#[xcl_fn]
 pub fn functions() -> Value {
     let funcs = vec![
         "GetLastError", "SetLastError",
@@ -92,7 +92,7 @@ pub fn functions() -> Value {
 /// ```xcl
 /// ffi.winapi.function_info("CreateFileW")
 /// ```
-#[xcl_fn("ffi.winapi.function_info", signature = "(function: str) -> map")]
+#[xcl_fn]
 pub fn function_info(function: &str) -> Value {
     let mut info = HashMap::new();
     info.insert("name".to_string(), Value::from_str_boxed(function.to_string()));
@@ -124,7 +124,7 @@ pub fn function_info(function: &str) -> Value {
 /// ```xcl
 /// ffi.winapi.error_message(5)  // "Access is denied"
 /// ```
-#[xcl_fn("ffi.winapi.error_message", signature = "(error_code: int) -> str")]
+#[xcl_fn]
 pub fn error_message(_error_code: i64) -> Value {
     #[cfg(target_os = "windows")]
     {

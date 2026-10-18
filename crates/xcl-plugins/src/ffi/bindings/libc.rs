@@ -19,7 +19,7 @@ use xcl_vm::Value;
 /// ```xcl
 /// ffi.libc.call("malloc", [256])
 /// ```
-#[xcl_fn("ffi.libc.call", signature = "(function: str, args: array) -> result")]
+#[xcl_fn]
 pub fn call(_function: &str, _args: &[Value]) -> Value {
     Value::from_i48(0)
 }
@@ -33,7 +33,7 @@ pub fn call(_function: &str, _args: &[Value]) -> Value {
 /// ```xcl
 /// ffi.libc.version()
 /// ```
-#[xcl_fn("ffi.libc.version", signature = "() -> str")]
+#[xcl_fn]
 pub fn version() -> Value {
     #[cfg(target_os = "linux")]
     {
@@ -58,7 +58,7 @@ pub fn version() -> Value {
 /// ```xcl
 /// ffi.libc.functions()
 /// ```
-#[xcl_fn("ffi.libc.functions", signature = "() -> array")]
+#[xcl_fn]
 pub fn functions() -> Value {
     let funcs = vec![
         "malloc", "calloc", "realloc", "free",
@@ -88,7 +88,7 @@ pub fn functions() -> Value {
 /// ```xcl
 /// ffi.libc.function_info("malloc")
 /// ```
-#[xcl_fn("ffi.libc.function_info", signature = "(function: str) -> map")]
+#[xcl_fn]
 pub fn function_info(function: &str) -> Value {
     let mut info = HashMap::new();
     info.insert("name".to_string(), Value::from_str_boxed(function.to_string()));

@@ -25,7 +25,7 @@ use xcl_vm::Value;
 ///     else
 ///         io.println("I am the parent, child PID: " + str(result.value))
 /// ```
-#[xcl_fn("sys.fork", signature = "() -> result")]
+#[xcl_fn]
 pub fn fork() -> Value {
     #[cfg(unix)]
     {
@@ -61,7 +61,7 @@ pub fn fork() -> Value {
 /// ```xcl
 /// sys.exec("/bin/echo", ["Hello", "World"])
 /// ```
-#[xcl_fn("sys.exec", signature = "(path: str, args: array) -> result")]
+#[xcl_fn]
 pub fn exec(path: &str, args: &[Value]) -> Value {
     #[cfg(unix)]
     {
@@ -98,7 +98,7 @@ pub fn exec(path: &str, args: &[Value]) -> Value {
 /// ```xcl
 /// sys.process_info(1234)
 /// ```
-#[xcl_fn("sys.process_info", signature = "(pid: int) -> result")]
+#[xcl_fn]
 pub fn process_info(pid: i64) -> Value {
     #[cfg(unix)]
     {
@@ -138,7 +138,7 @@ pub fn process_info(pid: i64) -> Value {
 /// ```xcl
 /// sys.kill(1234)
 /// ```
-#[xcl_fn("sys.kill", signature = "(pid: int) -> result")]
+#[xcl_fn]
 pub fn kill(pid: i64) -> Value {
     #[cfg(unix)]
     {
@@ -181,7 +181,7 @@ pub fn kill(pid: i64) -> Value {
 /// ```xcl
 /// sys.signal(1234, 9)  // SIGKILL
 /// ```
-#[xcl_fn("sys.signal", signature = "(pid: int, signal: int) -> result")]
+#[xcl_fn]
 pub fn signal(pid: i64, sig: i64) -> Value {
     #[cfg(unix)]
     {

@@ -44,12 +44,7 @@ use xcl_vm::{Value, DomainCtx};
 /// Credentials are loaded from:
 /// 1. Environment variables: `ALIBABA_ACCESS_KEY_ID`, `ALIBABA_ACCESS_KEY_SECRET`
 /// 2. `.env` file via `io.read_env` (if `ALIBABA_ENV_FILE` is set)
-#[xcl_fn(
-    name = "alibaba",
-    args = "account: str; f: any",
-    ret = "any",
-    summary = "Run a closure within an Alibaba Cloud account context."
-)]
+#[xcl_fn(name = "alibaba")]
 fn alibaba_run(ctx: &mut DomainCtx) -> Value {
     let account = ctx.arg(0).as_str().unwrap_or("");
     let closure = ctx.arg(1);
@@ -64,11 +59,7 @@ fn alibaba_run(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Get the current Alibaba configuration.
-#[xcl_fn(
-    name = "alibaba.config",
-    ret = "map",
-    summary = "Get the current Alibaba Cloud configuration."
-)]
+#[xcl_fn]
 fn alibaba_config(ctx: &mut DomainCtx) -> Value {
     let mut config = HashMap::new();
     if let Some(acc) = ctx.get_context("alibaba.account") {
@@ -78,11 +69,7 @@ fn alibaba_config(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Get the current Alibaba credentials.
-#[xcl_fn(
-    name = "alibaba.credential",
-    ret = "map",
-    summary = "Get the current Alibaba Cloud credentials."
-)]
+#[xcl_fn]
 fn alibaba_credential(ctx: &mut DomainCtx) -> Value {
     match ctx.get_context("alibaba.credentials") {
         Some(creds) => creds,

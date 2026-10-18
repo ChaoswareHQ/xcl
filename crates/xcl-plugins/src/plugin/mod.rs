@@ -10,7 +10,7 @@ use xcl_vm::{Value, DomainCtx};
 /// List loaded plugins.
 ///
 /// Currently returns an empty array; plugin loading not yet implemented.
-#[xcl_fn(name = "plugin.list", ret = "array")]
+#[xcl_fn]
 pub fn plugin_list(ctx: &mut DomainCtx) -> Value {
     Value::from_array(Vec::new(), ctx.arena())
 }

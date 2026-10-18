@@ -28,7 +28,7 @@ const SOCK_DGRAM: i32 = 2;
 /// ```xcl
 /// socket = sys.socket(2, 1, 0)  // TCP IPv4 socket
 /// ```
-#[xcl_fn("sys.socket", signature = "(domain: int, socket_type: int, protocol: int) -> result")]
+#[xcl_fn]
 pub fn socket(domain: i64, socket_type: i64, protocol: i64) -> Value {
     #[cfg(unix)]
     {
@@ -58,7 +58,7 @@ pub fn socket(domain: i64, socket_type: i64, protocol: i64) -> Value {
 /// ```xcl
 /// sys.bind(sockfd, "0.0.0.0:8080")
 /// ```
-#[xcl_fn("sys.bind", signature = "(sockfd: int, addr: str) -> result")]
+#[xcl_fn]
 pub fn bind(sockfd: i64, addr: &str) -> Value {
     #[cfg(unix)]
     {
@@ -126,7 +126,7 @@ pub fn bind(sockfd: i64, addr: &str) -> Value {
 /// ```xcl
 /// sys.listen(sockfd, 128)
 /// ```
-#[xcl_fn("sys.listen", signature = "(sockfd: int, backlog: int) -> result")]
+#[xcl_fn]
 pub fn listen(sockfd: i64, backlog: i64) -> Value {
     #[cfg(unix)]
     {
@@ -155,7 +155,7 @@ pub fn listen(sockfd: i64, backlog: i64) -> Value {
 /// ```xcl
 /// client = sys.accept(sockfd)
 /// ```
-#[xcl_fn("sys.accept", signature = "(sockfd: int) -> result")]
+#[xcl_fn]
 pub fn accept(sockfd: i64) -> Value {
     #[cfg(unix)]
     {
@@ -188,7 +188,7 @@ pub fn accept(sockfd: i64) -> Value {
 /// ```xcl
 /// sys.connect(sockfd, "127.0.0.1:8080")
 /// ```
-#[xcl_fn("sys.connect", signature = "(sockfd: int, addr: str) -> result")]
+#[xcl_fn]
 pub fn connect(sockfd: i64, addr: &str) -> Value {
     #[cfg(unix)]
     {
@@ -252,7 +252,7 @@ pub fn connect(sockfd: i64, addr: &str) -> Value {
 /// ```xcl
 /// sys.send(sockfd, "Hello, World!")
 /// ```
-#[xcl_fn("sys.send", signature = "(sockfd: int, data: str) -> result")]
+#[xcl_fn]
 pub fn send(sockfd: i64, data: &str) -> Value {
     #[cfg(unix)]
     {
@@ -289,7 +289,7 @@ pub fn send(sockfd: i64, data: &str) -> Value {
 /// ```xcl
 /// data = sys.recv(sockfd, 4096)
 /// ```
-#[xcl_fn("sys.recv", signature = "(sockfd: int, size: int) -> result")]
+#[xcl_fn]
 pub fn recv(sockfd: i64, size: i64) -> Value {
     #[cfg(unix)]
     {
@@ -327,7 +327,7 @@ pub fn recv(sockfd: i64, size: i64) -> Value {
 /// ```xcl
 /// sys.close_socket(sockfd)
 /// ```
-#[xcl_fn("sys.close_socket", signature = "(sockfd: int) -> result")]
+#[xcl_fn]
 pub fn close_socket(sockfd: i64) -> Value {
     #[cfg(unix)]
     {
@@ -359,7 +359,7 @@ pub fn close_socket(sockfd: i64) -> Value {
 /// ```xcl
 /// sys.setsockopt(sockfd, 1, 2, 1)  // SO_REUSEADDR
 /// ```
-#[xcl_fn("sys.setsockopt", signature = "(sockfd: int, level: int, option_name: int, option_value: int) -> result")]
+#[xcl_fn]
 pub fn setsockopt(sockfd: i64, level: i64, option_name: i64, option_value: i64) -> Value {
     #[cfg(unix)]
     {
@@ -396,7 +396,7 @@ pub fn setsockopt(sockfd: i64, level: i64, option_name: i64, option_value: i64) 
 /// ```xcl
 /// sys.socket_info(sockfd)
 /// ```
-#[xcl_fn("sys.socket_info", signature = "(sockfd: int) -> result")]
+#[xcl_fn]
 pub fn socket_info(sockfd: i64) -> Value {
     #[cfg(unix)]
     {

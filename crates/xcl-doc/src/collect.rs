@@ -242,15 +242,36 @@ fn extract_docs_from_file(source: &str, comments: &mut HashMap<String, ParsedDoc
                     // Collect the full multi-line attribute
                     let full_attr = collect_attribute_lines(&lines, &mut i);
                     // Extract the name from #[xcl_fn(name = "io.foo", ...)]
-                    if let Some(full_name) = extract_attr_name(&full_attr, "name") {
-                        let parsed = parse_doc_block(&doc_lines);
-                        // Store under the method name (e.g., "foo" from "io.foo") so collect_std can find it
-                        let method_name = if let Some(dot_pos) = full_name.find('.') {
-                            full_name[dot_pos + 1..].to_string()
+                    // If no name attribute, derive from the function name on the next line
+                    let full_name = extract_attr_name(&full_attr, "name").or_else(|| {
+                        // Find the function name on the next line
+                        if i < lines.len() {
+                            let fn_line = lines[i].trim();
+                            if let Some(stripped) = fn_line.strip_prefix("fn ") {
+                                let fn_name = stripped.split_whitespace().next()?;
+                                // Convert snake_case to domain.method
+                                if let Some(underscore_pos) = fn_name.find('_') {
+                                    let method = &fn_name[underscore_pos + 1..];
+                                    Some(method.to_string())
+                                } else {
+                                    Some(fn_name.to_string())
+                                }
+                            } else {
+                                None
+                            }
                         } else {
-                            full_name.clone()
+                            None
+                        }
+                    });
+                    if let Some(method_name) = full_name {
+                        let parsed = parse_doc_block(&doc_lines);
+                        // If full_name is dotted (e.g., "io.foo"), extract just the method part
+                        let method_only = if let Some(dot_pos) = method_name.find('.') {
+                            method_name[dot_pos + 1..].to_string()
+                        } else {
+                            method_name
                         };
-                        comments.insert(method_name, parsed);
+                        comments.insert(method_only, parsed);
                     }
                 } else if attr_line.starts_with("#[xcl_type") {
                     // Collect the full multi-line attribute

@@ -18,7 +18,7 @@ fn get_map(v: Value) -> HashMap<String, Value> {
 // ═══════════════════════════════════════════════════════════
 
 /// Get all keys as an array.
-#[xcl_fn(name = "dict.keys", args = "d: map", ret = "array")]
+#[xcl_fn]
 fn dict_keys(ctx: &mut DomainCtx) -> Value {
     let map = get_map(ctx.arg(0));
     let keys: Vec<Value> = map.keys()
@@ -28,7 +28,7 @@ fn dict_keys(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Get all values as an array.
-#[xcl_fn(name = "dict.values", args = "d: map", ret = "array")]
+#[xcl_fn]
 fn dict_values(ctx: &mut DomainCtx) -> Value {
     let map = get_map(ctx.arg(0));
     let values: Vec<Value> = map.values().copied().collect();
@@ -36,7 +36,7 @@ fn dict_values(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Get all entries as an array of [key, value] pairs.
-#[xcl_fn(name = "dict.entries", args = "d: map", ret = "array")]
+#[xcl_fn]
 fn dict_entries(ctx: &mut DomainCtx) -> Value {
     let map = get_map(ctx.arg(0));
     let mut entries = Vec::with_capacity(map.len());
@@ -52,7 +52,7 @@ fn dict_entries(ctx: &mut DomainCtx) -> Value {
 // ═══════════════════════════════════════════════════════════
 
 /// Get value by key, or nil if not found.
-#[xcl_fn(name = "dict.get", args = "d: map; key: string", ret = "any")]
+#[xcl_fn]
 fn dict_get(args: &[Value]) -> Value {
     let map = get_map(args[0]);
     let key = args[1].as_string().to_string();
@@ -60,7 +60,7 @@ fn dict_get(args: &[Value]) -> Value {
 }
 
 /// Check if dict has a key.
-#[xcl_fn(name = "dict.has", args = "d: map; key: string", ret = "bool")]
+#[xcl_fn]
 fn dict_has(args: &[Value]) -> Value {
     let map = get_map(args[0]);
     let key = args[1].as_string().to_string();
@@ -72,7 +72,7 @@ fn dict_has(args: &[Value]) -> Value {
 // ═══════════════════════════════════════════════════════════
 
 /// Merge two dicts, second overrides first.
-#[xcl_fn(name = "dict.merge", args = "a: map; b: map", ret = "map")]
+#[xcl_fn]
 fn dict_merge(ctx: &mut DomainCtx) -> Value {
     let mut a = get_map(ctx.arg(0));
     let b = get_map(ctx.arg(1));
@@ -83,7 +83,7 @@ fn dict_merge(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Filter dict by a predicate on values.
-#[xcl_fn(name = "dict.filter", args = "d: map; f: any", ret = "map")]
+#[xcl_fn]
 fn dict_filter(ctx: &mut DomainCtx) -> Value {
     let map = get_map(ctx.arg(0));
     let f = ctx.arg(1);
@@ -98,7 +98,7 @@ fn dict_filter(ctx: &mut DomainCtx) -> Value {
 }
 
 /// Map values through a function.
-#[xcl_fn(name = "dict.map", args = "d: map; f: any", ret = "map")]
+#[xcl_fn]
 fn dict_map(ctx: &mut DomainCtx) -> Value {
     let map = get_map(ctx.arg(0));
     let f = ctx.arg(1);
@@ -115,13 +115,13 @@ fn dict_map(ctx: &mut DomainCtx) -> Value {
 // ═══════════════════════════════════════════════════════════
 
 /// Get the number of entries.
-#[xcl_fn(name = "dict.len", args = "d: map", ret = "int")]
+#[xcl_fn]
 fn dict_len(args: &[Value]) -> Value {
     Value::from_i48(get_map(args[0]).len() as i64)
 }
 
 /// Check if dict is empty.
-#[xcl_fn(name = "dict.is_empty", args = "d: map", ret = "bool")]
+#[xcl_fn]
 fn dict_is_empty(args: &[Value]) -> Value {
     Value::bool_(get_map(args[0]).is_empty())
 }

@@ -15,7 +15,7 @@ use xcl_vm::Value;
 /// ```xcl
 /// sys.os.windows_version()
 /// ```
-#[xcl_fn("sys.os.windows_version", signature = "() -> map")]
+#[xcl_fn]
 pub fn windows_version() -> Value {
     #[cfg(target_os = "windows")]
     {
@@ -44,7 +44,7 @@ pub fn windows_version() -> Value {
 /// ```xcl
 /// sys.os.registry_get("HKEY_CURRENT_USER\\Software\\Microsoft", "Version")
 /// ```
-#[xcl_fn("sys.os.registry_get", signature = "(path: str, name: str) -> str")]
+#[xcl_fn]
 pub fn registry_get(_path: &str, _name: &str) -> Value {
     #[cfg(target_os = "windows")]
     {
@@ -69,7 +69,7 @@ pub fn registry_get(_path: &str, _name: &str) -> Value {
 /// ```xcl
 /// sys.os.performance_counter("\\Processor(_Total)\\% Processor Time")
 /// ```
-#[xcl_fn("sys.os.performance_counter", signature = "(counter: str) -> float")]
+#[xcl_fn]
 pub fn performance_counter(_counter: &str) -> Value {
     #[cfg(target_os = "windows")]
     {
@@ -94,7 +94,7 @@ pub fn performance_counter(_counter: &str) -> Value {
 /// ```xcl
 /// sys.os.event_log("System", 10)
 /// ```
-#[xcl_fn("sys.os.event_log", signature = "(log_name: str, count: int) -> array")]
+#[xcl_fn]
 pub fn event_log(_log_name: &str, _count: i64) -> Value {
     #[cfg(target_os = "windows")]
     {
@@ -118,7 +118,7 @@ pub fn event_log(_log_name: &str, _count: i64) -> Value {
 /// ```xcl
 /// sys.os.service_status("wuauserv")
 /// ```
-#[xcl_fn("sys.os.service_status", signature = "(service_name: str) -> map")]
+#[xcl_fn]
 pub fn service_status(_service_name: &str) -> Value {
     #[cfg(target_os = "windows")]
     {
@@ -142,7 +142,7 @@ pub fn service_status(_service_name: &str) -> Value {
 /// ```xcl
 /// sys.os.disk_info("C:")
 /// ```
-#[xcl_fn("sys.os.disk_info", signature = "(drive: str) -> map")]
+#[xcl_fn]
 pub fn disk_info(drive: &str) -> Value {
     #[cfg(target_os = "windows")]
     {
@@ -189,7 +189,7 @@ pub fn disk_info(drive: &str) -> Value {
 /// ```xcl
 /// sys.os.process_list()
 /// ```
-#[xcl_fn("sys.os.process_list", signature = "() -> array")]
+#[xcl_fn]
 pub fn process_list() -> Value {
     #[cfg(target_os = "windows")]
     {
@@ -214,7 +214,7 @@ pub fn process_list() -> Value {
 /// ```xcl
 /// sys.os.registry_env("PATH", "user")
 /// ```
-#[xcl_fn("sys.os.registry_env", signature = "(name: str, scope: str) -> str")]
+#[xcl_fn]
 pub fn registry_env(_name: &str, _scope: &str) -> Value {
     #[cfg(target_os = "windows")]
     {

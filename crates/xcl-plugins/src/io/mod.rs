@@ -140,7 +140,7 @@ fn make_err_io(path: &str, e: std::io::Error) -> Value {
 ///
 /// - Returns `Err` if the file cannot be opened (e.g., permission denied, path not found).
 /// - Always close file handles with `io.close()` when done.
-#[xcl_fn(name = "io.open", args = "path: str; mode: str", ret = "Result")]
+#[xcl_fn]
 pub fn io_open(path: &str, mode: &str) -> Value {
     let file = open_with_mode(path, mode);
     match file {
@@ -204,7 +204,7 @@ fn open_with_mode(path: &str, mode: &str) -> std::io::Result<std::fs::File> {
 /// - Returns `Err` if the file doesn't exist or cannot be read.
 /// - The entire file is loaded into memory; use `io.read_from()` for large files.
 /// - File must be valid UTF-8; use `io.read_bytes()` for binary data.
-#[xcl_fn(name = "io.read", args = "path: str", ret = "Result")]
+#[xcl_fn]
 pub fn io_read(path: &str) -> Value {
     match std::fs::read_to_string(path) {
         Ok(s) => ok_result(Value::from_str_boxed(s)),
@@ -249,7 +249,7 @@ pub fn io_read(path: &str) -> Value {
 ///
 /// - Returns `Err` if the file doesn't exist or cannot be read.
 /// - Each byte is returned as an integer value from 0 to 255.
-#[xcl_fn(name = "io.read_bytes", args = "path: str", ret = "Result")]
+#[xcl_fn]
 pub fn io_read_bytes(path: &str) -> Value {
     match std::fs::read(path) {
         Ok(bytes) => {
@@ -315,7 +315,7 @@ pub fn io_read_bytes(path: &str) -> Value {
 /// - Duplicate keys: later values override earlier ones.
 /// - Keys must be valid environment variable names (alphanumeric and underscore).
 /// - Values are not automatically trimmed; use `str.trim` if needed.
-#[xcl_fn(name = "io.read_env", args = "path: str", ret = "Result")]
+#[xcl_fn]
 pub fn io_read_env(path: &str) -> Value {
     let content = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -402,7 +402,7 @@ pub fn io_read_env(path: &str) -> Value {
 ///
 /// - Existing files are truncated; use `io.append()` to add content without overwriting.
 /// - Returns `Err` if the path is not writable or the disk is full.
-#[xcl_fn(name = "io.write", args = "path: str; data: str", ret = "Result")]
+#[xcl_fn]
 pub fn io_write(path: &str, data: &str) -> Value {
     match std::fs::write(path, data.as_bytes()) {
         Ok(_) => ok_result(Value::unit()),
@@ -449,7 +449,7 @@ pub fn io_write(path: &str, data: &str) -> Value {
 ///
 /// - Each integer in the array is written as a single byte.
 /// - Values outside 0-255 are truncated to 8 bits.
-#[xcl_fn(name = "io.write_bytes", args = "handle: File; data: arr<u8>", ret = "Result")]
+#[xcl_fn]
 pub fn io_write_bytes(ctx: &mut DomainCtx) -> Value {
     let handle = ctx.arg(0);
     let bytes = ctx.arg(1);
@@ -517,7 +517,7 @@ pub fn io_write_bytes(ctx: &mut DomainCtx) -> Value {
 ///
 /// - Unlike `io.write()`, this preserves existing file content.
 /// - Returns `Err` if the path is not writable.
-#[xcl_fn(name = "io.append", args = "path: str; data: str", ret = "Result")]
+#[xcl_fn]
 pub fn io_append(path: &str, data: &str) -> Value {
     match std::fs::OpenOptions::new().append(true).create(true).open(path) {
         Ok(mut file) => {
@@ -569,7 +569,7 @@ pub fn io_append(path: &str, data: &str) -> Value {
 /// - Lines are split on `\n` and `\r\n` boundaries.
 /// - Trailing newlines are stripped from each line.
 /// - The entire file is loaded into memory first.
-#[xcl_fn(name = "io.lines", args = "path: str", ret = "Result")]
+#[xcl_fn]
 pub fn io_lines(path: &str) -> Value {
     match std::fs::read_to_string(path) {
         Ok(content) => {
@@ -618,7 +618,7 @@ pub fn io_lines(path: &str) -> Value {
 ///
 /// - The destination file is created or overwritten.
 /// - Returns `Err` if the source file doesn't exist or the destination is not writable.
-#[xcl_fn(name = "io.copy", args = "src: str; dst: str", ret = "Result")]
+#[xcl_fn]
 pub fn io_copy(src: &str, dst: &str) -> Value {
     match std::fs::copy(src, dst) {
         Ok(bytes) => ok_result(Value::from_i48(bytes as i64)),
@@ -658,7 +658,7 @@ pub fn io_copy(src: &str, dst: &str) -> Value {
 ///
 /// - Always close file handles when done to free system resources.
 /// - Operations on a closed handle will return errors.
-#[xcl_fn(name = "io.close", args = "handle: File", ret = "none")]
+#[xcl_fn]
 pub fn io_close(ctx: &mut DomainCtx) -> Value {
     let handle = ctx.arg(0);
     let _ = handle.take_handle();
@@ -688,7 +688,7 @@ pub fn io_close(ctx: &mut DomainCtx) -> Value {
 ///
 /// - Output is typically buffered for performance; flush forces immediate writing.
 /// - Both stdout and stderr are flushed.
-#[xcl_fn(name = "io.flush", ret = "none")]
+#[xcl_fn]
 pub fn io_flush(_ctx: &mut DomainCtx) -> Value {
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
@@ -734,7 +734,7 @@ pub fn io_flush(_ctx: &mut DomainCtx) -> Value {
 ///
 /// - Returns `true` for non-file handles.
 /// - For stdin, always returns `false`.
-#[xcl_fn(name = "io.eof", args = "handle: File", ret = "bool")]
+#[xcl_fn]
 pub fn io_eof(ctx: &mut DomainCtx) -> Value {
     let handle = ctx.arg(0);
     let Some(hkind) = handle.as_handle() else {
@@ -794,7 +794,7 @@ pub fn io_eof(ctx: &mut DomainCtx) -> Value {
 ///
 /// - Returns `Err` if the handle is not readable.
 /// - Each byte is returned as an integer value from 0 to 255.
-#[xcl_fn(name = "io.read_from", args = "handle: File", ret = "Result")]
+#[xcl_fn]
 pub fn io_read_from(ctx: &mut DomainCtx) -> Value {
     let handle = ctx.arg(0);
     let Some(hkind) = handle.as_handle() else {
@@ -857,7 +857,7 @@ pub fn io_read_from(ctx: &mut DomainCtx) -> Value {
 ///
 /// - Returns `Err` if the handle is not readable.
 /// - Trailing `\n` and `\r` are stripped from the returned string.
-#[xcl_fn(name = "io.read_line_from", args = "handle: File", ret = "Result")]
+#[xcl_fn]
 pub fn io_read_line_from(ctx: &mut DomainCtx) -> Value {
     let handle = ctx.arg(0);
     let Some(hkind) = handle.as_handle() else {
@@ -918,7 +918,7 @@ pub fn io_read_line_from(ctx: &mut DomainCtx) -> Value {
 ///
 /// - Returns `Err` if the handle is not readable.
 /// - File must be valid UTF-8; use `io.read_from()` for binary data.
-#[xcl_fn(name = "io.read_all_from", args = "handle: File", ret = "Result")]
+#[xcl_fn]
 pub fn io_read_all_from(ctx: &mut DomainCtx) -> Value {
     let handle = ctx.arg(0);
     let Some(hkind) = handle.as_handle() else {
@@ -975,7 +975,7 @@ pub fn io_read_all_from(ctx: &mut DomainCtx) -> Value {
 ///
 /// - Returns the number of bytes written.
 /// - Values outside 0-255 are truncated to 8 bits.
-#[xcl_fn(name = "io.write_to", args = "handle: File; data: arr<u8>", ret = "Result")]
+#[xcl_fn]
 pub fn io_write_to(ctx: &mut DomainCtx) -> Value {
     let handle = ctx.arg(0);
     let data = ctx.arg(1);
@@ -1039,7 +1039,7 @@ pub fn io_write_to(ctx: &mut DomainCtx) -> Value {
 ///
 /// - Returns the number of bytes written.
 /// - Does not append a trailing newline; use `io.write_line_to()` for that.
-#[xcl_fn(name = "io.write_str_to", args = "handle: File; data: str", ret = "Result")]
+#[xcl_fn]
 pub fn io_write_str_to(ctx: &mut DomainCtx) -> Value {
     let handle = ctx.arg(0);
     let data = ctx.arg(1).as_str().unwrap_or("");
@@ -1099,7 +1099,7 @@ pub fn io_write_str_to(ctx: &mut DomainCtx) -> Value {
 ///
 /// - Automatically appends `\n` if the string doesn't end with one.
 /// - Returns the total number of bytes written, including the newline.
-#[xcl_fn(name = "io.write_line_to", args = "handle: File; data: str", ret = "Result")]
+#[xcl_fn]
 pub fn io_write_line_to(ctx: &mut DomainCtx) -> Value {
     let handle = ctx.arg(0);
     let data = ctx.arg(1).as_str().unwrap_or("");
@@ -1164,7 +1164,7 @@ pub fn io_write_line_to(ctx: &mut DomainCtx) -> Value {
 ///
 /// - Offset is always from the start of the file (SEEK_SET).
 /// - Returns `Err` if the handle is not seekable.
-#[xcl_fn(name = "io.seek", args = "handle: File; position: i64", ret = "Result")]
+#[xcl_fn]
 pub fn io_seek(ctx: &mut DomainCtx) -> Value {
     let handle = ctx.arg(0);
     let offset = ctx.arg(1).as_i48();
@@ -1220,7 +1220,7 @@ pub fn io_seek(ctx: &mut DomainCtx) -> Value {
 ///
 /// - Position is in bytes from the start of the file.
 /// - Returns `Err` if the handle is not seekable.
-#[xcl_fn(name = "io.tell", args = "handle: File", ret = "Result")]
+#[xcl_fn]
 pub fn io_tell(ctx: &mut DomainCtx) -> Value {
     let handle = ctx.arg(0);
     let Some(hkind) = handle.as_handle() else {
@@ -1268,7 +1268,7 @@ pub fn io_tell(ctx: &mut DomainCtx) -> Value {
 ///
 /// - The returned handle is pre-opened; no need to close it.
 /// - Can be used with `io.is_tty()` to check if input is from a terminal.
-#[xcl_fn(name = "io.stdin", ret = "Stream")]
+#[xcl_fn]
 pub fn io_stdin(_ctx: &mut DomainCtx) -> Value {
     Value::from_handle(HandleKind::Stdin)
 }
@@ -1299,7 +1299,7 @@ pub fn io_stdin(_ctx: &mut DomainCtx) -> Value {
 ///
 /// - The returned handle is pre-opened; no need to close it.
 /// - Can be used with `io.is_tty()` to check if output goes to a terminal.
-#[xcl_fn(name = "io.stdout", ret = "Stream")]
+#[xcl_fn]
 pub fn io_stdout(_ctx: &mut DomainCtx) -> Value {
     Value::from_handle(HandleKind::Stdout)
 }
@@ -1330,7 +1330,7 @@ pub fn io_stdout(_ctx: &mut DomainCtx) -> Value {
 ///
 /// - The returned handle is pre-opened; no need to close it.
 /// - Use for error messages that should not be redirected with normal output.
-#[xcl_fn(name = "io.stderr", ret = "Stream")]
+#[xcl_fn]
 pub fn io_stderr(_ctx: &mut DomainCtx) -> Value {
     Value::from_handle(HandleKind::Stderr)
 }
@@ -1372,7 +1372,7 @@ pub fn io_stderr(_ctx: &mut DomainCtx) -> Value {
 ///
 /// - Returns `false` for file handles.
 /// - Returns `false` when input/output is piped or redirected.
-#[xcl_fn(name = "io.is_tty", args = "handle: Stream", ret = "bool")]
+#[xcl_fn]
 pub fn io_is_tty(ctx: &mut DomainCtx) -> Value {
     let handle = ctx.arg(0);
     let Some(hkind) = handle.as_handle() else {
@@ -1417,7 +1417,7 @@ pub fn io_is_tty(ctx: &mut DomainCtx) -> Value {
 /// - Trailing `\n` and `\r` are stripped from the returned string.
 /// - Returns `Ok(none)` on EOF.
 /// - For prompted input, use `io.input()` instead.
-#[xcl_fn(name = "io.read_line", ret = "Result")]
+#[xcl_fn]
 pub fn io_read_line(_ctx: &mut DomainCtx) -> Value {
     let mut s = String::new();
     match std::io::stdin().read_line(&mut s) {
@@ -1463,7 +1463,7 @@ pub fn io_read_line(_ctx: &mut DomainCtx) -> Value {
 /// - On failure, returns the error message as a string instead of a Result.
 /// - For proper error handling, use `io.read()` which returns a Result.
 /// - File must be valid UTF-8.
-#[xcl_fn(name = "io.read_all", args = "path: str", ret = "str")]
+#[xcl_fn]
 pub fn io_read_all(path: &str) -> Value {
     match std::fs::read_to_string(path) {
         Ok(s) => Value::from_str_boxed(s),
@@ -1497,7 +1497,7 @@ pub fn io_read_all(path: &str) -> Value {
 ///
 /// - On Windows, typically returns `C:\Users\<user>\AppData\Local\Temp`.
 /// - On Linux/macOS, typically returns `/tmp`.
-#[xcl_fn(name = "io.temp_dir", ret = "str")]
+#[xcl_fn]
 pub fn io_temp_dir(_ctx: &mut DomainCtx) -> Value {
     let dir = std::env::temp_dir();
     Value::from_str_boxed(dir.to_string_lossy().to_string())
@@ -1539,7 +1539,7 @@ pub fn io_temp_dir(_ctx: &mut DomainCtx) -> Value {
 /// - The file name includes the process ID for uniqueness.
 /// - The file is created empty; write content separately.
 /// - Remember to delete temporary files when done.
-#[xcl_fn(name = "io.temp_file", args = "suffix: str", ret = "str")]
+#[xcl_fn]
 pub fn io_temp_file(suffix: &str) -> Value {
     let dir = std::env::temp_dir();
     let path = dir.join(format!("xcl_{}_{}", std::process::id(), suffix));
@@ -1583,7 +1583,7 @@ pub fn io_temp_file(suffix: &str) -> Value {
 /// - Integers are formatted without decimal points.
 /// - Floats use standard decimal notation.
 /// - `none` values are converted to an empty string.
-#[xcl_fn(name = "io.to_string", ret = "str")]
+#[xcl_fn]
 pub fn io_to_string(args: &[Value]) -> Value {
     let v = args.first().copied().unwrap_or(Value::unit());
     if v.is_int() {

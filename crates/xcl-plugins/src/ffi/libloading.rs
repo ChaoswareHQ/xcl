@@ -18,7 +18,7 @@ use xcl_vm::Value;
 /// ```xcl
 /// lib = ffi.load_library("/usr/lib/libexample.so")
 /// ```
-#[xcl_fn("ffi.load_library", signature = "(path: str) -> result")]
+#[xcl_fn]
 pub fn load_library(path: &str) -> Value {
     #[cfg(unix)]
     {
@@ -71,7 +71,7 @@ pub fn load_library(path: &str) -> Value {
 /// ```xcl
 /// addr = ffi.get_symbol(lib, "my_function")
 /// ```
-#[xcl_fn("ffi.get_symbol", signature = "(handle: int, symbol: str) -> result")]
+#[xcl_fn]
 pub fn get_symbol(handle: i64, symbol: &str) -> Value {
     #[cfg(unix)]
     {
@@ -122,7 +122,7 @@ pub fn get_symbol(handle: i64, symbol: &str) -> Value {
 /// ```xcl
 /// ffi.unload_library(lib)
 /// ```
-#[xcl_fn("ffi.unload_library", signature = "(handle: int) -> result")]
+#[xcl_fn]
 pub fn unload_library(handle: i64) -> Value {
     #[cfg(unix)]
     {
@@ -162,7 +162,7 @@ pub fn unload_library(handle: i64) -> Value {
 /// ```xcl
 /// symbols = ffi.list_symbols(lib)
 /// ```
-#[xcl_fn("ffi.list_symbols", signature = "(handle: int) -> array")]
+#[xcl_fn]
 pub fn list_symbols(_handle: i64) -> Value {
     // Listing symbols requires platform-specific iteration
     Value::from_array(vec![])
@@ -180,7 +180,7 @@ pub fn list_symbols(_handle: i64) -> Value {
 /// ```xcl
 /// ffi.is_loaded(lib)
 /// ```
-#[xcl_fn("ffi.is_loaded", signature = "(handle: int) -> bool")]
+#[xcl_fn]
 pub fn is_loaded(handle: i64) -> Value {
     Value::bool_(handle != 0)
 }

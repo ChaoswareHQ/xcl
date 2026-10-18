@@ -41,12 +41,7 @@ use xcl_vm::{Value, DomainCtx};
 /// Credentials are loaded from:
 /// 1. Environment variables: `IBM_API_KEY`
 /// 2. `.env` file via `io.read_env` (if `IBM_ENV_FILE` is set)
-#[xcl_fn(
-    name = "ibm",
-    args = "account: str; f: any",
-    ret = "any",
-    summary = "Run a closure within an IBM Cloud account context."
-)]
+#[xcl_fn(name = "ibm")]
 fn ibm_run(ctx: &mut DomainCtx) -> Value {
     let account = ctx.arg(0).as_str().unwrap_or("");
     let closure = ctx.arg(1);
@@ -60,11 +55,7 @@ fn ibm_run(ctx: &mut DomainCtx) -> Value {
     result
 }
 
-#[xcl_fn(
-    name = "ibm.config",
-    ret = "map",
-    summary = "Get the current IBM Cloud configuration."
-)]
+#[xcl_fn]
 fn ibm_config(ctx: &mut DomainCtx) -> Value {
     let mut config = HashMap::new();
     if let Some(acc) = ctx.get_context("ibm.account") {
@@ -73,11 +64,7 @@ fn ibm_config(ctx: &mut DomainCtx) -> Value {
     Value::from_map_boxed(config)
 }
 
-#[xcl_fn(
-    name = "ibm.credential",
-    ret = "map",
-    summary = "Get the current IBM Cloud credentials."
-)]
+#[xcl_fn]
 fn ibm_credential(ctx: &mut DomainCtx) -> Value {
     match ctx.get_context("ibm.credentials") {
         Some(creds) => creds,

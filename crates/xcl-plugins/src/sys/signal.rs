@@ -26,7 +26,7 @@ const SIGUSR2: i32 = 12;
 /// ```xcl
 /// sys.signal_name(2)  // Returns "SIGINT"
 /// ```
-#[xcl_fn("sys.signal_name", signature = "(signum: int) -> str")]
+#[xcl_fn]
 pub fn signal_name(signum: i64) -> Value {
     let name = match signum as i32 {
         1 => "SIGHUP",
@@ -77,7 +77,7 @@ pub fn signal_name(signum: i64) -> Value {
 /// ```xcl
 /// sys.signal_block(2)  // Block SIGINT
 /// ```
-#[xcl_fn("sys.signal_block", signature = "(signum: int) -> result")]
+#[xcl_fn]
 pub fn signal_block(signum: i64) -> Value {
     #[cfg(unix)]
     {
@@ -110,7 +110,7 @@ pub fn signal_block(signum: i64) -> Value {
 /// ```xcl
 /// sys.signal_unblock(2)  // Unblock SIGINT
 /// ```
-#[xcl_fn("sys.signal_unblock", signature = "(signum: int) -> result")]
+#[xcl_fn]
 pub fn signal_unblock(signum: i64) -> Value {
     #[cfg(unix)]
     {
@@ -143,7 +143,7 @@ pub fn signal_unblock(signum: i64) -> Value {
 /// ```xcl
 /// sys.signal_pending(2)  // Check if SIGINT is pending
 /// ```
-#[xcl_fn("sys.signal_pending", signature = "(signum: int) -> bool")]
+#[xcl_fn]
 pub fn signal_pending(signum: i64) -> Value {
     #[cfg(unix)]
     {
@@ -171,7 +171,7 @@ pub fn signal_pending(signum: i64) -> Value {
 /// ```xcl
 /// sys.signal_wait()  // Wait for any signal
 /// ```
-#[xcl_fn("sys.signal_wait", signature = "() -> int")]
+#[xcl_fn]
 pub fn signal_wait() -> Value {
     #[cfg(unix)]
     {

@@ -6,7 +6,7 @@ use xcl_macros::xcl_fn;
 use xcl_vm::Value;
 
 /// Get the type name of a value.
-#[xcl_fn(name = "lang.type_of", args = "value: any", ret = "str")]
+#[xcl_fn]
 pub fn lang_type_of(args: &[Value]) -> Value {
     let v = args[0];
     let ty = if v.is_nil() {

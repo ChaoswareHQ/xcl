@@ -37,7 +37,7 @@ use crate::core::result::{ok_result, err_result};
 /// - On macOS, returns "macos".
 /// - On Windows, returns "windows".
 /// - On Linux, returns "linux".
-#[xcl_fn(name = "os.name", ret = "str")]
+#[xcl_fn]
 pub fn os_name(_ctx: &mut DomainCtx) -> Value {
     let os = std::env::consts::OS;
     let name = match os {
@@ -78,7 +78,7 @@ pub fn os_name(_ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `str`
-#[xcl_fn(name = "os.version", ret = "str")]
+#[xcl_fn]
 pub fn os_version(_ctx: &mut DomainCtx) -> Value {
     let version = match std::env::consts::OS {
         "linux" => {
@@ -154,7 +154,7 @@ pub fn os_version(_ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `str`
-#[xcl_fn(name = "os.arch", ret = "str")]
+#[xcl_fn]
 pub fn os_arch(_ctx: &mut DomainCtx) -> Value {
     Value::from_str_boxed(std::env::consts::ARCH.to_string())
 }
@@ -179,7 +179,7 @@ pub fn os_arch(_ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `str`
-#[xcl_fn(name = "os.platform", ret = "str")]
+#[xcl_fn]
 pub fn os_platform(_ctx: &mut DomainCtx) -> Value {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
@@ -208,7 +208,7 @@ pub fn os_platform(_ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `str`
-#[xcl_fn(name = "os.family", ret = "str")]
+#[xcl_fn]
 pub fn os_family(_ctx: &mut DomainCtx) -> Value {
     let family = match std::env::consts::FAMILY {
         "unix" => "unix",
@@ -246,7 +246,7 @@ pub fn os_family(_ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `str` or `nil`
-#[xcl_fn(name = "env.get", args = "key: str", ret = "str | nil")]
+#[xcl_fn]
 pub fn env_get(ctx: &mut DomainCtx) -> Value {
     let key = ctx.arg(0).as_str().unwrap_or("");
     match std::env::var(key) {
@@ -287,7 +287,7 @@ pub fn env_get(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `bool`
-#[xcl_fn(name = "env.set", args = "key: str; value: str", ret = "bool")]
+#[xcl_fn]
 pub fn env_set(ctx: &mut DomainCtx) -> Value {
     let key = ctx.arg(0).as_str().unwrap_or("").to_string();
     let value = ctx.arg(1).as_str().unwrap_or("").to_string();
@@ -322,7 +322,7 @@ pub fn env_set(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `bool`
-#[xcl_fn(name = "env.remove", args = "key: str", ret = "bool")]
+#[xcl_fn]
 pub fn env_remove(ctx: &mut DomainCtx) -> Value {
     let key = ctx.arg(0).as_str().unwrap_or("");
     let had_value = std::env::var(key).is_ok();
@@ -350,7 +350,7 @@ pub fn env_remove(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `dict`
-#[xcl_fn(name = "env.list", ret = "dict")]
+#[xcl_fn]
 pub fn env_list(_ctx: &mut DomainCtx) -> Value {
     let mut map = HashMap::new();
     for (key, value) in std::env::vars() {
@@ -387,7 +387,7 @@ pub fn env_list(_ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `str`
-#[xcl_fn(name = "path.join", args = "parts: arr", ret = "str")]
+#[xcl_fn]
 pub fn path_join(ctx: &mut DomainCtx) -> Value {
     let parts_val = ctx.arg(0);
     let parts: Vec<String> = if let Some(arr) = parts_val.as_array() {
@@ -429,7 +429,7 @@ pub fn path_join(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `str`
-#[xcl_fn(name = "path.expand", args = "path: str", ret = "str")]
+#[xcl_fn]
 pub fn path_expand(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     
@@ -526,7 +526,7 @@ pub fn path_expand(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `str`
-#[xcl_fn(name = "path.dirname", args = "path: str", ret = "str")]
+#[xcl_fn]
 pub fn path_dirname(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     let path = Path::new(path_str);
@@ -560,7 +560,7 @@ pub fn path_dirname(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `str`
-#[xcl_fn(name = "path.basename", args = "path: str", ret = "str")]
+#[xcl_fn]
 pub fn path_basename(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     let path = Path::new(path_str);
@@ -596,7 +596,7 @@ pub fn path_basename(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `str`
-#[xcl_fn(name = "path.extension", args = "path: str", ret = "str")]
+#[xcl_fn]
 pub fn path_extension(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     let path = Path::new(path_str);
@@ -633,7 +633,7 @@ pub fn path_extension(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `bool`
-#[xcl_fn(name = "path.exists", args = "path: str", ret = "bool")]
+#[xcl_fn]
 pub fn path_exists(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     Value::bool_(Path::new(path_str).exists())
@@ -666,7 +666,7 @@ pub fn path_exists(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `bool`
-#[xcl_fn(name = "path.is_file", args = "path: str", ret = "bool")]
+#[xcl_fn]
 pub fn path_is_file(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     Value::bool_(Path::new(path_str).is_file())
@@ -699,7 +699,7 @@ pub fn path_is_file(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `bool`
-#[xcl_fn(name = "path.is_dir", args = "path: str", ret = "bool")]
+#[xcl_fn]
 pub fn path_is_dir(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     Value::bool_(Path::new(path_str).is_dir())
@@ -735,7 +735,7 @@ pub fn path_is_dir(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `Result`
-#[xcl_fn(name = "path.canonicalize", args = "path: str", ret = "Result")]
+#[xcl_fn]
 pub fn path_canonicalize(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     match std::fs::canonicalize(path_str) {
@@ -768,7 +768,7 @@ pub fn path_canonicalize(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `Result`
-#[xcl_fn(name = "path.cwd", ret = "Result")]
+#[xcl_fn]
 pub fn path_cwd(_ctx: &mut DomainCtx) -> Value {
     match std::env::current_dir() {
         Ok(dir) => ok_result(Value::from_str_boxed(dir.to_string_lossy().to_string())),
@@ -804,7 +804,7 @@ pub fn path_cwd(_ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `Result`
-#[xcl_fn(name = "path.chdir", args = "path: str", ret = "Result")]
+#[xcl_fn]
 pub fn path_chdir(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     match std::env::set_current_dir(path_str) {
@@ -831,7 +831,7 @@ pub fn path_chdir(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `str` or `nil`
-#[xcl_fn(name = "path.home", ret = "str | nil")]
+#[xcl_fn]
 pub fn path_home(_ctx: &mut DomainCtx) -> Value {
     if let Ok(home) = std::env::var("HOME") {
         Value::from_str_boxed(home)
@@ -860,7 +860,7 @@ pub fn path_home(_ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `str`
-#[xcl_fn(name = "path.temp", ret = "str")]
+#[xcl_fn]
 pub fn path_temp(_ctx: &mut DomainCtx) -> Value {
     let temp = std::env::temp_dir();
     Value::from_str_boxed(temp.to_string_lossy().to_string())
@@ -886,7 +886,7 @@ pub fn path_temp(_ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `str`
-#[xcl_fn(name = "path.separator", ret = "str")]
+#[xcl_fn]
 pub fn path_separator(_ctx: &mut DomainCtx) -> Value {
     let sep = std::path::MAIN_SEPARATOR;
     Value::from_str_boxed(sep.to_string())
@@ -918,7 +918,7 @@ pub fn path_separator(_ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `arr`
-#[xcl_fn(name = "path.split", args = "path: str", ret = "arr")]
+#[xcl_fn]
 pub fn path_split(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     let sep = std::path::MAIN_SEPARATOR;
@@ -955,7 +955,7 @@ pub fn path_split(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `bool`
-#[xcl_fn(name = "path.is_absolute", args = "path: str", ret = "bool")]
+#[xcl_fn]
 pub fn path_is_absolute(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     Value::bool_(Path::new(path_str).is_absolute())
@@ -993,7 +993,7 @@ pub fn path_is_absolute(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `Result`
-#[xcl_fn(name = "path.stat", args = "path: str", ret = "Result")]
+#[xcl_fn]
 pub fn path_stat(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     match std::fs::metadata(path_str) {
@@ -1057,7 +1057,7 @@ pub fn path_stat(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `Result`
-#[xcl_fn(name = "path.ls", args = "path: str", ret = "Result")]
+#[xcl_fn]
 pub fn path_ls(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     match std::fs::read_dir(path_str) {
@@ -1101,7 +1101,7 @@ pub fn path_ls(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `Result`
-#[xcl_fn(name = "path.mkdir", args = "path: str", ret = "Result")]
+#[xcl_fn]
 pub fn path_mkdir(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     match std::fs::create_dir(path_str) {
@@ -1138,7 +1138,7 @@ pub fn path_mkdir(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `Result`
-#[xcl_fn(name = "path.mkdir_p", args = "path: str", ret = "Result")]
+#[xcl_fn]
 pub fn path_mkdir_p(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     match std::fs::create_dir_all(path_str) {
@@ -1175,7 +1175,7 @@ pub fn path_mkdir_p(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `Result`
-#[xcl_fn(name = "path.remove", args = "path: str", ret = "Result")]
+#[xcl_fn]
 pub fn path_remove(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     let path = Path::new(path_str);
@@ -1220,7 +1220,7 @@ pub fn path_remove(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `Result`
-#[xcl_fn(name = "path.remove_all", args = "path: str", ret = "Result")]
+#[xcl_fn]
 pub fn path_remove_all(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     match std::fs::remove_dir_all(path_str) {
@@ -1260,7 +1260,7 @@ pub fn path_remove_all(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `Result`
-#[xcl_fn(name = "path.copy", args = "source: str; dest: str", ret = "Result")]
+#[xcl_fn]
 pub fn path_copy(ctx: &mut DomainCtx) -> Value {
     let source = ctx.arg(0).as_str().unwrap_or("");
     let dest = ctx.arg(1).as_str().unwrap_or("");
@@ -1301,7 +1301,7 @@ pub fn path_copy(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `Result`
-#[xcl_fn(name = "path.rename", args = "source: str; dest: str", ret = "Result")]
+#[xcl_fn]
 pub fn path_rename(ctx: &mut DomainCtx) -> Value {
     let source = ctx.arg(0).as_str().unwrap_or("");
     let dest = ctx.arg(1).as_str().unwrap_or("");
@@ -1342,7 +1342,7 @@ pub fn path_rename(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `Result`
-#[xcl_fn(name = "path.symlink", args = "target: str; link: str", ret = "Result")]
+#[xcl_fn]
 pub fn path_symlink(ctx: &mut DomainCtx) -> Value {
     let target = ctx.arg(0).as_str().unwrap_or("");
     let link = ctx.arg(1).as_str().unwrap_or("");
@@ -1399,7 +1399,7 @@ pub fn path_symlink(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `Result`
-#[xcl_fn(name = "path.readlink", args = "path: str", ret = "Result")]
+#[xcl_fn]
 pub fn path_readlink(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     match std::fs::read_link(path_str) {
@@ -1435,7 +1435,7 @@ pub fn path_readlink(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `bool`
-#[xcl_fn(name = "path.is_symlink", args = "path: str", ret = "bool")]
+#[xcl_fn]
 pub fn path_is_symlink(ctx: &mut DomainCtx) -> Value {
     let path_str = ctx.arg(0).as_str().unwrap_or("");
     Value::bool_(std::fs::symlink_metadata(path_str)
@@ -1463,7 +1463,7 @@ pub fn path_is_symlink(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `Result`
-#[xcl_fn(name = "os.hostname", ret = "Result")]
+#[xcl_fn]
 pub fn os_hostname(_ctx: &mut DomainCtx) -> Value {
     match std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
@@ -1504,7 +1504,7 @@ pub fn os_hostname(_ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `int`
-#[xcl_fn(name = "os.cpus", ret = "int")]
+#[xcl_fn]
 pub fn os_cpus(_ctx: &mut DomainCtx) -> Value {
     let ncpus = std::thread::available_parallelism()
         .map(|p| p.get())
@@ -1530,7 +1530,7 @@ pub fn os_cpus(_ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `int`
-#[xcl_fn(name = "os.free_memory", ret = "int")]
+#[xcl_fn]
 pub fn os_free_memory(_ctx: &mut DomainCtx) -> Value {
     #[cfg(target_os = "linux")]
     {
@@ -1587,7 +1587,7 @@ pub fn os_free_memory(_ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `int`
-#[xcl_fn(name = "os.total_memory", ret = "int")]
+#[xcl_fn]
 pub fn os_total_memory(_ctx: &mut DomainCtx) -> Value {
     #[cfg(target_os = "linux")]
     {
@@ -1630,7 +1630,7 @@ pub fn os_total_memory(_ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `str` or `nil`
-#[xcl_fn(name = "os.user", ret = "str | nil")]
+#[xcl_fn]
 pub fn os_user(_ctx: &mut DomainCtx) -> Value {
     if let Ok(user) = std::env::var("USER") {
         Value::from_str_boxed(user)
@@ -1659,7 +1659,7 @@ pub fn os_user(_ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `int`
-#[xcl_fn(name = "time.now", ret = "int")]
+#[xcl_fn]
 pub fn time_now(_ctx: &mut DomainCtx) -> Value {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1686,7 +1686,7 @@ pub fn time_now(_ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `int`
-#[xcl_fn(name = "time.now_ms", ret = "int")]
+#[xcl_fn]
 pub fn time_now_ms(_ctx: &mut DomainCtx) -> Value {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1716,7 +1716,7 @@ pub fn time_now_ms(_ctx: &mut DomainCtx) -> Value {
 /// ## INPUT TYPES
 ///
 /// - `int`
-#[xcl_fn(name = "time.sleep", args = "milliseconds: int", ret = "nil")]
+#[xcl_fn]
 pub fn time_sleep(ctx: &mut DomainCtx) -> Value {
     let ms = ctx.arg(0).as_i48() as u64;
     std::thread::sleep(std::time::Duration::from_millis(ms));
@@ -1741,7 +1741,7 @@ pub fn time_sleep(ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `str`
-#[xcl_fn(name = "util.uuid", ret = "str")]
+#[xcl_fn]
 pub fn util_uuid(_ctx: &mut DomainCtx) -> Value {
     let mut bytes = [0u8; 16];
     for b in &mut bytes {
@@ -1795,7 +1795,7 @@ pub fn util_uuid(_ctx: &mut DomainCtx) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `Result`
-#[xcl_fn(name = "util.exec", args = "command: str", ret = "Result")]
+#[xcl_fn]
 pub fn util_exec(ctx: &mut DomainCtx) -> Value {
     let command = ctx.arg(0).as_str().unwrap_or("");
     

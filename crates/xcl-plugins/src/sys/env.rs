@@ -18,7 +18,7 @@ use xcl_vm::Value;
 /// ```xcl
 /// sys.env_get("HOME")
 /// ```
-#[xcl_fn("sys.env_get", signature = "(name: str) -> str")]
+#[xcl_fn]
 pub fn env_get(name: &str) -> Value {
     match std::env::var(name) {
         Ok(val) => Value::from_str_boxed(val),
@@ -39,7 +39,7 @@ pub fn env_get(name: &str) -> Value {
 /// ```xcl
 /// sys.env_set("MY_VAR", "my_value")
 /// ```
-#[xcl_fn("sys.env_set", signature = "(name: str, value: str) -> result")]
+#[xcl_fn]
 pub fn env_set(name: &str, value: &str) -> Value {
     // In Rust 2024, set_var requires unsafe
     unsafe {
@@ -60,7 +60,7 @@ pub fn env_set(name: &str, value: &str) -> Value {
 /// ```xcl
 /// sys.env_remove("MY_VAR")
 /// ```
-#[xcl_fn("sys.env_remove", signature = "(name: str) -> result")]
+#[xcl_fn]
 pub fn env_remove(name: &str) -> Value {
     unsafe {
         std::env::remove_var(name);
@@ -77,7 +77,7 @@ pub fn env_remove(name: &str) -> Value {
 /// ```xcl
 /// envs = sys.env_list()
 /// ```
-#[xcl_fn("sys.env_list", signature = "() -> map")]
+#[xcl_fn]
 pub fn env_list() -> Value {
     let mut envs = HashMap::new();
     for (key, val) in std::env::vars() {
@@ -95,7 +95,7 @@ pub fn env_list() -> Value {
 /// ```xcl
 /// args = sys.args()
 /// ```
-#[xcl_fn("sys.args", signature = "() -> array")]
+#[xcl_fn]
 pub fn args() -> Value {
     let args: Vec<Value> = std::env::args()
         .map(|arg| Value::from_str_boxed(arg))
@@ -112,7 +112,7 @@ pub fn args() -> Value {
 /// ```xcl
 /// sys.program_name()
 /// ```
-#[xcl_fn("sys.program_name", signature = "() -> str")]
+#[xcl_fn]
 pub fn program_name() -> Value {
     let name = std::env::args().next().unwrap_or_default();
     Value::from_str_boxed(name)
@@ -130,7 +130,7 @@ pub fn program_name() -> Value {
 /// ```xcl
 /// sys.env_exists("HOME")
 /// ```
-#[xcl_fn("sys.env_exists", signature = "(name: str) -> bool")]
+#[xcl_fn]
 pub fn env_exists(name: &str) -> Value {
     Value::bool_(std::env::var(name).is_ok())
 }
@@ -144,7 +144,7 @@ pub fn env_exists(name: &str) -> Value {
 /// ```xcl
 /// sys.args_count()
 /// ```
-#[xcl_fn("sys.args_count", signature = "() -> int")]
+#[xcl_fn]
 pub fn args_count() -> Value {
     Value::from_i48(std::env::args().count() as i64)
 }

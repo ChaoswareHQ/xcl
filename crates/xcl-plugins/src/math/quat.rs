@@ -28,19 +28,19 @@ fn gq(v: Value) -> glam::Quat {
 
 // ─── Constructors ───
 
-#[xcl_fn(name = "math.quat", args = "w: float; x: float; y: float; z: float", ret = "quat")]
+#[xcl_fn]
 fn math_quat(args: &[Value]) -> Value {
     quat_map(glam::Quat::from_xyzw(t(args[1].as_float()), t(args[2].as_float()), t(args[3].as_float()), t(args[0].as_float())))
 }
 
-#[xcl_fn(name = "math.quat_from_angle_axis", args = "angle: float; ax: float; ay: float; az: float", ret = "quat")]
+#[xcl_fn]
 fn math_quat_from_angle_axis(args: &[Value]) -> Value {
     let angle = t(args[0].as_float());
     let axis = glam::Vec3::new(t(args[1].as_float()), t(args[2].as_float()), t(args[3].as_float())).normalize();
     quat_map(glam::Quat::from_axis_angle(axis, angle))
 }
 
-#[xcl_fn(name = "math.quat_from_euler", args = "pitch: float; yaw: float; roll: float", ret = "quat")]
+#[xcl_fn]
 fn math_quat_from_euler(args: &[Value]) -> Value {
     let pitch = t(args[0].as_float());
     let yaw = t(args[1].as_float());
@@ -48,36 +48,36 @@ fn math_quat_from_euler(args: &[Value]) -> Value {
     quat_map(glam::Quat::from_euler(glam::EulerRot::YXZ, yaw, pitch, roll))
 }
 
-#[xcl_fn(name = "math.quat_identity", ret = "quat")]
+#[xcl_fn]
 fn math_quat_identity() -> Value {
     quat_map(glam::Quat::IDENTITY)
 }
 
 // ─── Operations ───
 
-#[xcl_fn(name = "quat.mul", args = "a: quat; b: quat", ret = "quat")]
+#[xcl_fn]
 fn quat_mul(args: &[Value]) -> Value {
     quat_map(gq(args[0]) * gq(args[1]))
 }
 
-#[xcl_fn(name = "quat.conj", args = "q: quat", ret = "quat")]
+#[xcl_fn]
 fn quat_conj(args: &[Value]) -> Value {
     quat_map(gq(args[0]).conjugate())
 }
 
-#[xcl_fn(name = "quat.normalize", args = "q: quat", ret = "quat")]
+#[xcl_fn]
 fn quat_normalize(args: &[Value]) -> Value {
     quat_map(gq(args[0]).normalize())
 }
 
-#[xcl_fn(name = "quat.inverse", args = "q: quat", ret = "quat")]
+#[xcl_fn]
 fn quat_inverse(args: &[Value]) -> Value {
     quat_map(gq(args[0]).inverse())
 }
 
 // ─── Conversions ───
 
-#[xcl_fn(name = "quat.to_matrix", args = "q: quat", ret = "mat4")]
+#[xcl_fn]
 fn quat_to_matrix(args: &[Value]) -> Value {
     let m = glam::Mat4::from_quat(gq(args[0]));
     let mut map = HashMap::with_capacity(20);
@@ -91,7 +91,7 @@ fn quat_to_matrix(args: &[Value]) -> Value {
     Value::from_map_boxed_typed_v(map, 112, 0)
 }
 
-#[xcl_fn(name = "quat.to_euler", args = "q: quat", ret = "vec3")]
+#[xcl_fn]
 fn quat_to_euler(args: &[Value]) -> Value {
     let euler = gq(args[0]).to_euler(glam::EulerRot::YXZ);
     let mut m = HashMap::with_capacity(4);
@@ -103,7 +103,7 @@ fn quat_to_euler(args: &[Value]) -> Value {
 
 // ─── Interpolation ───
 
-#[xcl_fn(name = "quat.slerp", args = "a: quat; b: quat; t: float", ret = "quat")]
+#[xcl_fn]
 fn quat_slerp(args: &[Value]) -> Value {
     let s = t(args[2].as_float());
     quat_map(gq(args[0]).slerp(gq(args[1]), s))

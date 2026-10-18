@@ -41,12 +41,7 @@ use xcl_vm::{Value, DomainCtx};
 /// Credentials are loaded from:
 /// 1. Environment variables: `OCI_USER_ID`, `OCI_TENANCY_ID`, `OCI_FINGERPRINT`, `OCI_PRIVATE_KEY_PATH`
 /// 2. `.env` file via `io.read_env` (if `OCI_ENV_FILE` is set)
-#[xcl_fn(
-    name = "oci",
-    args = "tenancy: str; f: any",
-    ret = "any",
-    summary = "Run a closure within an OCI tenancy context."
-)]
+#[xcl_fn(name = "oci")]
 fn oci_run(ctx: &mut DomainCtx) -> Value {
     let tenancy = ctx.arg(0).as_str().unwrap_or("");
     let closure = ctx.arg(1);
@@ -60,11 +55,7 @@ fn oci_run(ctx: &mut DomainCtx) -> Value {
     result
 }
 
-#[xcl_fn(
-    name = "oci.config",
-    ret = "map",
-    summary = "Get the current OCI configuration."
-)]
+#[xcl_fn]
 fn oci_config(ctx: &mut DomainCtx) -> Value {
     let mut config = HashMap::new();
     if let Some(ten) = ctx.get_context("oci.tenancy") {
@@ -73,11 +64,7 @@ fn oci_config(ctx: &mut DomainCtx) -> Value {
     Value::from_map_boxed(config)
 }
 
-#[xcl_fn(
-    name = "oci.credential",
-    ret = "map",
-    summary = "Get the current OCI credentials."
-)]
+#[xcl_fn]
 fn oci_credential(ctx: &mut DomainCtx) -> Value {
     match ctx.get_context("oci.credentials") {
         Some(creds) => creds,

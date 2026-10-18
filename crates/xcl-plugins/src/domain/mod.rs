@@ -92,13 +92,7 @@ use crate::core::result::err_result;
 ///     print domain.get "level"       # 1
 /// }
 /// ```
-#[xcl_fn(
-    name = "domain.run",
-    args = "key: str; value: any; f: any",
-    ret = "any",
-    summary = "Run a closure within a scoped context. The context is automatically \
-               cleared after the block finishes, enabling nested domain blocks."
-)]
+#[xcl_fn]
 fn domain_run(ctx: &mut DomainCtx) -> Value {
     let key = ctx.arg(0).as_str().unwrap_or("").to_string();
     let value = ctx.arg(1);
@@ -128,12 +122,7 @@ fn domain_run(ctx: &mut DomainCtx) -> Value {
 ///     # $db == "postgres"
 /// }
 /// ```
-#[xcl_fn(
-    name = "domain.get",
-    args = "key: str",
-    ret = "any",
-    summary = "Read the current context value for a key. Returns nil if not set."
-)]
+#[xcl_fn]
 fn domain_get(ctx: &mut DomainCtx) -> Value {
     let key = ctx.arg(0).as_str().unwrap_or("");
     ctx.get_context(key).unwrap_or(Value::nil())
@@ -156,12 +145,7 @@ fn domain_get(ctx: &mut DomainCtx) -> Value {
 ///     }
 /// }
 /// ```
-#[xcl_fn(
-    name = "domain.has",
-    args = "key: str",
-    ret = "bool",
-    summary = "Check if a context key is currently active."
-)]
+#[xcl_fn]
 fn domain_has(ctx: &mut DomainCtx) -> Value {
     let key = ctx.arg(0).as_str().unwrap_or("");
     Value::bool_(ctx.has_context(key))
@@ -177,12 +161,7 @@ fn domain_has(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// fn domain.set(key: str; value: any) -> nil
 /// ```
-#[xcl_fn(
-    name = "domain.set",
-    args = "key: str; value: any",
-    ret = "nil",
-    summary = "Push a context value manually. Use domain.pop or domain.clear to remove."
-)]
+#[xcl_fn]
 fn domain_set(ctx: &mut DomainCtx) -> Value {
     let key = ctx.arg(0).as_str().unwrap_or("").to_string();
     let value = ctx.arg(1);
@@ -197,12 +176,7 @@ fn domain_set(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// fn domain.pop(key: str) -> any
 /// ```
-#[xcl_fn(
-    name = "domain.pop",
-    args = "key: str",
-    ret = "any",
-    summary = "Remove and return the top context value for a key."
-)]
+#[xcl_fn]
 fn domain_pop(ctx: &mut DomainCtx) -> Value {
     let key = ctx.arg(0).as_str().unwrap_or("");
     ctx.pop_context(key).unwrap_or(Value::nil())
@@ -215,12 +189,7 @@ fn domain_pop(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// fn domain.clear(key: str) -> nil
 /// ```
-#[xcl_fn(
-    name = "domain.clear",
-    args = "key: str",
-    ret = "nil",
-    summary = "Remove all stacked values for a context key."
-)]
+#[xcl_fn]
 fn domain_clear(ctx: &mut DomainCtx) -> Value {
     let key = ctx.arg(0).as_str().unwrap_or("");
     ctx.clear_context(key);
@@ -246,12 +215,7 @@ fn domain_clear(ctx: &mut DomainCtx) -> Value {
 ///     print domain.get "mode"   # "test"
 /// }
 /// ```
-#[xcl_fn(
-    name = "domain.with",
-    args = "context: map; f: any",
-    ret = "any",
-    summary = "Run a closure with multiple context keys set simultaneously."
-)]
+#[xcl_fn]
 fn domain_with(ctx: &mut DomainCtx) -> Value {
     let context_map = ctx.arg(0);
     let closure = ctx.arg(1);
@@ -285,11 +249,7 @@ fn domain_with(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// fn domain.keys() -> arr
 /// ```
-#[xcl_fn(
-    name = "domain.keys",
-    ret = "arr",
-    summary = "List all context keys that currently have values."
-)]
+#[xcl_fn]
 fn domain_keys(ctx: &mut DomainCtx) -> Value {
     let keys: Vec<Value> = ctx.context_keys()
         .into_iter()
@@ -307,11 +267,7 @@ fn domain_keys(ctx: &mut DomainCtx) -> Value {
 /// ```xcl
 /// fn domain.snapshot() -> map
 /// ```
-#[xcl_fn(
-    name = "domain.snapshot",
-    ret = "map",
-    summary = "Capture a snapshot of all current context values."
-)]
+#[xcl_fn]
 fn domain_snapshot(ctx: &mut DomainCtx) -> Value {
     let map = ctx.context_snapshot();
     Value::from_map_boxed(map)
@@ -354,12 +310,7 @@ fn domain_snapshot(ctx: &mut DomainCtx) -> Value {
 ///     print path.cwd ()   # "/home" again
 /// }
 /// ```
-#[xcl_fn(
-    name = "io.dir",
-    args = "path: str; f: any",
-    ret = "any",
-    summary = "Temporarily change the working directory for the duration of a block."
-)]
+#[xcl_fn]
 fn io_dir(ctx: &mut DomainCtx) -> Value {
     let new_dir = ctx.arg(0).as_str().unwrap_or("");
     let closure = ctx.arg(1);
@@ -410,12 +361,7 @@ fn io_dir(ctx: &mut DomainCtx) -> Value {
 /// - Only the keys in the map are overridden; other env vars are untouched.
 /// - If a key was not set before, it is removed after the block.
 /// - `nil` values remove the variable for the duration of the block.
-#[xcl_fn(
-    name = "env.override",
-    args = "vars: map; f: any",
-    ret = "any",
-    summary = "Temporarily override environment variables for the duration of a block."
-)]
+#[xcl_fn]
 fn env_override(ctx: &mut DomainCtx) -> Value {
     let vars_map = ctx.arg(0);
     let closure = ctx.arg(1);
@@ -487,12 +433,7 @@ fn env_override(ctx: &mut DomainCtx) -> Value {
 /// A map with:
 /// - `elapsed_ms`: float — milliseconds elapsed
 /// - `value`: any — the closure's return value
-#[xcl_fn(
-    name = "domain.profile",
-    args = "f: any",
-    ret = "map",
-    summary = "Time a block of code and return elapsed milliseconds with the result."
-)]
+#[xcl_fn]
 fn domain_profile(ctx: &mut DomainCtx) -> Value {
     let closure = ctx.arg(0);
     let start = std::time::Instant::now();
@@ -525,12 +466,7 @@ fn domain_profile(ctx: &mut DomainCtx) -> Value {
 ///     connect_db()
 /// }
 /// ```
-#[xcl_fn(
-    name = "domain.label",
-    args = "name: str; f: any",
-    ret = "any",
-    summary = "Run a block under a trace label accessible via domain.get \"trace.label\"."
-)]
+#[xcl_fn]
 fn domain_label(ctx: &mut DomainCtx) -> Value {
     let name = ctx.arg(0).as_str().unwrap_or("").to_string();
     let closure = ctx.arg(1);

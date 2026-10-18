@@ -69,16 +69,16 @@ fn m4(v: Value) -> glam::Mat4 {
 
 // ─── Constructors ───
 
-#[xcl_fn(name = "math.mat2_identity", ret = "mat2")]
+#[xcl_fn]
 fn math_mat2_identity() -> Value { mat2_map(glam::Mat2::IDENTITY) }
 
-#[xcl_fn(name = "math.mat3_identity", ret = "mat3")]
+#[xcl_fn]
 fn math_mat3_identity() -> Value { mat3_map(glam::Mat3::IDENTITY) }
 
-#[xcl_fn(name = "math.mat4_identity", ret = "mat4")]
+#[xcl_fn]
 fn math_mat4_identity() -> Value { mat4_map(glam::Mat4::IDENTITY) }
 
-#[xcl_fn(name = "math.mat4_from_cols", args = "c0x: float; c0y: float; c0z: float; c0w: float; c1x: float; c1y: float; c1z: float; c1w: float; c2x: float; c2y: float; c2z: float; c2w: float; c3x: float; c3y: float; c3z: float; c3w: float", ret = "mat4")]
+#[xcl_fn]
 fn math_mat4_from_cols(args: &[Value]) -> Value {
     let a: &[f64] = &args[..].iter().map(|v| v.as_float()).collect::<Vec<_>>()[..];
     let c0 = glam::Vec4::new(t(a[0]), t(a[1]), t(a[2]), t(a[3]));
@@ -90,7 +90,7 @@ fn math_mat4_from_cols(args: &[Value]) -> Value {
 
 // ─── Properties ───
 
-#[xcl_fn(name = "mat.det", args = "m: mat", ret = "float")]
+#[xcl_fn]
 fn mat_det(args: &[Value]) -> Value {
     let m = args[0];
     let st = m.map_subtype().unwrap_or(0);
@@ -103,7 +103,7 @@ fn mat_det(args: &[Value]) -> Value {
     Value::from_f64(det)
 }
 
-#[xcl_fn(name = "mat.trace", args = "m: mat", ret = "float")]
+#[xcl_fn]
 fn mat_trace(args: &[Value]) -> Value {
     let m = args[0];
     let st = m.map_subtype().unwrap_or(0);
@@ -118,7 +118,7 @@ fn mat_trace(args: &[Value]) -> Value {
 
 // ─── Operations ───
 
-#[xcl_fn(name = "mat.mul", args = "a: mat; b: mat", ret = "mat")]
+#[xcl_fn]
 fn mat_mul(args: &[Value]) -> Value {
     let st = args[0].map_subtype().unwrap_or(0);
     match st {
@@ -129,7 +129,7 @@ fn mat_mul(args: &[Value]) -> Value {
     }
 }
 
-#[xcl_fn(name = "mat.transpose", args = "m: mat", ret = "mat")]
+#[xcl_fn]
 fn mat_transpose(args: &[Value]) -> Value {
     let st = args[0].map_subtype().unwrap_or(0);
     match st {
@@ -140,7 +140,7 @@ fn mat_transpose(args: &[Value]) -> Value {
     }
 }
 
-#[xcl_fn(name = "mat.inv", args = "m: mat", ret = "mat")]
+#[xcl_fn]
 fn mat_inv(args: &[Value]) -> Value {
     let m = args[0];
     let st = m.map_subtype().unwrap_or(0);
@@ -161,7 +161,7 @@ fn mat_inv(args: &[Value]) -> Value {
     }
 }
 
-#[xcl_fn(name = "mat.mul_scalar", args = "m: mat; s: float", ret = "mat")]
+#[xcl_fn]
 fn mat_mul_scalar(args: &[Value]) -> Value {
     let s = t(args[1].as_float());
     let st = args[0].map_subtype().unwrap_or(0);
@@ -175,7 +175,7 @@ fn mat_mul_scalar(args: &[Value]) -> Value {
 
 // ─── Transform ───
 
-#[xcl_fn(name = "mat.transform_vec3", args = "m: mat4; v: vec3", ret = "vec3")]
+#[xcl_fn]
 fn mat_transform_vec3(args: &[Value]) -> Value {
     let gm = m4(args[0]);
     let gv = glam::Vec3::new(gc_v(args[1],"x"), gc_v(args[1],"y"), gc_v(args[1],"z"));
@@ -187,7 +187,7 @@ fn mat_transform_vec3(args: &[Value]) -> Value {
     Value::from_map_boxed_typed_v(map, 101, 0)
 }
 
-#[xcl_fn(name = "mat.transform_vec4", args = "m: mat4; v: vec4", ret = "vec4")]
+#[xcl_fn]
 fn mat_transform_vec4(args: &[Value]) -> Value {
     let gm = m4(args[0]);
     let gv = glam::Vec4::new(gc_v(args[1],"x"), gc_v(args[1],"y"), gc_v(args[1],"z"), gc_v(args[1],"w"));
@@ -206,7 +206,7 @@ fn gc_v(v: Value, name: &str) -> f32 {
 
 // ─── Camera helpers ───
 
-#[xcl_fn(name = "math.mat4_perspective_fov", args = "fov_y: float; aspect: float; near: float; far: float", ret = "mat4")]
+#[xcl_fn]
 fn math_mat4_perspective_fov(args: &[Value]) -> Value {
     let fov_y = t(args[0].as_float());
     let aspect = t(args[1].as_float());
@@ -221,7 +221,7 @@ fn math_mat4_perspective_fov(args: &[Value]) -> Value {
     mat4_map(glam::Mat4::from_cols_array(&cols))
 }
 
-#[xcl_fn(name = "math.mat4_look_at", args = "eye_x: float; eye_y: float; eye_z: float; target_x: float; target_y: float; target_z: float; up_x: float; up_y: float; up_z: float", ret = "mat4")]
+#[xcl_fn]
 fn math_mat4_look_at(args: &[Value]) -> Value {
     let eye = glam::Vec3::new(t(args[0].as_float()), t(args[1].as_float()), t(args[2].as_float()));
     let target = glam::Vec3::new(t(args[3].as_float()), t(args[4].as_float()), t(args[5].as_float()));

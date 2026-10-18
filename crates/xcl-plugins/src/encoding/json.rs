@@ -165,7 +165,7 @@ use xcl_macros::xcl_fn;
 /// - Returns `none` if the JSON string is malformed.
 /// - JSON `null` becomes XCL `none`.
 /// - JSON numbers without decimals become XCL int; with decimals become float.
-#[xcl_fn(name = "json.parse", args = "json: str", ret = "any")]
+#[xcl_fn]
 pub fn json_parse(json_str: &str) -> Value {
     parse_json(json_str)
 }
@@ -211,7 +211,7 @@ pub fn json_parse(json_str: &str) -> Value {
 /// - Returns empty string `""` if the value cannot be serialized (e.g., functions).
 /// - Key order in objects is not guaranteed.
 /// - Use `json.pretty` for formatted output.
-#[xcl_fn(name = "json.stringify", args = "value: any", ret = "str")]
+#[xcl_fn]
 pub fn json_stringify(args: &[Value]) -> Value {
     let v = args.first().copied().unwrap_or(Value::nil());
     match to_json_string(v) {
@@ -248,7 +248,7 @@ pub fn json_stringify(args: &[Value]) -> Value {
 /// ## OUTPUT TYPES
 ///
 /// - `str`
-#[xcl_fn(name = "json.pretty", args = "value: any", ret = "str")]
+#[xcl_fn]
 pub fn json_pretty(args: &[Value]) -> Value {
     let v = args.first().copied().unwrap_or(Value::nil());
     match to_json_pretty(v) {
