@@ -8,7 +8,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{ItemImpl, LitStr, Type, parse_macro_input};
+use syn::{FnArg, ItemFn, ItemImpl, LitStr, Type, parse_macro_input};
 
 /// Extract the first line of `///` doc comments as a summary string.
 fn extract_doc_summary(attrs: &[syn::Attribute]) -> Option<String> {
@@ -112,25 +112,17 @@ fn parse_xcl_helper_attrs(input: &syn::DeriveInput) -> (Option<String>, Option<S
         }
     }
 
-<<<<<<< HEAD
-    // Auto-detect summary from doc comments if not provided
-=======
     // Auto-detect domain from source file path if not provided
     if domain.is_none() {
         domain = infer_domain_from_span(input.ident.span());
     }
 
     // Auto-detect summary from /// doc comments if not provided
->>>>>>> 1aea8a05633db723e7f0ce648f5ca4182fce7072
     if summary.is_none() {
         summary = extract_doc_summary(&input.attrs);
     }
 
-<<<<<<< HEAD
     (domain, kind, summary, super_type)
-=======
-    (domain, kind, summary)
->>>>>>> 1aea8a05633db723e7f0ce648f5ca4182fce7072
 }
 
 /// Convert a Rust type to an XCL type string.
@@ -158,17 +150,11 @@ fn rust_type_to_xcl_type(ty: &Type) -> String {
 
 /// `#[derive(Xcl)]` — Auto-registers a struct or enum in `TYPE_REGISTRY`.
 ///
-<<<<<<< HEAD
 /// Supports optional `#[xcl(...)]` helper attributes:
 /// - `domain = "..."` — override the auto-detected domain.
 /// - `kind = "Record" | "Opaque" | "Sum"` — override the type kind.
 /// - `summary = "..."` — override the auto-detected summary.
 /// - `super = "..."` — set the parent type for inheritance.
-=======
-/// - On a `trait`: extracts `fn` item names and registers in `TRAIT_REGISTRY`.
-/// - On a `struct`: registers in `TYPE_REGISTRY`. If the struct has fields, it's a Record type.
-///   If it's a unit struct, it's an Opaque type.
-/// - On an `enum`: registers as a Sum type in `TYPE_REGISTRY`.
 ///
 /// The derive macro auto-detects:
 /// - **domain** from the source file path (e.g., `src/io/mod.rs` → `"io"`).
@@ -176,25 +162,16 @@ fn rust_type_to_xcl_type(ty: &Type) -> String {
 /// - **summary** from the first `///` doc comment line.
 ///
 /// Use `#[xcl(domain = "...", kind = "...", summary = "...")]` to override any auto-detected value.
->>>>>>> 1aea8a05633db723e7f0ce648f5ca4182fce7072
-///
 /// # Example
 ///
 /// ```ignore
 /// // In src/io/mod.rs — domain auto-detected as "io"
 /// /// A handle to an open file.
 /// #[derive(Xcl)]
-<<<<<<< HEAD
-/// pub struct MyType;
-=======
 /// pub struct FileType;
->>>>>>> 1aea8a05633db723e7f0ce648f5ca4182fce7072
-///
 /// /// A stream handle for standard I/O.
 /// #[derive(Xcl)]
-<<<<<<< HEAD
 /// #[xcl(kind = "Sum")]
-=======
 /// pub struct StreamType;
 ///
 /// // In src/proc.rs — domain auto-detected as "proc"
@@ -204,7 +181,6 @@ fn rust_type_to_xcl_type(ty: &Type) -> String {
 ///
 /// /// Success or failure result.
 /// #[derive(Xcl)]
->>>>>>> 1aea8a05633db723e7f0ce648f5ca4182fce7072
 /// pub enum ResultType {
 ///     Ok(Value),
 ///     Err(Error),
@@ -395,10 +371,7 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
 /// 2. **Inherent impl** (`impl Type`): Registers each method in `NATIVE_REGISTRY` as a native
 ///    method bound to the type's domain.
 ///
-<<<<<<< HEAD
-/// # Example — Trait impl
-=======
-/// ```ignore
+/// # Example — Trait impl/// ```ignore
 /// #[xcl_trait]
 /// pub trait CloudService {
 ///     fn bucket_create();
@@ -1169,9 +1142,7 @@ fn is_ctx_type(ty: &Type) -> bool {
 /// No attributes needed — the macro inspects the Rust impl block and extracts method names,
 /// trait name, and type name automatically.
 ///
-/// # Example
->>>>>>> 1aea8a05633db723e7f0ce648f5ca4182fce7072
-///
+/// # Example///
 /// ```ignore
 /// #[xcl_impl]
 /// impl CloudService for CloudflareProvider {
@@ -1192,7 +1163,17 @@ fn is_ctx_type(ty: &Type) -> bool {
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn xcl_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
+    // Parse optional attributes: #[xcl_impl(auto_import)]
+    let mut auto_import = false;
+    if !attr.is_empty() {
+        if let Ok(ident) = syn::parse2::<syn::Ident>(attr.into()) {
+            if ident == "auto_import" {
+                auto_import = true;
+            }
+        }
+    }
+
     let impl_item = parse_macro_input!(item as ItemImpl);
 
     let type_name = match impl_item.self_ty.as_ref() {
@@ -1346,6 +1327,7 @@ pub fn xcl_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         }
                     }).collect();
 
+                    let auto_import_val = auto_import;
                     native_entries.push(quote! {
                         #[::linkme::distributed_slice(::xcl_vm::NATIVE_REGISTRY)]
                         #[allow(non_upper_case_globals)]
@@ -1361,6 +1343,7 @@ pub fn xcl_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
                             named: &[],
                             summary: #summary_expr,
                             arg_desc: &[],
+                            auto_import: #auto_import_val,
                         };
 
                         fn #wrapper_name(args: &[::xcl_vm::Value]) -> ::xcl_vm::Value {
@@ -1372,6 +1355,7 @@ pub fn xcl_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     });
                 } else {
                     // Static method — no self
+                    let auto_import_val = auto_import;
                     native_entries.push(quote! {
                         #[::linkme::distributed_slice(::xcl_vm::NATIVE_REGISTRY)]
                         #[allow(non_upper_case_globals)]
@@ -1387,6 +1371,7 @@ pub fn xcl_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
                             named: &[],
                             summary: #summary_expr,
                             arg_desc: &[],
+                            auto_import: #auto_import_val,
                         };
                     });
                 }
@@ -1432,6 +1417,7 @@ pub fn xcl_universal_methods(_item: TokenStream) -> TokenStream {
             named: &[],
             summary: Some("Return the type name of any value."),
             arg_desc: &[],
+            auto_import: false,
         };
 
         fn __xcl_universal_type(args: &[::xcl_vm::Value]) -> ::xcl_vm::Value {
@@ -1507,6 +1493,7 @@ pub fn xcl_universal_methods(_item: TokenStream) -> TokenStream {
             named: &[],
             summary: Some("Return the parent (base) struct of a composed type via super."),
             arg_desc: &[],
+            auto_import: false,
         };
 
         fn __xcl_universal_super(args: &[::xcl_vm::Value]) -> ::xcl_vm::Value {
