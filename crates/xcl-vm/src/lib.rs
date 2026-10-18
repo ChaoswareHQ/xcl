@@ -256,7 +256,7 @@ pub use value::{
     NamedParam, NativeArg, NativeEntry, NativeKind, RawPtr, SUBTYPE_ERROR, SUBTYPE_HANDLE, SUBTYPE_NONE,
     SUBTYPE_RESULT, SUBTYPE_USER_BASE, TraitDescriptor, TraitMethod, TypeDescriptor, TypeField, TypeKind,
     TypeVariant, VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK,
-    Value, extract_arg,
+    Value, extract_arg, XclType, XclObject,
 };
 pub use vm::{DomainSlot, VM};
 pub use wellknown::WellKnown;

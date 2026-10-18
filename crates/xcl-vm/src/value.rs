@@ -1025,6 +1025,50 @@ impl core::fmt::Debug for Value {
     }
 }
 
+// — From implementations for common types (used by #[xcl_impl] generated wrappers) —
+
+impl From<i64> for Value {
+    fn from(v: i64) -> Self {
+        Value::from_i48(v)
+    }
+}
+
+impl From<i32> for Value {
+    fn from(v: i32) -> Self {
+        Value::from_i48(v as i64)
+    }
+}
+
+impl From<u64> for Value {
+    fn from(v: u64) -> Self {
+        Value::from_i48(v as i64)
+    }
+}
+
+impl From<f64> for Value {
+    fn from(v: f64) -> Self {
+        Value::from_f64(v)
+    }
+}
+
+impl From<bool> for Value {
+    fn from(v: bool) -> Self {
+        Value::bool(v)
+    }
+}
+
+impl From<String> for Value {
+    fn from(v: String) -> Self {
+        Value::from_str_boxed(v)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(v: &str) -> Self {
+        Value::from_str_boxed(v.to_string())
+    }
+}
+
 // — Argument extraction for typed native functions —
 
 /// Extracts a typed Rust argument from a `&[Value]` slice at the given index.
@@ -1227,6 +1271,10 @@ pub struct TypeDescriptor {
     pub variants: &'static [TypeVariant],
     /// Documentation summary string.
     pub summary: Option<&'static str>,
+    /// Parent type name for inheritance via composition (Super support).
+    /// When set, method resolution falls back to this parent type if a method
+    /// is not found on the current type.
+    pub parent_type: Option<&'static str>,
 }
 
 /// Classification of custom types in the type registry.
@@ -1497,8 +1545,10 @@ impl<'a> DomainCtx<'a> {
         let mut pairs: Vec<(String, BuiltinImpl)> = Vec::new();
         for entry in NATIVE_REGISTRY.iter() {
             if entry.impl_type == Some(impl_type_name) {
-                // Check if this entry's method name matches any method in the impl
-                if method_names.contains(&entry.method) {
+                // Check if this entry's override_method or method matches any method in the impl
+                let method_match = method_names.contains(&entry.method)
+                    || entry.override_method.map_or(false, |om| method_names.contains(&om));
+                if method_match {
                     let impl_ = match entry.kind {
                         NativeKind::Pure => {
                             let f: BuiltinFn = unsafe { std::mem::transmute(entry.ptr.0) };
@@ -1543,5 +1593,48 @@ pub struct GlobalOverrideGuard<'a> {
 impl Drop for GlobalOverrideGuard<'_> {
     fn drop(&mut self) {
         self.vm.restore_globals(&self.saved);
+    }
+}
+
+// — XclObject / XclType traits for universal methods and Self/Super support —
+
+/// Core trait for any Rust type that can be serialized to/from XCL `Value::Map`.
+///
+/// Types that derive `#[derive(Xcl)]` with `kind = "Record"` should implement this trait
+/// to enable `&self` deserialization and `Self` serialization in `#[xcl_impl]` inherent impls.
+pub trait XclType: Sized {
+    /// Deserialize an XCL `Value::Map` into this Rust struct.
+    fn from_value(v: Value) -> Self;
+
+    /// Serialize this Rust struct into an XCL `Value::Map`.
+    fn to_value(&self) -> Value;
+}
+
+/// Universal trait available on all XCL values.
+///
+/// Provides methods like `type` and `super` that work on any value in the XCL VM.
+/// This is implemented as a blanket trait — any type registered in TYPE_REGISTRY
+/// automatically inherits these methods via the universal NATIVE_REGISTRY entries.
+pub trait XclObject {
+    /// Returns the type name of the value as a string.
+    fn xcl_type_name(&self) -> String;
+
+    /// Returns the parent (base) struct of a composed type, if applicable.
+    fn xcl_super(&self) -> Option<Value>;
+}
+
+/// Blanket implementation: any type that implements `XclType` automatically gets `XclObject`.
+impl<T: XclType> XclObject for T {
+    fn xcl_type_name(&self) -> String {
+        // The type name is inferred from the struct's TYPE_REGISTRY entry
+        // This is a fallback — the universal `type` method in NATIVE_REGISTRY
+        // provides the actual implementation that checks TYPE_REGISTRY
+        "unknown".to_string()
+    }
+
+    fn xcl_super(&self) -> Option<Value> {
+        // The actual super resolution is handled by the universal `super` method
+        // in NATIVE_REGISTRY which checks TYPE_REGISTRY for parent_type
+        None
     }
 }

@@ -426,6 +426,58 @@ impl VM {
         slot.methods.get(midx as usize).and_then(|e| e.as_ref())
     }
 
+    /// Resolves the parent domain for super delegation.
+    ///
+    /// When a method is not found on the receiver's type, this method checks the
+    /// TYPE_REGISTRY for a `parent_type` field and returns the parent's domain name
+    /// if the parent type has registered native methods.
+    ///
+    /// # Arguments
+    ///
+    /// * `receiver` - The receiver value (typically a `Value::Map`).
+    /// * `method_name` - The method name being looked up.
+    fn resolve_parent_domain(&self, receiver: Value, _method_name: &str) -> Option<String> {
+        use crate::native::TYPE_REGISTRY;
+
+        // Only maps can have parent types
+        let map = receiver.as_map()?;
+
+        // Find the type descriptor that matches this map
+        for desc in TYPE_REGISTRY.iter() {
+            if desc.kind == crate::value::TypeKind::Record {
+                let mut matches = true;
+                for field in desc.fields {
+                    if !map.contains_key(field.name) {
+                        matches = false;
+                        break;
+                    }
+                }
+                if matches && !desc.fields.is_empty() {
+                    // Found the type — check if it has a parent_type
+                    if let Some(parent_name) = desc.parent_type {
+                        // The parent type name IS the domain for NATIVE_REGISTRY lookup
+                        // because #[xcl_impl] on inherent impls registers methods under
+                        // domain = Some(type_name)
+                        return Some(parent_name.to_string());
+                    }
+                    // No parent — stop searching
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
+    /// Looks up a universal method (domain=None) by name.
+    ///
+    /// Universal methods like `type` and `super` are available on all values
+    /// regardless of their type.
+    fn resolve_universal_method(&self, method: &str) -> Option<&BuiltinImpl> {
+        self.global_index
+            .get(method)
+            .and_then(|&idx| self.global_table.get(idx as usize).and_then(|e| e.as_ref()))
+    }
+
     /// Save current global function mappings and override them with new implementations.
     /// Returns the saved state for later restoration via `restore_globals`.
     pub fn save_and_override_globals(
@@ -947,6 +999,31 @@ impl VM {
                     }
                 }
 
+                // Super delegation: if method not found, check TYPE_REGISTRY for parent_type
+                // and delegate to the parent's NATIVE_REGISTRY entry
+                if let Some(parent_domain) = self.resolve_parent_domain(receiver, method_name) {
+                    if let Some(impl_) = self.resolve_domain_method(&parent_domain, method_name) {
+                        let impl_copy = *impl_;
+                        let mut all_args = Vec::with_capacity(nargs + 1);
+                        all_args.push(receiver);
+                        all_args.extend(args);
+                        let result = impl_copy.call(self, &all_args);
+                        self.push(result);
+                        return Action::Next;
+                    }
+                }
+
+                // Universal methods: check for domain=None entries (e.g., type, super)
+                if let Some(impl_) = self.resolve_universal_method(method_name) {
+                    let impl_copy = *impl_;
+                    let mut all_args = Vec::with_capacity(nargs + 1);
+                    all_args.push(receiver);
+                    all_args.extend(args);
+                    let result = impl_copy.call(self, &all_args);
+                    self.push(result);
+                    return Action::Next;
+                }
+
                 // Not found
                 self.push(Value::nil());
                 Action::Next
@@ -979,11 +1056,26 @@ impl VM {
                 let string_table = self.frames[top].code.string_table.clone();
                 let field = &string_table[field_idx];
                 let target = self.pop();
-                let v = target
-                    .as_map()
-                    .and_then(|m| m.get(&**field).copied())
-                    .unwrap_or(Value::nil());
-                self.push(v);
+
+                // First try map field access
+                if let Some(map) = target.as_map() {
+                    if let Some(v) = map.get(&**field).copied() {
+                        self.push(v);
+                        return Action::Next;
+                    }
+                }
+
+                // Then try universal methods (type, super) for non-map or missing fields
+                if let Some(impl_) = self.resolve_universal_method(field) {
+                    let impl_copy = *impl_;
+                    let all_args = vec![target];
+                    let result = impl_copy.call(self, &all_args);
+                    self.push(result);
+                    return Action::Next;
+                }
+
+                // Not found
+                self.push(Value::nil());
                 Action::Next
             }
             OP_MAKE_ARRAY => {
