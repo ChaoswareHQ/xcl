@@ -33,6 +33,7 @@ use xcl_vm::{Value, DomainCtx};
 
 /// Run a closure within a Cloudflare context.
 #[xcl_fn(
+    impl_type = "CloudflareProvider",
     name = "cloudflare",
     args = "account: str; f: any",
     ret = "any",
@@ -57,7 +58,15 @@ fn cloudflare_run(ctx: &mut DomainCtx) -> Value {
 
     ctx.push_context("cloudflare.account", Value::from_str_boxed(account));
     ctx.push_context("cloudflare.credentials", credentials);
+
+    // Override shared global function names with Cloudflare implementations via impl type lookup
+    let saved = ctx.override_by_trait("CloudflareProvider");
+
     let result = ctx.call(closure, &[]);
+
+    // Restore original global function mappings
+    ctx.restore_by_trait(&saved);
+
     ctx.pop_context("cloudflare.credentials");
     ctx.pop_context("cloudflare.account");
     result
@@ -65,6 +74,7 @@ fn cloudflare_run(ctx: &mut DomainCtx) -> Value {
 
 /// Get the current Cloudflare configuration.
 #[xcl_fn(
+    impl_type = "CloudflareProvider",
     name = "cloudflare.config",
     ret = "map",
     summary = "Get the current Cloudflare configuration."
@@ -79,6 +89,7 @@ fn cloudflare_config(ctx: &mut DomainCtx) -> Value {
 
 /// Get the current Cloudflare credentials.
 #[xcl_fn(
+    impl_type = "CloudflareProvider",
     name = "cloudflare.credential",
     ret = "map",
     summary = "Get the current Cloudflare credentials."

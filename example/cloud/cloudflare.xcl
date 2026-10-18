@@ -44,7 +44,7 @@ cloudflare "" {
         print "Bucket created successfully"
     }
     if $create.is_err {
-        print "Bucket create error (may already exist):" $create.message
+        print "Bucket create error (may already exist):" $create.error.message
     }
 
     # List, put, get, delete objects
@@ -54,7 +54,7 @@ cloudflare "" {
             print "Bucket list: OK"
         }
         if $list.is_err {
-            print "Bucket list error:" $list.message
+            print "Bucket list error:" $list.error.message
         }
 
         $put = bucket.put "hello.txt" "Hello from XCL!"
@@ -62,7 +62,7 @@ cloudflare "" {
             print "Bucket put: OK"
         }
         if $put.is_err {
-            print "Bucket put error:" $put.message
+            print "Bucket put error:" $put.error.message
         }
 
         $get = bucket.get "hello.txt"
@@ -70,7 +70,7 @@ cloudflare "" {
             print "Bucket get: OK"
         }
         if $get.is_err {
-            print "Bucket get error:" $get.message
+            print "Bucket get error:" $get.error.message
         }
 
         $del = bucket.delete "hello.txt"
@@ -78,7 +78,7 @@ cloudflare "" {
             print "Bucket delete: OK"
         }
         if $del.is_err {
-            print "Bucket delete error:" $del.message
+            print "Bucket delete error:" $del.error.message
         }
     }
 
@@ -88,7 +88,7 @@ cloudflare "" {
         print "Workers list: OK"
     }
     if $workers.is_err {
-        print "Workers list error:" $workers.message
+        print "Workers list error:" $workers.error.message
     }
 
     # Durable Objects operations
@@ -97,7 +97,7 @@ cloudflare "" {
         print "Instances list: OK"
     }
     if $instances.is_err {
-        print "Instances list error:" $instances.message
+        print "Instances list error:" $instances.error.message
     }
 }
 

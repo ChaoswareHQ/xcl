@@ -1,6 +1,348 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{FnArg, ItemFn, LitStr, Type, parse_macro_input};
+use syn::{FnArg, ItemFn, ItemImpl, LitStr, Type, parse_macro_input};
+
+/// Parse helper attributes `#[xcl(domain = "...", kind = "...", summary = "...")]`
+/// from a DeriveInput's attrs.
+fn parse_xcl_helper_attrs(input: &syn::DeriveInput) -> (Option<String>, Option<String>, Option<String>) {
+    let mut domain = None;
+    let mut kind = None;
+    let mut summary = None;
+
+    // Check for `#[xcl(domain = "...", kind = "...", summary = "...")]`
+    for attr in &input.attrs {
+        if attr.path().is_ident("xcl") {
+            if let syn::Meta::List(meta_list) = &attr.meta {
+                let parsed = meta_list.parse_args_with(|input: syn::parse::ParseStream<'_>| {
+                    let mut d = None;
+                    let mut k = None;
+                    let mut s = None;
+                    while !input.is_empty() {
+                        let ident: syn::Ident = input.parse()?;
+                        let _eq: syn::Token![=] = input.parse()?;
+                        let lit: LitStr = input.parse()?;
+                        match ident.to_string().as_str() {
+                            "domain" => d = Some(lit.value()),
+                            "kind" => k = Some(lit.value()),
+                            "summary" => s = Some(lit.value()),
+                            _ => {}
+                        }
+                        if input.peek(syn::Token![,]) {
+                            input.parse::<syn::Token![,]>()?;
+                        }
+                    }
+                    Ok((d, k, s))
+                });
+                if let Ok((d, k, s)) = parsed {
+                    domain = d;
+                    kind = k;
+                    summary = s;
+                }
+            }
+        }
+    }
+
+    (domain, kind, summary)
+}
+
+/// Convert a Rust type to an XCL type string
+fn rust_type_to_xcl_type(ty: &Type) -> String {
+    match ty {
+        Type::Path(type_path) => {
+            if let Some(seg) = type_path.path.segments.last() {
+                match seg.ident.to_string().as_str() {
+                    "String" => "str".to_string(),
+                    "str" => "str".to_string(),
+                    "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => "int".to_string(),
+                    "f32" | "f64" => "float".to_string(),
+                    "bool" => "bool".to_string(),
+                    "Vec" => "array".to_string(),
+                    "HashMap" => "map".to_string(),
+                    other => other.to_string(),
+                }
+            } else {
+                "any".to_string()
+            }
+        }
+        _ => "any".to_string(),
+    }
+}
+
+/// `#[derive(Xcl)]` — Auto-registers Rust traits, structs, and enums in XCL registries.
+///
+/// - On a `trait`: extracts `fn` item names and registers in `TRAIT_REGISTRY`.
+/// - On a `struct`: registers in `TYPE_REGISTRY`. If the struct has fields, it's a Record type.
+///   If it's a unit struct, it's an Opaque type.
+/// - On an `enum`: registers as a Sum type in `TYPE_REGISTRY`.
+///
+/// Use `#[xcl(domain = "...", kind = "...", summary = "...")]` for optional metadata.
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(Xcl)]
+/// pub trait CloudService {
+///     fn bucket_create();
+///     fn bucket_list();
+/// }
+///
+/// #[derive(Xcl)]
+/// pub struct CloudflareProvider;
+///
+/// #[derive(Xcl)]
+/// #[xcl(domain = "io", kind = "Record", summary = "A file handle.")]
+/// pub struct FileType {
+///     handle: u64,
+/// }
+///
+/// #[derive(Xcl)]
+/// #[xcl(kind = "Sum", summary = "Success or failure.")]
+/// pub enum ResultType {
+///     Ok(Value),
+///     Err(Error),
+/// }
+/// ```
+#[proc_macro_derive(Xcl, attributes(xcl))]
+pub fn xcl_derive(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as syn::DeriveInput);
+    let name = &input.ident;
+    let name_str = name.to_string();
+
+    let (domain, kind, summary) = parse_xcl_helper_attrs(&input);
+
+    let domain_expr = match domain {
+        Some(d) => quote!(Some(#d)),
+        None => quote!(None),
+    };
+
+    let summary_expr = match summary {
+        Some(s) => quote!(Some(#s)),
+        None => quote!(None),
+    };
+
+    match &input.data {
+        syn::Data::Struct(data_struct) => {
+            let statik = syn::Ident::new(
+                &format!("__XCL_TYPE_{}", name_str.to_uppercase()),
+                proc_macro2::Span::call_site(),
+            );
+
+            // Determine kind and fields
+            let (kind_expr, fields_tokens) = match &data_struct.fields {
+                syn::Fields::Named(fields) => {
+                    // Record type with named fields
+                    let kind_expr = match kind.as_deref() {
+                        Some("Record") => quote!(::xcl_vm::TypeKind::Record),
+                        Some("Opaque") => quote!(::xcl_vm::TypeKind::Opaque),
+                        _ => quote!(::xcl_vm::TypeKind::Record),
+                    };
+
+                    if kind.as_deref() == Some("Opaque") {
+                        (kind_expr, quote!(&[]))
+                    } else {
+                        let fs_entries = fields.named.iter().map(|f| {
+                            let field_name = f.ident.as_ref().unwrap().to_string();
+                            let field_ty = rust_type_to_xcl_type(&f.ty);
+                            quote! {
+                                ::xcl_vm::TypeField {
+                                    name: #field_name,
+                                    ty: #field_ty,
+                                    optional: false,
+                                }
+                            }
+                        });
+                        (kind_expr, quote!(&[#(#fs_entries),*]))
+                    }
+                }
+                syn::Fields::Unnamed(_) => {
+                    // Tuple struct — treat as opaque
+                    (quote!(::xcl_vm::TypeKind::Opaque), quote!(&[]))
+                }
+                syn::Fields::Unit => {
+                    // Unit struct — opaque type
+                    (quote!(::xcl_vm::TypeKind::Opaque), quote!(&[]))
+                }
+            };
+
+            let expanded = quote! {
+                #[::linkme::distributed_slice(::xcl_vm::TYPE_REGISTRY)]
+                #[allow(non_upper_case_globals)]
+                static #statik: ::xcl_vm::TypeDescriptor = ::xcl_vm::TypeDescriptor {
+                    name: #name_str,
+                    domain: #domain_expr,
+                    kind: #kind_expr,
+                    fields: #fields_tokens,
+                    variants: &[],
+                    summary: #summary_expr,
+                };
+
+                // Prevent dead code elimination by referencing the type
+                #[allow(dead_code)]
+                const _: Option<#name> = None;
+            };
+            expanded.into()
+        }
+        syn::Data::Enum(data_enum) => {
+            // Sum type with variants
+            let statik = syn::Ident::new(
+                &format!("__XCL_TYPE_{}", name_str.to_uppercase()),
+                proc_macro2::Span::call_site(),
+            );
+
+            let kind_expr = match kind.as_deref() {
+                Some("Sum") => quote!(::xcl_vm::TypeKind::Sum),
+                _ => quote!(::xcl_vm::TypeKind::Sum),
+            };
+
+            let variants_tokens = if data_enum.variants.is_empty() {
+                quote!(&[])
+            } else {
+                let entries = data_enum.variants.iter().map(|v| {
+                    let variant_name = v.ident.to_string();
+                    match &v.fields {
+                        syn::Fields::Named(fields) => {
+                            let fs_entries = fields.named.iter().map(|f| {
+                                let field_name = f.ident.as_ref().unwrap().to_string();
+                                let field_ty = rust_type_to_xcl_type(&f.ty);
+                                quote! {
+                                    ::xcl_vm::TypeField {
+                                        name: #field_name,
+                                        ty: #field_ty,
+                                        optional: false,
+                                    }
+                                }
+                            });
+                            quote! {
+                                ::xcl_vm::TypeVariant {
+                                    name: #variant_name,
+                                    fields: &[#(#fs_entries),*],
+                                }
+                            }
+                        }
+                        syn::Fields::Unnamed(fields) => {
+                            let fs_entries = fields.unnamed.iter().map(|f| {
+                                let field_ty = rust_type_to_xcl_type(&f.ty);
+                                quote! {
+                                    ::xcl_vm::TypeField {
+                                        name: "value",
+                                        ty: #field_ty,
+                                        optional: false,
+                                    }
+                                }
+                            });
+                            quote! {
+                                ::xcl_vm::TypeVariant {
+                                    name: #variant_name,
+                                    fields: &[#(#fs_entries),*],
+                                }
+                            }
+                        }
+                        syn::Fields::Unit => {
+                            quote! {
+                                ::xcl_vm::TypeVariant {
+                                    name: #variant_name,
+                                    fields: &[],
+                                }
+                            }
+                        }
+                    }
+                });
+                quote!(&[#(#entries),*])
+            };
+
+            let expanded = quote! {
+                #[::linkme::distributed_slice(::xcl_vm::TYPE_REGISTRY)]
+                #[allow(non_upper_case_globals)]
+                static #statik: ::xcl_vm::TypeDescriptor = ::xcl_vm::TypeDescriptor {
+                    name: #name_str,
+                    domain: #domain_expr,
+                    kind: #kind_expr,
+                    fields: &[],
+                    variants: #variants_tokens,
+                    summary: #summary_expr,
+                };
+
+                // Prevent dead code elimination by referencing the type
+                #[allow(dead_code)]
+                const _: Option<#name> = None;
+            };
+            expanded.into()
+        }
+        syn::Data::Union(_) => {
+            syn::Error::new_spanned(
+                name,
+                "#[derive(Xcl)] is not supported for unions yet",
+            )
+            .to_compile_error()
+            .into()
+        }
+    }
+}
+
+/// `#[xcl_trait]` — Auto-registers a Rust trait in `TRAIT_REGISTRY` by extracting `fn` item names.
+///
+/// No attributes needed — the macro inspects the Rust trait body and extracts method names.
+///
+/// # Example
+///
+/// ```ignore
+/// #[xcl_trait]
+/// pub trait CloudService {
+///     fn bucket_create();
+///     fn bucket_list();
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn xcl_trait(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let trait_item = parse_macro_input!(item as syn::ItemTrait);
+    let name = &trait_item.ident;
+    let name_str = name.to_string();
+
+    // Extract fn item names from the trait body
+    let mut method_names: Vec<String> = Vec::new();
+    for item in &trait_item.items {
+        if let syn::TraitItem::Fn(tif) = item {
+            method_names.push(tif.sig.ident.to_string());
+        }
+    }
+
+    // Generate methods tokens
+    let methods_tokens = if method_names.is_empty() {
+        quote!(&[])
+    } else {
+        let entries = method_names.iter().map(|m_name| {
+            quote! {
+                ::xcl_vm::TraitMethod {
+                    name: #m_name,
+                    args: None,
+                    ret: None,
+                    summary: None,
+                }
+            }
+        });
+        quote!(&[#(#entries),*])
+    };
+
+    let statik = syn::Ident::new(
+        &format!("__XCL_TRAIT_{}", name_str.to_uppercase()),
+        proc_macro2::Span::call_site(),
+    );
+
+    let expanded = quote! {
+        #trait_item
+
+        #[::linkme::distributed_slice(::xcl_vm::TRAIT_REGISTRY)]
+        #[allow(non_upper_case_globals)]
+        static #statik: ::xcl_vm::TraitDescriptor = ::xcl_vm::TraitDescriptor {
+            name: #name_str,
+            domain: None,
+            methods: #methods_tokens,
+            summary: None,
+        };
+    };
+
+    expanded.into()
+}
 
 #[proc_macro_attribute]
 pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -11,6 +353,8 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
     let parsed: NativeAttr = parse_macro_input!(attr);
     let method_name = parsed.method;
     let domain = parsed.domain;
+    let impl_type = parsed.impl_type;
+    let override_method = parsed.override_method;
     let args_attr = parsed.args;
     let ret_attr = parsed.ret;
     let summary = parsed.summary;
@@ -24,6 +368,18 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let domain_expr = if let Some(ref d) = domain {
         quote!(Some(#d))
+    } else {
+        quote!(None)
+    };
+
+    let impl_type_expr = if let Some(ref t) = impl_type {
+        quote!(Some(#t))
+    } else {
+        quote!(None)
+    };
+
+    let override_method_expr = if let Some(ref m) = override_method {
+        quote!(Some(#m))
     } else {
         quote!(None)
     };
@@ -100,6 +456,8 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
             #[allow(non_upper_case_globals)]
             #vis static #statik: ::xcl_vm::NativeEntry = ::xcl_vm::NativeEntry {
                 domain: #domain_expr,
+                impl_type: #impl_type_expr,
+                override_method: #override_method_expr,
                 method: #method_name,
                 kind: ::xcl_vm::NativeKind::Pure,
                 ptr: ::xcl_vm::RawPtr(#wrapper_ident as *const ()),
@@ -123,6 +481,8 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
             #[allow(non_upper_case_globals)]
             #vis static #statik: ::xcl_vm::NativeEntry = ::xcl_vm::NativeEntry {
                 domain: #domain_expr,
+                impl_type: #impl_type_expr,
+                override_method: #override_method_expr,
                 method: #method_name,
                 kind: #kind,
                 ptr: ::xcl_vm::RawPtr(#fn_ident as *const ()),
@@ -163,9 +523,11 @@ fn is_value_slice_type(ty: &Type) -> bool {
 }
 
 struct NativeAttr {
-    method:   String,
-    domain:   Option<String>,
-    args:     Option<String>,
+    method:         String,
+    domain:         Option<String>,
+    impl_type:      Option<String>,
+    override_method: Option<String>,
+    args:           Option<String>,
     ret:      Option<String>,
     summary:  Option<String>,
     arg_desc: Vec<(String, String)>,
@@ -189,7 +551,9 @@ impl syn::parse::Parse for NativeAttr {
             return Ok(NativeAttr {
                 method,
                 domain,
-                args:     None,
+                impl_type: None,
+                override_method: None,
+                args:       None,
                 ret:      None,
                 summary:  None,
                 arg_desc: Vec::new(),
@@ -200,6 +564,8 @@ impl syn::parse::Parse for NativeAttr {
         // Parse named attributes manually
         let mut method = None;
         let mut domain = None;
+        let mut impl_type = None;
+        let mut override_method = None;
         let mut args = None;
         let mut ret = None;
         let mut summary = None;
@@ -280,6 +646,8 @@ impl syn::parse::Parse for NativeAttr {
                         }
                     }
                     "domain" => domain = Some(val),
+                    "impl_type" => impl_type = Some(val),
+                    "override_method" => override_method = Some(val),
                     "args" => args = Some(val),
                     "ret" => ret = Some(val),
                     "summary" => summary = Some(val),
@@ -295,8 +663,10 @@ impl syn::parse::Parse for NativeAttr {
         }
 
         Ok(NativeAttr {
-            method:   method.unwrap_or_default(),
+            method:         method.unwrap_or_default(),
             domain,
+            impl_type,
+            override_method,
             args,
             ret,
             summary,
@@ -613,183 +983,102 @@ fn is_ctx_type(ty: &Type) -> bool {
     false
 }
 
-/// `#[xcl_impl(type = "Dog", trait = "Animal")]` — registers an impl block
-/// so the doc generator knows `Dog` implements `Animal`.
+/// `#[xcl_impl]` — Auto-registers a Rust impl block in `IMPL_REGISTRY` by extracting `fn` item names.
 ///
-/// The attribute can also include method declarations:
+/// No attributes needed — the macro inspects the Rust impl block and extracts method names,
+/// trait name, and type name automatically.
+///
+/// # Example
+///
 /// ```ignore
-/// #[xcl_impl(
-///     type = "Dog",
-///     trait = "Animal",
-///     methods(
-///         bark { args = "volume: i64", ret = "str", summary = "Make a barking sound." },
-///         eat { args = "food: str", summary = "Eat some food." },
-///     ),
-/// )]
+/// #[xcl_impl]
+/// impl CloudService for CloudflareProvider {
+///     fn bucket_create() { }
+///     fn bucket_list() { }
+/// }
 /// ```
 #[proc_macro_attribute]
-pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let parsed: ImplAttr = parse_macro_input!(attr);
-    let item = parse_macro_input!(item as syn::Item);
+pub fn xcl_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let impl_item = parse_macro_input!(item as ItemImpl);
 
-    let type_name = parsed.type_name;
-    let trait_name = parsed.trait_name;
-    let domain = parsed.domain;
-
-    let domain_expr = if let Some(ref d) = domain {
-        quote!(Some(#d))
-    } else {
-        quote!(None)
+    // Extract type name from self type
+    let type_name = match impl_item.self_ty.as_ref() {
+        syn::Type::Path(type_path) => {
+            if let Some(seg) = type_path.path.segments.last() {
+                seg.ident.to_string()
+            } else {
+                return syn::Error::new_spanned(&impl_item.self_ty, "Cannot extract type name from impl block")
+                    .to_compile_error()
+                    .into();
+            }
+        }
+        _ => {
+            return syn::Error::new_spanned(&impl_item.self_ty, "Cannot extract type name from impl block")
+                .to_compile_error()
+                .into();
+        }
     };
 
+    // Extract trait name from the trait path
+    let trait_name = match &impl_item.trait_ {
+        Some((path, _for_token)) => {
+            if let Some(seg) = path.segments.last() {
+                seg.ident.to_string()
+            } else {
+                return syn::Error::new_spanned(&impl_item.self_ty, "Cannot extract trait name from impl block")
+                    .to_compile_error()
+                    .into();
+            }
+        }
+        None => {
+            return syn::Error::new_spanned(&impl_item.self_ty, "#[xcl_impl] requires a trait impl block (impl Trait for Type)")
+                .to_compile_error()
+                .into();
+        }
+    };
+
+    // Extract fn item names from the impl block body
+    let mut method_names: Vec<String> = Vec::new();
+    for item in &impl_item.items {
+        if let syn::ImplItem::Fn(iif) = item {
+            method_names.push(iif.sig.ident.to_string());
+        }
+    }
+
     // Generate methods tokens
-    let methods_tokens = if parsed.methods.is_empty() {
+    let methods_tokens = if method_names.is_empty() {
         quote!(&[])
     } else {
-        let entries = parsed.methods.iter().map(|m| {
-            let name_s = m.name.to_string();
-            let args_static = match &m.args {
-                Some(s) => quote!(Some(#s)),
-                None => quote!(None),
-            };
-            let ret_static = match &m.ret {
-                Some(s) => quote!(Some(#s)),
-                None => quote!(None),
-            };
-            let summary_static = match &m.summary {
-                Some(s) => quote!(Some(#s)),
-                None => quote!(None),
-            };
+        let entries = method_names.iter().map(|m_name| {
             quote! {
                 ::xcl_vm::ImplMethod {
-                    name: #name_s,
-                    args: #args_static,
-                    ret: #ret_static,
-                    summary: #summary_static,
+                    name: #m_name,
+                    args: None,
+                    ret: None,
+                    summary: None,
                 }
             }
         });
         quote!(&[#(#entries),*])
     };
 
-    // Generate a unique static name from type + trait
     let statik = syn::Ident::new(
         &format!("__XCL_IMPL_{}_{}", type_name.to_uppercase(), trait_name.to_uppercase()),
         proc_macro2::Span::call_site(),
     );
 
     let expanded = quote! {
-        #item
+        #impl_item
 
         #[::linkme::distributed_slice(::xcl_vm::IMPL_REGISTRY)]
         #[allow(non_upper_case_globals)]
         static #statik: ::xcl_vm::ImplDescriptor = ::xcl_vm::ImplDescriptor {
             type_name: #type_name,
             trait_name: #trait_name,
-            domain: #domain_expr,
+            domain: None,
             methods: #methods_tokens,
         };
     };
 
     expanded.into()
-}
-
-struct ImplAttr {
-    type_name: String,
-    trait_name: String,
-    domain: Option<String>,
-    methods: Vec<MethodImplSpec>,
-}
-
-struct MethodImplSpec {
-    name: syn::Ident,
-    args: Option<String>,
-    ret: Option<String>,
-    summary: Option<String>,
-}
-
-impl syn::parse::Parse for ImplAttr {
-    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
-        let mut type_name = None;
-        let mut trait_name = None;
-        let mut domain = None;
-        let mut methods = Vec::new();
-
-        loop {
-            if input.is_empty() {
-                break;
-            }
-
-            let ident: syn::Ident = input.parse()?;
-            let ident_s = ident.to_string();
-
-            if input.peek(syn::Token![=]) {
-                let _eq: syn::Token![=] = input.parse()?;
-                let lit: LitStr = input.parse()?;
-                match ident_s.as_str() {
-                    "type" => type_name = Some(lit.value()),
-                    "trait" => trait_name = Some(lit.value()),
-                    "domain" => domain = Some(lit.value()),
-                    _ => {}
-                }
-            } else if input.peek(syn::token::Paren) {
-                let content;
-                syn::parenthesized!(content in input);
-                if ident_s == "methods" {
-                    methods = parse_impl_methods_stream(&content)?;
-                }
-            }
-
-            if input.peek(syn::Token![,]) {
-                input.parse::<syn::Token![,]>()?;
-            } else {
-                break;
-            }
-        }
-
-        Ok(ImplAttr {
-            type_name: type_name.unwrap_or_default(),
-            trait_name: trait_name.unwrap_or_default(),
-            domain,
-            methods,
-        })
-    }
-}
-
-fn parse_impl_methods_stream(input: syn::parse::ParseStream<'_>) -> syn::Result<Vec<MethodImplSpec>> {
-    let mut methods = Vec::new();
-    while !input.is_empty() {
-        let name: syn::Ident = input.parse()?;
-        let mut args = None;
-        let mut ret = None;
-        let mut summary = None;
-
-        if input.peek(syn::token::Brace) {
-            let content;
-            syn::braced!(content in input);
-            while !content.is_empty() {
-                let key: syn::Ident = content.parse()?;
-                let _eq: syn::Token![=] = content.parse()?;
-                let lit: LitStr = content.parse()?;
-                match key.to_string().as_str() {
-                    "args" => args = Some(lit.value()),
-                    "ret" => ret = Some(lit.value()),
-                    "summary" => summary = Some(lit.value()),
-                    _ => {}
-                }
-                if content.peek(syn::Token![,]) {
-                    content.parse::<syn::Token![,]>()?;
-                }
-            }
-        }
-
-        methods.push(MethodImplSpec { name, args, ret, summary });
-
-        if input.peek(syn::Token![,]) {
-            input.parse::<syn::Token![,]>()?;
-        } else {
-            break;
-        }
-    }
-    Ok(methods)
 }

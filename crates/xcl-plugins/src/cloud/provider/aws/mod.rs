@@ -70,6 +70,7 @@ use xcl_vm::{Value, DomainCtx};
 /// }
 /// ```
 #[xcl_fn(
+    impl_type = "AwsProvider",
     name = "aws",
     args = "region: str; f: any",
     ret = "any",
@@ -86,7 +87,13 @@ fn aws_run(ctx: &mut DomainCtx) -> Value {
     ctx.push_context("aws.region", Value::from_str_boxed(region.to_string()));
     ctx.push_context("aws.credentials", credentials);
 
+    // Override shared global function names with AWS implementations via impl type lookup
+    let saved = ctx.override_by_trait("AwsProvider");
+
     let result = ctx.call(closure, &[]);
+
+    // Restore original global function mappings
+    ctx.restore_by_trait(&saved);
 
     ctx.pop_context("aws.credentials");
     ctx.pop_context("aws.region");
@@ -103,6 +110,7 @@ fn aws_run(ctx: &mut DomainCtx) -> Value {
 /// fn aws.config() -> map
 /// ```
 #[xcl_fn(
+    impl_type = "AwsProvider",
     name = "aws.config",
     ret = "map",
     summary = "Get the current AWS configuration."
@@ -137,6 +145,7 @@ fn aws_config(ctx: &mut DomainCtx) -> Value {
 /// fn aws.credential() -> map
 /// ```
 #[xcl_fn(
+    impl_type = "AwsProvider",
     name = "aws.credential",
     ret = "map",
     summary = "Get the current AWS credentials."

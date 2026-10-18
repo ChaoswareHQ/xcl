@@ -69,7 +69,7 @@ use hashbrown::HashMap;
 use std::collections::HashMap;
 
 use crate::bytecode::*;
-use crate::value::{BuiltinImpl, TAG_INT, TypeDescriptor, Value};
+use crate::value::{BuiltinImpl, ImplDescriptor, TAG_INT, TraitDescriptor, TypeDescriptor, Value};
 use bumpalo::Bump;
 use smallvec::SmallVec;
 
@@ -193,6 +193,8 @@ struct CachedRegistry {
     domain_index: HashMap<Box<str>, u32>,
     domain_table: Vec<DomainSlot>,
     type_index: HashMap<Box<str>, &'static TypeDescriptor>,
+    trait_index: HashMap<Box<str>, &'static TraitDescriptor>,
+    impl_index: Vec<&'static ImplDescriptor>,
 }
 
 /// The XCL Virtual Machine runtime instance.
@@ -212,6 +214,10 @@ pub struct VM {
     pub domain_table: Vec<DomainSlot>,
     /// Registry mapping type names to static type descriptors.
     pub type_index: HashMap<Box<str>, &'static TypeDescriptor>,
+    /// Registry mapping trait names to static trait descriptors.
+    pub trait_index: HashMap<Box<str>, &'static TraitDescriptor>,
+    /// Flat list of all registered trait implementation descriptors.
+    pub impl_index: Vec<&'static ImplDescriptor>,
     /// Fast bump allocator arena for temporary heap objects created during execution.
     pub arena: Bump,
     /// Registry of well-known constructor and type names (`Ok`, `Err`, `Result`).
@@ -253,6 +259,8 @@ impl VM {
             domain_index: Default::default(),
             domain_table: Vec::new(),
             type_index: Default::default(),
+            trait_index: Default::default(),
+            impl_index: Vec::new(),
             arena: Bump::new(),
             well_known: Default::default(),
             frames: Vec::with_capacity(16),
@@ -277,7 +285,8 @@ impl VM {
 
     /// Registers all compile-time native functions and types from the distributed slices.
     ///
-    /// Combines [`VM::register_all_natives`] and [`VM::register_all_types`].
+    /// Combines [`VM::register_all_natives`], [`VM::register_all_types`],
+    /// [`VM::register_all_traits`], and [`VM::register_all_impls`].
     pub fn register_all(&mut self) {
         #[cfg(feature = "std")]
         {
@@ -287,12 +296,16 @@ impl VM {
                     let mut tmp = VM::new();
                     tmp.register_all_natives();
                     tmp.register_all_types();
+                    tmp.register_all_traits();
+                    tmp.register_all_impls();
                     CachedRegistry {
                         global_index: tmp.global_index,
                         global_table: tmp.global_table,
                         domain_index: tmp.domain_index,
                         domain_table: tmp.domain_table,
                         type_index: tmp.type_index,
+                        trait_index: tmp.trait_index,
+                        impl_index: tmp.impl_index,
                     }
                 });
                 self.global_index.clone_from(&cached.global_index);
@@ -300,11 +313,15 @@ impl VM {
                 self.domain_index.clone_from(&cached.domain_index);
                 self.domain_table.clone_from(&cached.domain_table);
                 self.type_index.clone_from(&cached.type_index);
+                self.trait_index.clone_from(&cached.trait_index);
+                self.impl_index.clone_from(&cached.impl_index);
                 return;
             }
         }
         self.register_all_natives();
         self.register_all_types();
+        self.register_all_traits();
+        self.register_all_impls();
     }
 
     /// Scans the distributed [`crate::native::NATIVE_REGISTRY`] slice
@@ -366,6 +383,25 @@ impl VM {
         }
     }
 
+    /// Scans the distributed [`crate::native::TRAIT_REGISTRY`] slice
+    /// and indexes all registered trait definitions by name.
+    pub fn register_all_traits(&mut self) {
+        use crate::native::TRAIT_REGISTRY;
+        for desc in TRAIT_REGISTRY.iter() {
+            self.trait_index.insert(desc.name.into(), desc);
+        }
+    }
+
+    /// Scans the distributed [`crate::native::IMPL_REGISTRY`] slice
+    /// and collects all registered trait implementation blocks.
+    pub fn register_all_impls(&mut self) {
+        use crate::native::IMPL_REGISTRY;
+        self.impl_index.clear();
+        for desc in IMPL_REGISTRY.iter() {
+            self.impl_index.push(desc);
+        }
+    }
+
     /// Looks up a globally registered builtin or native function by name.
     ///
     /// # Arguments
@@ -388,6 +424,33 @@ impl VM {
         let slot = self.domain_table.get(didx as usize)?;
         let &midx = slot.index.get(method)?;
         slot.methods.get(midx as usize).and_then(|e| e.as_ref())
+    }
+
+    /// Save current global function mappings and override them with new implementations.
+    /// Returns the saved state for later restoration via `restore_globals`.
+    pub fn save_and_override_globals(
+        &mut self,
+        overrides: &[(&'static str, crate::value::BuiltinImpl)],
+    ) -> Vec<(Box<str>, Option<u32>)> {
+        let mut saved = Vec::with_capacity(overrides.len());
+        for (name, impl_) in overrides {
+            let existing = self.global_index.insert((*name).into(), self.global_table.len() as u32);
+            saved.push(((*name).into(), existing));
+            self.global_table.push(Some(*impl_));
+        }
+        saved
+    }
+
+    /// Restore global function mappings from a saved state.
+    pub fn restore_globals(&mut self, saved: &[(Box<str>, Option<u32>)]) {
+        for (name, existing) in saved.iter().rev() {
+            self.global_table.pop();
+            if let Some(idx) = *existing {
+                self.global_index.insert(name.clone(), idx);
+            } else {
+                self.global_index.remove(name.as_ref());
+            }
+        }
     }
 
     #[inline(always)]

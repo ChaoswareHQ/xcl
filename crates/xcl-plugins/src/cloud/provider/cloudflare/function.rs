@@ -10,8 +10,8 @@ use crate::core::result::{ok_result, err_result};
 use crate::net::tls::https_request;
 use std::collections::HashMap;
 
-#[xcl_fn(name = "function", args = "name: str; f: any", ret = "any", summary = "Run a closure within a Cloudflare Worker context.")]
-fn function_run(ctx: &mut DomainCtx) -> Value {
+#[xcl_fn(impl_type = "CloudflareProvider", override_method = "function", name = "function", args = "name: str; f: any", ret = "any", summary = "Run a closure within a Cloudflare Worker context.")]
+pub fn function_run(ctx: &mut DomainCtx) -> Value {
     let name = ctx.arg(0).as_str().unwrap_or("");
     let closure = ctx.arg(1);
     ctx.push_context("function.name", Value::from_str_boxed(name.to_string()));
@@ -20,8 +20,8 @@ fn function_run(ctx: &mut DomainCtx) -> Value {
     result
 }
 
-#[xcl_fn(name = "function.config", ret = "map", summary = "Get the current function configuration.")]
-fn function_config(ctx: &mut DomainCtx) -> Value {
+#[xcl_fn(impl_type = "CloudflareProvider", override_method = "function_config", name = "function.config", ret = "map", summary = "Get the current function configuration.")]
+pub fn function_config(ctx: &mut DomainCtx) -> Value {
     let mut config = HashMap::new();
     if let Some(fn_val) = ctx.get_context("function.name") {
         config.insert("function".to_string(), fn_val);
@@ -72,8 +72,8 @@ fn cloudflare_request(
     https_request(method, &url, &headers, body)
 }
 
-#[xcl_fn(name = "function.invoke", args = "payload: map", ret = "Result", summary = "Invoke a Cloudflare Worker.")]
-fn function_invoke(ctx: &mut DomainCtx) -> Value {
+#[xcl_fn(impl_type = "CloudflareProvider", override_method = "function_invoke", name = "function.invoke", args = "payload: map", ret = "Result", summary = "Invoke a Cloudflare Worker.")]
+pub fn function_invoke(ctx: &mut DomainCtx) -> Value {
     let function = match ctx.get_context("function.name") {
         Some(f) => f.as_str().unwrap_or("").to_string(),
         None => return err_result("missing_function", "No function context set", 0),
@@ -101,15 +101,27 @@ fn function_invoke(ctx: &mut DomainCtx) -> Value {
     // Use default dispatch namespace for invocation
     let path = format!("workers/dispatch/namespaces/default/scripts/{}/invoke", function);
     match cloudflare_request(ctx, "POST", &path, &payload_str) {
-        Ok((_status, _headers, body)) => ok_result(Value::from_str_boxed(body)),
+        Ok((status, _headers, body)) => {
+            if (200..300).contains(&status) {
+                ok_result(Value::from_str_boxed(body))
+            } else {
+                err_result("http_error", &format!("http status: {}", status), status)
+            }
+        }
         Err(e) => err_result("api_error", &e, 0),
     }
 }
 
-#[xcl_fn(name = "function.list", ret = "Result", summary = "List Cloudflare Workers.")]
-fn function_list(ctx: &mut DomainCtx) -> Value {
+#[xcl_fn(impl_type = "CloudflareProvider", override_method = "function_list", name = "function.list", ret = "Result", summary = "List Cloudflare Workers.")]
+pub fn function_list(ctx: &mut DomainCtx) -> Value {
     match cloudflare_request(ctx, "GET", "workers/scripts", "") {
-        Ok((_status, _headers, body)) => ok_result(Value::from_str_boxed(body)),
+        Ok((status, _headers, body)) => {
+            if (200..300).contains(&status) {
+                ok_result(Value::from_str_boxed(body))
+            } else {
+                err_result("http_error", &format!("http status: {}", status), status)
+            }
+        }
         Err(e) => err_result("api_error", &e, 0),
     }
 }

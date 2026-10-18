@@ -1135,6 +1135,10 @@ impl PartialEq for FuncValue {
 pub struct NativeEntry {
     /// Domain name (e.g., `"fs"`, `"math"`), or `None` for global functions.
     pub domain: Option<&'static str>,
+    /// Impl type name this function belongs to (e.g., `"CloudflareProvider"`), or `None` for generic functions.
+    pub impl_type: Option<&'static str>,
+    /// Trait method name this function overrides (e.g., `"bucket_config"`), or `None` if not overriding.
+    pub override_method: Option<&'static str>,
     /// Method identifier name.
     pub method: &'static str,
     /// Function execution style ([`NativeKind::Pure`] or [`NativeKind::Ctx`]).
@@ -1257,6 +1261,30 @@ pub struct TypeVariant {
 }
 
 // — Impl descriptor types —
+
+/// Static metadata describing a registered trait interface.
+pub struct TraitDescriptor {
+    /// Trait identifier name.
+    pub name: &'static str,
+    /// Domain namespace, or `None` for global traits.
+    pub domain: Option<&'static str>,
+    /// List of method signatures required by this trait.
+    pub methods: &'static [TraitMethod],
+    /// Documentation summary string.
+    pub summary: Option<&'static str>,
+}
+
+/// Method signature in a trait definition.
+pub struct TraitMethod {
+    /// Method identifier name.
+    pub name: &'static str,
+    /// Argument signature string (e.g., `"key: str; value: str"`).
+    pub args: Option<&'static str>,
+    /// Return type signature string (e.g., `"Result"`).
+    pub ret: Option<&'static str>,
+    /// Method documentation summary.
+    pub summary: Option<&'static str>,
+}
 
 /// Metadata describing a trait implementation block.
 pub struct ImplDescriptor {
@@ -1411,5 +1439,109 @@ impl<'a> DomainCtx<'a> {
             }
         }
         map
+    }
+
+    /// Temporarily override global function names with new implementations.
+    /// Returns a guard that restores the originals when dropped.
+    /// Used by cloud provider wrappers to swap in provider-specific functions.
+    pub fn override_globals(
+        &mut self,
+        overrides: &[(&'static str, BuiltinImpl)],
+    ) -> GlobalOverrideGuard<'_> {
+        let saved = self.vm.save_and_override_globals(overrides);
+        GlobalOverrideGuard { vm: self.vm, saved }
+    }
+
+    /// Override global function names manually (without a guard).
+    /// Returns the saved state for later restoration via `restore_globals_manual`.
+    /// Use this when you need to call other `ctx` methods between override and restore.
+    pub fn override_globals_manual(
+        &mut self,
+        overrides: &[(&'static str, BuiltinImpl)],
+    ) -> Vec<(Box<str>, Option<u32>)> {
+        self.vm.save_and_override_globals(overrides)
+    }
+
+    /// Restore global function mappings from a saved state returned by `override_globals_manual`.
+    pub fn restore_globals_manual(&mut self, saved: &[(Box<str>, Option<u32>)]) {
+        self.vm.restore_globals(saved);
+    }
+
+    /// Scan NATIVE_REGISTRY for entries matching the given impl type name,
+    /// and override globals with their implementations. Returns the saved state for later restoration.
+    ///
+    /// Each `#[xcl_fn]` declares `impl = "CloudflareProvider"` to link to its provider type.
+    /// The method looks up the impl descriptor in IMPL_REGISTRY, gets its method names,
+    /// and matches them against native entries with the same `impl_type`.
+    pub fn override_by_trait(
+        &mut self,
+        impl_type_name: &str,
+    ) -> Vec<(Box<str>, Option<u32>)> {
+        use crate::native::{NATIVE_REGISTRY, IMPL_REGISTRY};
+
+        // Find all impl descriptors for this type — collect trait names
+        let impl_descs = IMPL_REGISTRY.iter().filter(|desc| {
+            desc.type_name == impl_type_name
+        }).collect::<Vec<_>>();
+
+        if impl_descs.is_empty() {
+            return Vec::new();
+        }
+
+        // Collect method names from all impl descriptors for this type
+        let method_names: Vec<&str> = impl_descs.iter().flat_map(|desc| {
+            desc.methods.iter().map(|m| m.name)
+        }).collect();
+
+        // Collect (owned_name, BuiltinImpl) pairs for matching entries
+        let mut pairs: Vec<(String, BuiltinImpl)> = Vec::new();
+        for entry in NATIVE_REGISTRY.iter() {
+            if entry.impl_type == Some(impl_type_name) {
+                // Check if this entry's method name matches any method in the impl
+                if method_names.contains(&entry.method) {
+                    let impl_ = match entry.kind {
+                        NativeKind::Pure => {
+                            let f: BuiltinFn = unsafe { std::mem::transmute(entry.ptr.0) };
+                            BuiltinImpl::Pure(f)
+                        }
+                        NativeKind::Ctx => {
+                            let f: BuiltinCtxFn = unsafe { std::mem::transmute(entry.ptr.0) };
+                            BuiltinImpl::Ctx(f)
+                        }
+                    };
+                    // Use the full dotted name (domain.method) to match how register_all_natives
+                    // registers functions in global_index, e.g., "bucket.list" not just "list"
+                    let full_name = if let Some(domain) = entry.domain {
+                        format!("{}.{}", domain, entry.method)
+                    } else {
+                        entry.method.to_string()
+                    };
+                    pairs.push((full_name, impl_));
+                }
+            }
+        }
+        // Convert to static refs for save_and_override_globals
+        let mut overrides: Vec<(&'static str, BuiltinImpl)> = Vec::with_capacity(pairs.len());
+        for (name, impl_) in pairs {
+            overrides.push((name.leak(), impl_));
+        }
+        self.vm.save_and_override_globals(&overrides)
+    }
+
+    /// Restore global function mappings from a saved state returned by `override_by_trait`.
+    pub fn restore_by_trait(&mut self, saved: &[(Box<str>, Option<u32>)]) {
+        self.vm.restore_globals(saved);
+    }
+}
+
+/// Guard that restores global function overrides when dropped.
+pub struct GlobalOverrideGuard<'a> {
+    vm: &'a mut crate::vm::VM,
+    saved: Vec<(Box<str>, Option<u32>)>,
+}
+
+impl Drop for GlobalOverrideGuard<'_> {
+    fn drop(&mut self) {
+        self.vm.restore_globals(&self.saved);
     }
 }

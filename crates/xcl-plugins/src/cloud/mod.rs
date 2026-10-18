@@ -48,8 +48,90 @@
 pub mod provider;
 
 use std::collections::HashMap;
-use xcl_macros::xcl_fn;
+use xcl_macros::{xcl_fn, xcl_trait, xcl_impl};
 use xcl_vm::{Value, DomainCtx};
+
+/// Cloud provider service interface for bucket, function, and instance operations.
+///
+/// Defines the contract that all cloud providers must implement. Each provider
+/// (Cloudflare, AWS, GCP, etc.) implements this trait with its own API-specific
+/// logic while maintaining the same method signatures.
+#[xcl_trait]
+pub trait CloudService {
+    fn bucket();
+    fn bucket_config();
+    fn bucket_list();
+    fn bucket_get();
+    fn bucket_put();
+    fn bucket_delete();
+    fn bucket_create();
+    fn function();
+    fn function_config();
+    fn function_invoke();
+    fn function_list();
+    fn instance();
+    fn instance_config();
+    fn instance_create();
+    fn instance_list();
+    fn api();
+    fn api_create();
+    fn api_deploy();
+    fn api_list();
+}
+
+/// Cloudflare implements the CloudService trait with R2, Workers, and Durable Objects.
+#[derive(xcl_macros::Xcl)]
+pub struct CloudflareProvider;
+
+#[xcl_impl]
+impl CloudService for CloudflareProvider {
+    fn bucket() {}
+    fn bucket_config() {}
+    fn bucket_list() {}
+    fn bucket_get() {}
+    fn bucket_put() {}
+    fn bucket_delete() {}
+    fn bucket_create() {}
+    fn function() {}
+    fn function_config() {}
+    fn function_invoke() {}
+    fn function_list() {}
+    fn instance() {}
+    fn instance_config() {}
+    fn instance_create() {}
+    fn instance_list() {}
+    fn api() {}
+    fn api_create() {}
+    fn api_deploy() {}
+    fn api_list() {}
+}
+
+/// AWS implements the CloudService trait with S3, Lambda, and API Gateway.
+#[derive(xcl_macros::Xcl)]
+pub struct AwsProvider;
+
+#[xcl_impl]
+impl CloudService for AwsProvider {
+    fn bucket() {}
+    fn bucket_config() {}
+    fn bucket_list() {}
+    fn bucket_get() {}
+    fn bucket_put() {}
+    fn bucket_delete() {}
+    fn bucket_create() {}
+    fn function() {}
+    fn function_config() {}
+    fn function_invoke() {}
+    fn function_list() {}
+    fn instance() {}
+    fn instance_config() {}
+    fn instance_create() {}
+    fn instance_list() {}
+    fn api() {}
+    fn api_create() {}
+    fn api_deploy() {}
+    fn api_list() {}
+}
 
 /// Run a closure within a cloud provider context.
 ///
@@ -207,5 +289,20 @@ mod tests {
             }
         "#);
         assert_eq!(r.as_str(), Some("my-fn"));
+    }
+
+    #[test]
+    fn cloudflare_bucket_uses_cloudflare_impl() {
+        // bucket.config inside cloudflare {} should use Cloudflare's impl, not AWS's
+        let r = evaluate_new(r#"
+            cloudflare "test-account" {
+                bucket "my-bucket" {
+                    $c = bucket.config
+                    $c
+                }
+            }
+        "#);
+        let map = r.as_map().expect("bucket.config should return a map");
+        assert_eq!(map.get("bucket").unwrap().as_str(), Some("my-bucket"));
     }
 }

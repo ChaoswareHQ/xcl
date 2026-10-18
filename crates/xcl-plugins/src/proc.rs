@@ -4,7 +4,7 @@
 //! and managing their lifecycle.
 
 use std::collections::HashMap;
-use xcl_macros::{xcl_fn, xcl_type};
+use xcl_macros::xcl_fn;
 use xcl_vm::{Value, HandleKind, DomainCtx, errors::universal};
 use crate::core::result::{ok_result, err_result};
 
@@ -30,7 +30,8 @@ use crate::core::result::{ok_result, err_result};
 /// - Process handles are opaque values; access them only through proc functions.
 /// - Use `proc.wait` to wait for completion and get the exit code.
 /// - Use `proc.kill` to terminate a running process.
-#[xcl_type(name = "Process", domain = "proc", kind = "Opaque")]
+#[derive(xcl_macros::Xcl)]
+#[xcl(domain = "proc", kind = "Opaque")]
 pub struct ProcessType;
 
 /// Spawn a new child process.

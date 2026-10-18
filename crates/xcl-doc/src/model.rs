@@ -5,6 +5,7 @@ pub struct DocModel {
     pub domains:  Vec<Domain>,
     pub natives:  Vec<Native>,
     pub types:    Vec<TypeDoc>,
+    pub traits:   Vec<TraitDoc>,
     pub impls:    Vec<ImplDoc>,
 }
 
@@ -77,6 +78,23 @@ pub struct ImplDoc {
     pub trait_name: String,
     pub domain:     Option<String>,
     pub methods:    Vec<ImplMethodDoc>,
+}
+
+/// A trait definition: interface with method signatures.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TraitDoc {
+    pub name:     String,
+    pub domain:   Option<String>,
+    pub summary:  Option<String>,
+    pub methods:  Vec<TraitMethodDoc>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TraitMethodDoc {
+    pub name:    String,
+    pub args:    Option<String>,
+    pub ret:     Option<String>,
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

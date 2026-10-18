@@ -37,12 +37,14 @@ use std::collections::HashMap;
 /// }
 /// ```
 #[xcl_fn(
+    impl_type = "AwsProvider",
+    override_method = "function",
     name = "function",
     args = "name: str; f: any",
     ret = "any",
     summary = "Run a closure within a function context."
 )]
-fn function_run(ctx: &mut DomainCtx) -> Value {
+pub fn function_run(ctx: &mut DomainCtx) -> Value {
     let function = ctx.arg(0).as_str().unwrap_or("");
     let closure = ctx.arg(1);
 
@@ -60,11 +62,13 @@ fn function_run(ctx: &mut DomainCtx) -> Value {
 /// fn function.config() -> map
 /// ```
 #[xcl_fn(
+    impl_type = "AwsProvider",
+    override_method = "function_config",
     name = "function.config",
     ret = "map",
     summary = "Get the current function configuration."
 )]
-fn function_config(ctx: &mut DomainCtx) -> Value {
+pub fn function_config(ctx: &mut DomainCtx) -> Value {
     let mut config = HashMap::new();
     if let Some(fn_val) = ctx.get_context("function.name") {
         config.insert("function".to_string(), fn_val);
@@ -92,12 +96,14 @@ fn function_config(ctx: &mut DomainCtx) -> Value {
 /// }
 /// ```
 #[xcl_fn(
+    impl_type = "AwsProvider",
+    override_method = "function_invoke",
     name = "function.invoke",
     args = "payload: map",
     ret = "Result",
     summary = "Invoke the current serverless function."
 )]
-fn function_invoke(ctx: &mut DomainCtx) -> Value {
+pub fn function_invoke(ctx: &mut DomainCtx) -> Value {
     let _payload = ctx.arg(0);
 
     let context = get_aws_lambda_context(ctx);
@@ -128,11 +134,13 @@ fn function_invoke(ctx: &mut DomainCtx) -> Value {
 /// fn function.list() -> Result
 /// ```
 #[xcl_fn(
+    impl_type = "AwsProvider",
+    override_method = "function_list",
     name = "function.list",
     ret = "Result",
     summary = "List serverless functions in the current region."
 )]
-fn function_list(ctx: &mut DomainCtx) -> Value {
+pub fn function_list(ctx: &mut DomainCtx) -> Value {
     let context = get_aws_lambda_context(ctx);
     if context.is_nil() || context.map_variant() == Some(xcl_vm::VARIANT_ERR) {
         return context;

@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use xcl_vm::{NATIVE_REGISTRY, TYPE_REGISTRY, IMPL_REGISTRY, TypeKind};
+use xcl_vm::{NATIVE_REGISTRY, TYPE_REGISTRY, TRAIT_REGISTRY, IMPL_REGISTRY, TypeKind};
 use crate::model::*;
 
 /// Parse an args string like "path: str; mode: str" into ParamDoc structs.
@@ -421,6 +421,27 @@ pub fn collect_std() -> DocModel {
     }
     types.sort_by(|a, b| a.name.cmp(&b.name));
 
+    // ── Traits ──
+    let mut traits: Vec<TraitDoc> = Vec::new();
+    for t in TRAIT_REGISTRY.iter() {
+        let trait_key = format!("trait:{}", t.name);
+        let parsed = rust_docs.get(&trait_key);
+        let summary = parsed.and_then(|p| p.summary.clone())
+            .or_else(|| t.summary.map(|s| s.to_string()));
+        traits.push(TraitDoc {
+            name:     t.name.to_string(),
+            domain:   t.domain.map(|s| s.to_string()),
+            summary,
+            methods:  t.methods.iter().map(|m| TraitMethodDoc {
+                name:    m.name.to_string(),
+                args:    m.args.map(|s| s.to_string()),
+                ret:     m.ret.map(|s| s.to_string()),
+                summary: m.summary.map(|s| s.to_string()),
+            }).collect(),
+        });
+    }
+    traits.sort_by(|a, b| a.name.cmp(&b.name));
+
     // ── Impls ──
     for i in IMPL_REGISTRY.iter() {
         impls.push(ImplDoc {
@@ -622,7 +643,7 @@ pub fn collect_std() -> DocModel {
     }
     types.sort_by(|a, b| a.name.cmp(&b.name));
 
-    DocModel { domains, natives, types, impls }
+    DocModel { domains, natives, types, traits, impls }
 }
 
 fn kind_name(k: TypeKind) -> &'static str {

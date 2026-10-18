@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Write, Seek, SeekFrom};
-use xcl_macros::{xcl_fn, xcl_type};
+use xcl_macros::xcl_fn;
 use xcl_vm::{Value, HandleKind, DomainCtx, errors::{universal, filesystem}};
 use crate::core::result::{ok_result, err_result};
 
@@ -26,7 +26,8 @@ pub mod input;
 ///
 /// - File handles are opaque values; access them only through io functions.
 /// - Always close file handles when done to free system resources.
-#[xcl_type(name = "File", domain = "io", kind = "Opaque")]
+#[derive(xcl_macros::Xcl)]
+#[xcl(domain = "io", kind = "Opaque")]
 pub struct FileType;
 
 /// A stream handle for standard I/O.
@@ -45,7 +46,8 @@ pub struct FileType;
 ///
 /// - Stream handles are pre-opened; no need to close them.
 /// - Use `io.is_tty` to check if a stream is connected to a terminal.
-#[xcl_type(name = "Stream", domain = "io", kind = "Opaque")]
+#[derive(xcl_macros::Xcl)]
+#[xcl(domain = "io", kind = "Opaque")]
 pub struct StreamType;
 
 /// Map std::io::ErrorKind to XCL error kinds.

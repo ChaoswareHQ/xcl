@@ -1,5 +1,24 @@
 # AWS provider example
 # Tests domain expansion, config, and credentials
+#
+# SECURITY: Never hardcode API tokens or credentials in your XCL scripts.
+# Always load them from a .env file using io.read_env.
+#
+# Create a .env file with your credentials:
+#   AWS_ACCESS_KEY_ID=your-access-key-here
+#   AWS_SECRET_ACCESS_KEY=your-secret-key-here
+
+# Load credentials securely from .env
+$envResult = io.read_env ".env"
+if $envResult.is_ok {
+    $env = $envResult.value
+    $accessKey = $env.AWS_ACCESS_KEY_ID
+    $secretKey = $env.AWS_SECRET_ACCESS_KEY
+    print "AWS credentials loaded from .env"
+}
+if $envResult.is_err {
+    print "Warning: could not load .env file:" $envResult.message
+}
 
 # Basic AWS context
 aws "us-east-1" {

@@ -38,12 +38,14 @@ use super::bucket::make_aws_request;
 /// }
 /// ```
 #[xcl_fn(
+    impl_type = "AwsProvider",
+    override_method = "api",
     name = "api",
     args = "name: str; f: any",
     ret = "any",
     summary = "Run a closure within an API Gateway context."
 )]
-fn api_run(ctx: &mut DomainCtx) -> Value {
+pub fn api_run(ctx: &mut DomainCtx) -> Value {
     let name = ctx.arg(0).as_str().unwrap_or("");
     let closure = ctx.arg(1);
 
@@ -74,12 +76,14 @@ fn api_run(ctx: &mut DomainCtx) -> Value {
 /// }
 /// ```
 #[xcl_fn(
+    impl_type = "AwsProvider",
+    override_method = "api_create",
     name = "api.create",
     args = "domain: str; lambda_arn: str",
     ret = "Result",
     summary = "Create an API Gateway with Lambda integration for a subdomain."
 )]
-fn api_create(ctx: &mut DomainCtx) -> Value {
+pub fn api_create(ctx: &mut DomainCtx) -> Value {
     let _domain = ctx.arg(0).as_str().unwrap_or("");
     let _lambda_arn = ctx.arg(1).as_str().unwrap_or("");
 
@@ -108,11 +112,13 @@ fn api_create(ctx: &mut DomainCtx) -> Value {
 /// fn api.deploy() -> Result
 /// ```
 #[xcl_fn(
+    impl_type = "AwsProvider",
+    override_method = "api_deploy",
     name = "api.deploy",
     ret = "Result",
     summary = "Deploy the current API Gateway to a stage."
 )]
-fn api_deploy(ctx: &mut DomainCtx) -> Value {
+pub fn api_deploy(ctx: &mut DomainCtx) -> Value {
     let context = get_aws_api_context(ctx);
     if context.is_nil() || context.map_variant() == Some(xcl_vm::VARIANT_ERR) {
         return context;
@@ -138,11 +144,13 @@ fn api_deploy(ctx: &mut DomainCtx) -> Value {
 /// fn api.list() -> Result
 /// ```
 #[xcl_fn(
+    impl_type = "AwsProvider",
+    override_method = "api_list",
     name = "api.list",
     ret = "Result",
     summary = "List API Gateways in the current region."
 )]
-fn api_list(ctx: &mut DomainCtx) -> Value {
+pub fn api_list(ctx: &mut DomainCtx) -> Value {
     let context = get_aws_api_context(ctx);
     if context.is_nil() || context.map_variant() == Some(xcl_vm::VARIANT_ERR) {
         return context;

@@ -42,12 +42,14 @@ use std::collections::HashMap;
 /// }
 /// ```
 #[xcl_fn(
+    impl_type = "AwsProvider",
+    override_method = "bucket",
     name = "bucket",
     args = "name: str; f: any",
     ret = "any",
     summary = "Run a closure within a bucket context."
 )]
-fn bucket_run(ctx: &mut DomainCtx) -> Value {
+pub fn bucket_run(ctx: &mut DomainCtx) -> Value {
     let bucket = ctx.arg(0).as_str().unwrap_or("");
     let closure = ctx.arg(1);
 
@@ -67,12 +69,14 @@ fn bucket_run(ctx: &mut DomainCtx) -> Value {
 /// fn bucket.list(prefix: str) -> Result
 /// ```
 #[xcl_fn(
+    impl_type = "AwsProvider",
+    override_method = "bucket_list",
     name = "bucket.list",
     args = "prefix: str",
     ret = "Result",
     summary = "List objects in the current bucket."
 )]
-fn bucket_list(ctx: &mut DomainCtx) -> Value {
+pub fn bucket_list(ctx: &mut DomainCtx) -> Value {
     let prefix = ctx.arg(0).as_str().unwrap_or("");
 
     let (credentials, region, bucket) = match get_aws_context(ctx) {
@@ -123,12 +127,14 @@ fn bucket_list(ctx: &mut DomainCtx) -> Value {
 /// fn bucket.get(key: str) -> Result
 /// ```
 #[xcl_fn(
+    impl_type = "AwsProvider",
+    override_method = "bucket_get",
     name = "bucket.get",
     args = "key: str",
     ret = "Result",
     summary = "Get an object from the current bucket."
 )]
-fn bucket_get(ctx: &mut DomainCtx) -> Value {
+pub fn bucket_get(ctx: &mut DomainCtx) -> Value {
     let key = ctx.arg(0).as_str().unwrap_or("");
 
     let (credentials, region, bucket) = match get_aws_context(ctx) {
@@ -171,12 +177,14 @@ fn bucket_get(ctx: &mut DomainCtx) -> Value {
 /// fn bucket.put(key: str; value: str) -> Result
 /// ```
 #[xcl_fn(
+    impl_type = "AwsProvider",
+    override_method = "bucket_put",
     name = "bucket.put",
     args = "key: str; value: str",
     ret = "Result",
     summary = "Put an object into the current bucket."
 )]
-fn bucket_put(ctx: &mut DomainCtx) -> Value {
+pub fn bucket_put(ctx: &mut DomainCtx) -> Value {
     let key = ctx.arg(0).as_str().unwrap_or("");
     let value = ctx.arg(1).as_str().unwrap_or("");
 
@@ -225,11 +233,13 @@ fn bucket_put(ctx: &mut DomainCtx) -> Value {
 /// fn bucket.config() -> map
 /// ```
 #[xcl_fn(
+    impl_type = "AwsProvider",
+    override_method = "bucket_config",
     name = "bucket.config",
     ret = "map",
     summary = "Get the current bucket configuration."
 )]
-fn bucket_config(ctx: &mut DomainCtx) -> Value {
+pub fn bucket_config(ctx: &mut DomainCtx) -> Value {
     let mut config = HashMap::new();
     if let Some(bucket_val) = ctx.get_context("bucket.name") {
         config.insert("bucket".to_string(), bucket_val);
@@ -245,12 +255,14 @@ fn bucket_config(ctx: &mut DomainCtx) -> Value {
 /// fn bucket.delete(key: str) -> Result
 /// ```
 #[xcl_fn(
+    impl_type = "AwsProvider",
+    override_method = "bucket_delete",
     name = "bucket.delete",
     args = "key: str",
     ret = "Result",
     summary = "Delete an object from the current bucket."
 )]
-fn bucket_delete(ctx: &mut DomainCtx) -> Value {
+pub fn bucket_delete(ctx: &mut DomainCtx) -> Value {
     let key = ctx.arg(0).as_str().unwrap_or("");
 
     let (credentials, region, bucket) = match get_aws_context(ctx) {

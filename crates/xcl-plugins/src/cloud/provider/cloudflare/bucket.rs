@@ -12,8 +12,8 @@ use crate::core::result::{ok_result, err_result};
 use crate::net::tls::https_request;
 use std::collections::HashMap;
 
-#[xcl_fn(name = "bucket", args = "name: str; f: any", ret = "any", summary = "Run a closure within a Cloudflare R2 bucket context.")]
-fn bucket_run(ctx: &mut DomainCtx) -> Value {
+#[xcl_fn(impl_type = "CloudflareProvider", override_method = "bucket", name = "bucket", args = "name: str; f: any", ret = "any", summary = "Run a closure within a Cloudflare R2 bucket context.")]
+pub fn bucket_run(ctx: &mut DomainCtx) -> Value {
     let bucket = ctx.arg(0).as_str().unwrap_or("");
     let closure = ctx.arg(1);
     ctx.push_context("bucket.name", Value::from_str_boxed(bucket.to_string()));
@@ -22,8 +22,8 @@ fn bucket_run(ctx: &mut DomainCtx) -> Value {
     result
 }
 
-#[xcl_fn(name = "bucket.config", ret = "map", summary = "Get the current bucket configuration.")]
-fn bucket_config(ctx: &mut DomainCtx) -> Value {
+#[xcl_fn(impl_type = "CloudflareProvider", override_method = "bucket_config", name = "bucket.config", ret = "map", summary = "Get the current bucket configuration.")]
+pub fn bucket_config(ctx: &mut DomainCtx) -> Value {
     let mut config = HashMap::new();
     if let Some(bucket_val) = ctx.get_context("bucket.name") {
         config.insert("bucket".to_string(), bucket_val);
@@ -74,8 +74,8 @@ fn cloudflare_request(
     https_request(method, &url, &headers, body)
 }
 
-#[xcl_fn(name = "bucket.list", args = "prefix: str", ret = "Result", summary = "List objects in Cloudflare R2.")]
-fn bucket_list(ctx: &mut DomainCtx) -> Value {
+#[xcl_fn(impl_type = "CloudflareProvider", override_method = "bucket_list", name = "bucket.list", args = "prefix: str", ret = "Result", summary = "List objects in Cloudflare R2.")]
+pub fn bucket_list(ctx: &mut DomainCtx) -> Value {
     let prefix = ctx.arg(0).as_str().unwrap_or("");
     let bucket = match ctx.get_context("bucket.name") {
         Some(b) => b.as_str().unwrap_or("").to_string(),
@@ -89,13 +89,19 @@ fn bucket_list(ctx: &mut DomainCtx) -> Value {
     };
 
     match cloudflare_request(ctx, "GET", &path, "") {
-        Ok((_status, _headers, body)) => ok_result(Value::from_str_boxed(body)),
+        Ok((status, _headers, body)) => {
+            if (200..300).contains(&status) {
+                ok_result(Value::from_str_boxed(body))
+            } else {
+                err_result("http_error", &format!("http status: {}", status), status)
+            }
+        }
         Err(e) => err_result("api_error", &e, 0),
     }
 }
 
-#[xcl_fn(name = "bucket.get", args = "key: str", ret = "Result", summary = "Get an object from Cloudflare R2.")]
-fn bucket_get(ctx: &mut DomainCtx) -> Value {
+#[xcl_fn(impl_type = "CloudflareProvider", override_method = "bucket_get", name = "bucket.get", args = "key: str", ret = "Result", summary = "Get an object from Cloudflare R2.")]
+pub fn bucket_get(ctx: &mut DomainCtx) -> Value {
     let key = ctx.arg(0).as_str().unwrap_or("");
     let bucket = match ctx.get_context("bucket.name") {
         Some(b) => b.as_str().unwrap_or("").to_string(),
@@ -104,13 +110,19 @@ fn bucket_get(ctx: &mut DomainCtx) -> Value {
 
     let path = format!("r2/buckets/{}/objects/{}", bucket, key);
     match cloudflare_request(ctx, "GET", &path, "") {
-        Ok((_status, _headers, body)) => ok_result(Value::from_str_boxed(body)),
+        Ok((status, _headers, body)) => {
+            if (200..300).contains(&status) {
+                ok_result(Value::from_str_boxed(body))
+            } else {
+                err_result("http_error", &format!("http status: {}", status), status)
+            }
+        }
         Err(e) => err_result("api_error", &e, 0),
     }
 }
 
-#[xcl_fn(name = "bucket.put", args = "key: str; value: str", ret = "Result", summary = "Put an object into Cloudflare R2.")]
-fn bucket_put(ctx: &mut DomainCtx) -> Value {
+#[xcl_fn(impl_type = "CloudflareProvider", override_method = "bucket_put", name = "bucket.put", args = "key: str; value: str", ret = "Result", summary = "Put an object into Cloudflare R2.")]
+pub fn bucket_put(ctx: &mut DomainCtx) -> Value {
     let key = ctx.arg(0).as_str().unwrap_or("");
     let value = ctx.arg(1).as_str().unwrap_or("");
     let bucket = match ctx.get_context("bucket.name") {
@@ -120,13 +132,19 @@ fn bucket_put(ctx: &mut DomainCtx) -> Value {
 
     let path = format!("r2/buckets/{}/objects/{}", bucket, key);
     match cloudflare_request(ctx, "PUT", &path, value) {
-        Ok((_status, _headers, body)) => ok_result(Value::from_str_boxed(body)),
+        Ok((status, _headers, body)) => {
+            if (200..300).contains(&status) {
+                ok_result(Value::from_str_boxed(body))
+            } else {
+                err_result("http_error", &format!("http status: {}", status), status)
+            }
+        }
         Err(e) => err_result("api_error", &e, 0),
     }
 }
 
-#[xcl_fn(name = "bucket.delete", args = "key: str", ret = "Result", summary = "Delete an object from Cloudflare R2.")]
-fn bucket_delete(ctx: &mut DomainCtx) -> Value {
+#[xcl_fn(impl_type = "CloudflareProvider", override_method = "bucket_delete", name = "bucket.delete", args = "key: str", ret = "Result", summary = "Delete an object from Cloudflare R2.")]
+pub fn bucket_delete(ctx: &mut DomainCtx) -> Value {
     let key = ctx.arg(0).as_str().unwrap_or("");
     let bucket = match ctx.get_context("bucket.name") {
         Some(b) => b.as_str().unwrap_or("").to_string(),
@@ -135,20 +153,32 @@ fn bucket_delete(ctx: &mut DomainCtx) -> Value {
 
     let path = format!("r2/buckets/{}/objects/{}", bucket, key);
     match cloudflare_request(ctx, "DELETE", &path, "") {
-        Ok((_status, _headers, body)) => ok_result(Value::from_str_boxed(body)),
+        Ok((status, _headers, body)) => {
+            if (200..300).contains(&status) {
+                ok_result(Value::from_str_boxed(body))
+            } else {
+                err_result("http_error", &format!("http status: {}", status), status)
+            }
+        }
         Err(e) => err_result("api_error", &e, 0),
     }
 }
 
-#[xcl_fn(name = "bucket.create", args = "name: str", ret = "Result", summary = "Create a new Cloudflare R2 bucket.")]
-fn bucket_create(ctx: &mut DomainCtx) -> Value {
+#[xcl_fn(impl_type = "CloudflareProvider", override_method = "bucket_create", name = "bucket.create", args = "name: str", ret = "Result", summary = "Create a new Cloudflare R2 bucket.")]
+pub fn bucket_create(ctx: &mut DomainCtx) -> Value {
     let name = ctx.arg(0).as_str().unwrap_or("");
     if name.is_empty() {
         return err_result("missing_name", "Bucket name is required", 0);
     }
     let body = format!(r#"{{"name":"{}"}}"#, name);
     match cloudflare_request(ctx, "POST", "r2/buckets", &body) {
-        Ok((_status, _headers, resp)) => ok_result(Value::from_str_boxed(resp)),
+        Ok((status, _headers, resp)) => {
+            if (200..300).contains(&status) {
+                ok_result(Value::from_str_boxed(resp))
+            } else {
+                err_result("http_error", &format!("http status: {}", status), status)
+            }
+        }
         Err(e) => err_result("api_error", &e, 0),
     }
 }

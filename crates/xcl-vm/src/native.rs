@@ -10,6 +10,7 @@
 //!
 //! * [`NATIVE_REGISTRY`] - Static list of native functions (pure functions or context-aware methods).
 //! * [`TYPE_REGISTRY`] - Static list of custom types and record/sum definitions.
+//! * [`TRAIT_REGISTRY`] - Static list of trait interface definitions.
 //! * [`IMPL_REGISTRY`] - Static list of trait implementation blocks for types.
 //!
 //! When a [`crate::vm::VM`] starts up, calling [`crate::vm::VM::register_all`]
@@ -30,8 +31,8 @@
 //! ```
 
 pub use crate::value::{
-    ImplDescriptor, ImplMethod, NamedParam, NativeEntry, NativeKind, TypeDescriptor, TypeField,
-    TypeKind, TypeVariant,
+    ImplDescriptor, ImplMethod, NamedParam, NativeEntry, NativeKind, TraitDescriptor, TraitMethod,
+    TypeDescriptor, TypeField, TypeKind, TypeVariant,
 };
 
 use linkme::distributed_slice;
@@ -73,6 +74,23 @@ pub static NATIVE_REGISTRY: [NativeEntry] = [..];
 /// ```
 #[distributed_slice]
 pub static TYPE_REGISTRY: [TypeDescriptor] = [..];
+
+/// Compile-time distributed registry of trait interface definitions.
+///
+/// Describes trait contracts with method signatures, allowing XCL to check
+/// trait conformance and generate documentation.
+///
+/// # Examples
+///
+/// ```
+/// use xcl_vm::native::TRAIT_REGISTRY;
+///
+/// for trait_ in TRAIT_REGISTRY.iter() {
+///     println!("Trait {} has {} methods", trait_.name, trait_.methods.len());
+/// }
+/// ```
+#[distributed_slice]
+pub static TRAIT_REGISTRY: [TraitDescriptor] = [..];
 
 /// Compile-time distributed registry of trait implementation blocks.
 ///

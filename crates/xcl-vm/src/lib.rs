@@ -249,12 +249,13 @@ pub mod wellknown;
 pub use args::split_named_args;
 pub use bytecode::{Bytecode, Instr};
 pub use errors::{Group, is_known_kind};
-pub use native::{IMPL_REGISTRY, NATIVE_REGISTRY, TYPE_REGISTRY};
+pub use native::{IMPL_REGISTRY, NATIVE_REGISTRY, TRAIT_REGISTRY, TYPE_REGISTRY};
 pub use span::Span;
 pub use value::{
-    BuiltinImpl, DomainCtx, FuncValue, HandleKind, NamedParam, NativeArg, NativeEntry, NativeKind,
-    RawPtr, SUBTYPE_ERROR, SUBTYPE_HANDLE, SUBTYPE_NONE, SUBTYPE_RESULT, SUBTYPE_USER_BASE,
-    TypeDescriptor, TypeField, TypeKind, TypeVariant, VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK,
+    BuiltinImpl, DomainCtx, FuncValue, GlobalOverrideGuard, HandleKind, ImplDescriptor, ImplMethod,
+    NamedParam, NativeArg, NativeEntry, NativeKind, RawPtr, SUBTYPE_ERROR, SUBTYPE_HANDLE, SUBTYPE_NONE,
+    SUBTYPE_RESULT, SUBTYPE_USER_BASE, TraitDescriptor, TraitMethod, TypeDescriptor, TypeField, TypeKind,
+    TypeVariant, VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK,
     Value, extract_arg,
 };
 pub use vm::{DomainSlot, VM};
