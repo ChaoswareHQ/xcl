@@ -10,7 +10,7 @@
 //!
 //! * **Statements**: Parsed using recursive descent with lookahead. Handled constructs include
 //!   variable assignments (`$x = 42`), loop statements (`for`, `while`), branch statements (`if`/`else`),
-//!   function definitions (`name(args) { ... }`), custom type definitions (`Point = { ... }`),
+//!   function definitions (`name($args) { ... }`), custom type definitions (`Point = { ... }`),
 //!   trait implementations (`Human is Walk { ... }`), and `defer` cleanup blocks.
 //! * **Expressions**: Parsed using Pratt / precedence climbing to correctly resolve operator
 //!   precedence and associativity for arithmetic, comparisons, logical operations, and pipeline (`|>`) chaining.
@@ -684,7 +684,15 @@ impl<'a> Parser<'a> {
 
     fn param(&mut self) -> Param {
         let span = self.span();
-        let name = self.consume().text.trim_start_matches('$').to_string();
+        // Parameters must use $ prefix: $x, $name, etc.
+        let t = self.consume();
+        if !matches!(&t.token, Token::Ident) {
+            panic!(
+                "XCL {}:{}: parameter must use $ prefix, got '{}' (use ${} instead)",
+                t.span.line, t.span.col, t.text, t.text
+            );
+        }
+        let name = t.text.trim_start_matches('$').to_string();
         let type_annotation = if self.at(Token::Colon) {
             self.consume();
             Some(self.parse_type())
@@ -1142,55 +1150,7 @@ impl<'a> Parser<'a> {
             self.consume();
             return self.unary();
         }
-        if self.at(Token::LParen) && self.lookahead_lambda() {
-            return self.lambda();
-        }
         self.postfix()
-    }
-
-    fn lookahead_lambda(&self) -> bool {
-        let mut depth = 1;
-        let mut pos = self.pos + 1;
-        while pos < self.tokens.len() && depth > 0 {
-            match self.tokens[pos].token {
-                Token::LParen => depth += 1,
-                Token::RParen => depth -= 1,
-                _ => {}
-            }
-            if depth == 0 {
-                return self
-                    .tokens
-                    .get(pos + 1)
-                    .map(|t| matches!(t.token, Token::Arrow | Token::RArrow))
-                    .unwrap_or(false);
-            }
-            pos += 1;
-        }
-        false
-    }
-
-    fn lambda(&mut self) -> AstNode {
-        let span = self.span();
-        self.consume(); // consume LParen
-        let mut params = Vec::new();
-        while !self.at(Token::RParen) && !self.at_eof() {
-            let name = self.consume().text.trim_start_matches('$').to_string();
-            params.push(name);
-            if self.at(Token::Comma) || self.at(Token::Semi) {
-                self.consume();
-            }
-        }
-        self.expect(Token::RParen);
-        // Accept both => and -> for lambda arrow
-        if self.at(Token::Arrow) || self.at(Token::RArrow) {
-            self.consume();
-        }
-        let body = Box::new(self.expr());
-        AstNode::Lambda {
-            span,
-            params,
-            body,
-        }
     }
 
     /// Lookahead: does [ look like an index ($arr[0]) or an array literal ([1, 2, 3])?
@@ -1213,13 +1173,21 @@ impl<'a> Parser<'a> {
         true // no comma found = index expression
     }
 
-    /// Parse pipe-style lambda: |x, y| expr
+    /// Parse pipe-style lambda: |$x, $y| expr — params must use $ prefix
     fn pipe_lambda(&mut self) -> AstNode {
         let span = self.span();
         self.consume(); // consume first |
         let mut params = Vec::new();
         while !self.at(Token::Pipe) && !self.at_eof() {
-            let name = self.consume().text.trim_start_matches('$').to_string();
+            // Pipe lambda params must use $ prefix: |$x| $x * 2
+            let t = self.consume();
+            if !matches!(&t.token, Token::Ident) {
+                panic!(
+                    "XCL {}:{}: pipe lambda parameter must use $ prefix, got '{}' (use ${} instead)",
+                    t.span.line, t.span.col, t.text, t.text
+                );
+            }
+            let name = t.text.trim_start_matches('$').to_string();
             params.push(name);
             if self.at(Token::Comma) || self.at(Token::Semi) {
                 self.consume();

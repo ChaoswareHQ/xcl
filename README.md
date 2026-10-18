@@ -32,7 +32,7 @@ XCL uses **NaN-boxing** to represent all values in a single 64-bit word. Primiti
 | None | Absence of a value | `none` |
 | Array | Ordered list | `[1, 2, 3]` |
 | Map | Key-value store | `{ name: "Alice", age: 30 }` |
-| Function | Callable block | `add(a, b) { a + b }` |
+| Function | Callable block | `add($a, $b) { $a + $b }` |
 
 **Integer overflow:** When integer arithmetic exceeds 48 bits, XCL automatically falls back to floating-point representation without raising an error.
 
@@ -214,12 +214,12 @@ for $i in 0..100 {
 Declare functions without any keyword — just the name, parameters, and body block:
 
 ```xcl
-add(a, b) {
-    a + b
+add($a, $b) {
+    $a + $b
 }
 
-greet(name) {
-    return "Hello, " + name
+greet($name) {
+    return "Hello, " + $name
 }
 
 $result = add 3 4
@@ -228,30 +228,30 @@ $result = add 3 4
 Functions support typed parameters and return type annotations:
 
 ```xcl
-calculate(a: i32, b: f64) -> f64 {
-    $result = a + b
+calculate($a: i32, $b: f64) -> f64 {
+    $result = $a + $b
     return $result
 }
 ```
 
-**Lambda functions** support three syntax styles:
+**Lambda functions** use pipe syntax only:
 
 ```xcl
-# Arrow lambda — explicit params in parens
-$square = (x) -> x * x
+# Pipe lambda — single param
+$square = |$x| $x * $x
 
-# Pipe lambda — concise, like Rust closures
-$double = |x| x * 2
+# Pipe lambda — multiple params
+$add = |$a, $b| $a + $b
 
 # Block lambda — for multi-statement bodies
-$complex = { |x, y| x + y }
+$complex = { |$x, $y| $x + $y }
 ```
 
 Lambdas can capture variables from their enclosing scope:
 
 ```xcl
 $multiplier = 10
-$scale = (x) -> x * $multiplier
+$scale = |$x| $x * $multiplier
 ```
 
 **Note:** All lambda parameters must be declared explicitly.
@@ -358,14 +358,14 @@ Annotate variables and function parameters with explicit types using the `:` syn
 $name: str = "Alice"
 $count: i32 = 42
 
-# Function parameter types
-greet(name: str, age: i32) {
-    print "Hello, " + name
+# Function parameter types — params must use $ prefix
+greet($name: str, $age: i32) {
+    print "Hello, " + $name
 }
 
 # Return type annotation
-add(a: i32, b: i32) -> i32 {
-    a + b
+add($a: i32, $b: i32) -> i32 {
+    $a + $b
 }
 ```
 
@@ -564,11 +564,11 @@ cloud "aws" "us-east-1" {
 
 ```xcl
 # Array operations
-$squares = collections.arr.map [1, 2, 3, 4, 5] (x) -> x * x
-$evens = collections.arr.filter $squares (x) -> x % 2 == 0
+$squares = collections.arr.map [1, 2, 3, 4, 5] |$x| $x * $x
+$evens = collections.arr.filter $squares |$x| $x % 2 == 0
 
 # Pipeline style
-$result = [1, 2, 3, 4, 5] |> collections.arr.map (x) -> x * 2
+$result = [1, 2, 3, 4, 5] |> collections.arr.map |$x| $x * 2
 ```
 
 **Example — FFI:**

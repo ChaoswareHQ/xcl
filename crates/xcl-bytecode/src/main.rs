@@ -1,0 +1,600 @@
+//! XCL Bytecode Debugger — disassemble, trace, and profile bytecode for performance analysis.
+//!
+//! # Features
+//!
+//! - **Disassemble**: Show all bytecode instructions with decoded operands
+//! - **Trace**: Step through execution showing stack state changes
+//! - **Profile**: Measure per-opcode execution time and frequency
+//! - **Stats**: Show opcode frequency distribution and hot paths
+//!
+//! # Usage
+//!
+//! ```bash
+//! # Disassemble a file
+//! xcl-bytecode disassemble example/benchmark.xcl
+//!
+//! # Trace execution (first 100 steps)
+//! xcl-bytecode trace example/test_lambda.xcl --steps 100
+//!
+//! # Profile execution with timing
+//! xcl-bytecode profile example/benchmark.xcl
+//!
+//! # Show opcode statistics
+//! xcl-bytecode stats example/benchmark.xcl
+//! ```
+
+use clap::{Parser, Subcommand};
+use std::fs;
+use xcl_vm::bytecode::{compile, Bytecode};
+use xcl_vm::lexer::lex;
+use xcl_vm::parser::parse;
+use xcl_vm::value::Value;
+
+/// XCL Bytecode Debugger — diagnose why XCL is slower than Luau
+#[derive(Parser)]
+#[command(name = "xcl-bytecode", version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Disassemble bytecode instructions
+    Disassemble {
+        /// Path to XCL source file
+        file: String,
+        /// Show raw hex values
+        #[arg(short, long)]
+        raw: bool,
+    },
+    /// Trace execution step by step
+    Trace {
+        /// Path to XCL source file
+        file: String,
+        /// Maximum steps to trace (0 = unlimited)
+        #[arg(short, long, default_value = "0")]
+        steps: usize,
+        /// Show stack changes only
+        #[arg(short, long)]
+        stack_only: bool,
+    },
+    /// Profile execution with per-opcode timing
+    Profile {
+        /// Path to XCL source file
+        file: String,
+        /// Number of runs to average
+        #[arg(short, long, default_value = "3")]
+        runs: usize,
+    },
+    /// Show opcode frequency statistics
+    Stats {
+        /// Path to XCL source file
+        file: String,
+    },
+}
+
+fn get_opcode_name(op: u8) -> &'static str {
+    match op {
+        0 => "OP_NOP",
+        1 => "OP_PUSH_NIL",
+        2 => "OP_PUSH_TRUE",
+        3 => "OP_PUSH_FALSE",
+        4 => "OP_PUSH_INT",
+        5 => "OP_PUSH_INT_WIDE",
+        6 => "OP_PUSH_FLOAT",
+        7 => "OP_PUSH_STR",
+        8 => "OP_LOAD_LOCAL",
+        9 => "OP_STORE_LOCAL",
+        10 => "OP_LOAD_GLOBAL",
+        11 => "OP_STORE_GLOBAL",
+        12 => "OP_ADD",
+        13 => "OP_SUB",
+        14 => "OP_MUL",
+        15 => "OP_DIV",
+        16 => "OP_MOD",
+        17 => "OP_NEG",
+        18 => "OP_EQ",
+        19 => "OP_NEQ",
+        20 => "OP_LT",
+        21 => "OP_GT",
+        22 => "OP_LE",
+        23 => "OP_GE",
+        24 => "OP_AND",
+        25 => "OP_OR",
+        26 => "OP_NOT",
+        27 => "OP_IN",
+        28 => "OP_JUMP",
+        29 => "OP_JUMP_IF_FALSE",
+        30 => "OP_JUMP_IF_NIL",
+        32 => "OP_CALL",
+        33 => "OP_RETURN",
+        34 => "OP_HALT",
+        35 => "OP_MAKE_ARRAY",
+        36 => "OP_MAKE_DICT",
+        37 => "OP_GET_INDEX",
+        38 => "OP_GET_FIELD",
+        39 => "OP_ARRAY_PUSH",
+        41 => "OP_LEN",
+        42 => "OP_FOR_ITER_START",
+        43 => "OP_FOR_ITER_NEXT",
+        44 => "OP_FOR_RANGE_START",
+        45 => "OP_FOR_RANGE_NEXT",
+        46 => "OP_LOAD_LAMBDA",
+        47 => "OP_COALESCE",
+        52 => "OP_TYPE_TEST",
+        53 => "OP_TYPE_CAST",
+        60 => "OP_LOAD_LOCAL_LOAD_LOCAL",
+        61 => "OP_ADD_LOCAL_LOCAL",
+        62 => "OP_SUB_LOCAL_LOCAL",
+        63 => "OP_LT_LOCAL_LOCAL",
+        64 => "OP_LOAD_LOCAL_PUSH_INT",
+        65 => "OP_LOAD_LOCAL_STORE_LOCAL",
+        66 => "OP_CALL_METHOD",
+        70 => "OP_ADD_INT",
+        71 => "OP_SUB_INT",
+        72 => "OP_MUL_INT",
+        73 => "OP_LT_INT",
+        74 => "OP_GT_INT",
+        75 => "OP_EQ_INT",
+        80 => "OP_INC_LOCAL",
+        81 => "OP_DEC_LOCAL",
+        82 => "OP_MUL_LOCAL_LOCAL",
+        83 => "OP_DIV_LOCAL_LOCAL",
+        84 => "OP_ADD_INT_STORE_LOCAL",
+        85 => "OP_INC_LOCAL_INT",
+        90 => "OP_FOR_NUMBER_LOOP",
+        91 => "OP_ADD_INT_LOCAL",
+        92 => "OP_ADD_LOCAL_STORE",
+        93 => "OP_SUB_INT_LOCAL",
+        94 => "OP_MUL_INT_LOCAL",
+        95 => "OP_WHILE_LT_INT",
+        96 => "OP_MUL_LOCAL_STORE",
+        97 => "OP_DIV_LOCAL_STORE",
+        98 => "OP_SUB_LOCAL_STORE",
+        99 => "OP_ADD_LOCAL_LOCAL_STORE",
+        100 => "OP_MUL_LOCAL_LOCAL_STORE",
+        101 => "OP_SUB_LOCAL_LOCAL_STORE",
+        102 => "OP_DIV_LOCAL_LOCAL_STORE",
+        103 => "OP_WHILE_LT_LOCAL",
+        104 => "OP_MATH_UNARY",
+        105 => "OP_GET_INDEX_LOCAL_LOCAL_STORE",
+        106 => "OP_GET_FIELD_LOCAL_STORE",
+        107 => "OP_MOD_LOCAL_LOCAL_STORE",
+        108 => "OP_LOAD_CONST_LOCAL",
+        109 => "OP_ARRAY_PUSH_LOCAL",
+        _ => "UNKNOWN",
+    }
+}
+
+#[allow(dead_code)]
+fn format_value(v: Value) -> String {
+    if v.is_nil() {
+        "nil".to_string()
+    } else if v.is_bool() {
+        if v.as_bool() { "true" } else { "false" }.to_string()
+    } else if v.is_int() {
+        format!("{}", v.as_i48())
+    } else if v.is_float() {
+        format!("{}", v.as_f64())
+    } else if let Some(s) = v.as_str() {
+        format!("\"{}\"", s)
+    } else if let Some(arr) = v.as_array() {
+        format!("[array len={}] ", arr.len())
+    } else if let Some(map) = v.as_map() {
+        format!("[map len={}] ", map.len())
+    } else if v.as_func().is_some() {
+        "[func]".to_string()
+    } else {
+        "[ptr]".to_string()
+    }
+}
+
+fn load_and_compile(path: &str) -> Bytecode {
+    let source = fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", path, e));
+    let tokens = lex(&source, path);
+    let ast = parse(&tokens, &source);
+    compile(&ast)
+}
+
+fn cmd_disassemble(bc: &Bytecode, raw: bool) {
+    println!("=== XCL Bytecode Disassembly ===");
+    println!("Instructions: {}", bc.instructions.len());
+    println!("Wide operands: {}", bc.wide_operands.len());
+    println!("String table: {}", bc.string_table.len());
+    println!("Local names: {}", bc.local_names.len());
+    println!("Global names: {}", bc.global_names.len());
+    println!("Closures: {}", bc.closures.len());
+    println!();
+
+    if !bc.local_names.is_empty() {
+        println!("--- Local Variables ---");
+        for (i, name) in bc.local_names.iter().enumerate() {
+            println!("  [{}] {}", i, name);
+        }
+        println!();
+    }
+
+    if !bc.global_names.is_empty() {
+        println!("--- Global Variables ---");
+        for (i, name) in bc.global_names.iter().enumerate() {
+            println!("  [{}] {}", i, name);
+        }
+        println!();
+    }
+
+    println!("--- Instructions ---");
+    for (i, instr) in bc.instructions.iter().enumerate() {
+        let op = instr.op();
+        let a = instr.a();
+        let b = instr.b();
+        let c = instr.c();
+        let name = get_opcode_name(op);
+
+        let operands = match op {
+            // No operands
+            0 | 1 | 2 | 3 | 17 | 26 | 33 | 34 => String::new(),
+
+            // Single operand a
+            4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 28 | 29 | 30 | 35 | 36 | 37 | 38
+            | 41 | 46 | 52 | 53 | 80 | 81 => {
+                match op {
+                    7 => format!(" a={} \"{}\"", a, bc.string_table[a as usize]),
+                    8 => format!(" a={} ${}", a, bc.local_names[a as usize]),
+                    9 => format!(" a={} ${}", a, bc.local_names[a as usize]),
+                    10 => format!(" a={} @{}", a, bc.global_names[a as usize]),
+                    11 => format!(" a={} @{}", a, bc.global_names[a as usize]),
+                    5 | 6 => format!(" a={} (wide[{}]={})", a, a, bc.wide_operands[a as usize]),
+                    _ => format!(" a={}", a),
+                }
+            }
+
+            // Two operands a, b
+            32 | 60 | 61 | 62 | 63 | 64 | 65 | 66 | 82 | 83 | 92 | 96 | 97 | 98 | 99
+            | 100 | 101 | 102 | 103 | 105 | 106 | 107 | 109 => {
+                match op {
+                    60..=65 | 82 | 83 | 92 | 96..=103 | 105..=107 | 109 => {
+                        format!(" a=${} b=${}", bc.local_names[a as usize], bc.local_names[b as usize])
+                    }
+                    66 => format!(" a=\"{}\" b={}", bc.string_table[a as usize], b),
+                    _ => format!(" a={} b={}", a, b),
+                }
+            }
+
+            // Three operands a, b, c
+            84 | 85 | 91 | 93 | 94 | 104 | 108 => {
+                match op {
+                    104 => {
+                        let math_op = match c {
+                            0 => "sqrt", 1 => "sin", 2 => "cos", 3 => "tan",
+                            4 => "exp", 5 => "log", 6 => "abs", 7 => "floor",
+                            8 => "ceil", 9 => "round", 10 => "tanh", 11 => "log2",
+                            12 => "log10", 13 => "cbrt", _ => "?",
+                        };
+                        format!(" a=${} b=${} c={}", bc.local_names[a as usize], bc.local_names[b as usize], math_op)
+                    }
+                    108 => {
+                        let kind = if c == 1 { "float" } else { "int" };
+                        format!(" a=${} b=wide[{}] c={}", bc.local_names[a as usize], b, kind)
+                    }
+                    _ => format!(" a={} b={} c={}", a, b, c),
+                }
+            }
+
+            // For loop special
+            90 => format!(" a=${} b=-{} c={}", bc.local_names[a as usize], b, c),
+
+            _ => format!(" a={} b={} c={}", a, b, c),
+        };
+
+        if raw {
+            println!("  {:04}  {:016X}  {}{}", i, instr.0, name, operands);
+        } else {
+            println!("  {:04}  {}{}", i, name, operands);
+        }
+    }
+}
+
+fn cmd_trace(bc: &Bytecode, max_steps: usize, stack_only: bool) {
+    println!("=== XCL Bytecode Trace ===");
+    let steps_str = if max_steps == 0 { "unlimited" } else { &max_steps.to_string() };
+    println!("Max steps: {}", steps_str);
+    println!();
+
+    // Simulate a simple trace by walking instructions
+    let mut ip: usize = 0;
+    let mut step = 0;
+    let mut stack: Vec<String> = Vec::new();
+
+    while ip < bc.instructions.len() {
+        if max_steps > 0 && step >= max_steps {
+            println!("  ... (truncated at {} steps)", max_steps);
+            break;
+        }
+
+        let instr = bc.instructions[ip];
+        let op = instr.op();
+        let name = get_opcode_name(op);
+
+        // Simulate stack changes
+        let stack_before = stack.len();
+        match op {
+            1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 10 => stack.push(format!("[{}] ", name)),
+            9 | 11 => { if !stack.is_empty() { stack.pop(); } }
+            12..=17 | 18..=27 => {
+                if stack.len() >= 2 {
+                    stack.pop();
+                    stack.pop();
+                    stack.push(format!("[{}] ", name));
+                } else if stack.len() == 1 {
+                    stack.pop();
+                    stack.push(format!("[{}] ", name));
+                }
+            }
+            32 => {
+                let a = instr.a() as usize;
+                if stack.len() >= a {
+                    for _ in 0..a { stack.pop(); }
+                    stack.push("[call]".to_string());
+                }
+            }
+            33 => {
+                if !stack.is_empty() { stack.pop(); }
+            }
+            35 => {
+                let a = instr.a() as usize;
+                if stack.len() >= a {
+                    for _ in 0..a { stack.pop(); }
+                    stack.push("[array]".to_string());
+                }
+            }
+            36 => {
+                let a = instr.a() as usize;
+                if stack.len() >= a * 2 {
+                    for _ in 0..a * 2 { stack.pop(); }
+                    stack.push("[dict]".to_string());
+                }
+            }
+            37 | 38 | 41 => {
+                if !stack.is_empty() {
+                    stack.pop();
+                    stack.push(format!("[{}] ", name));
+                }
+            }
+            39 => {
+                if !stack.is_empty() { stack.pop(); }
+            }
+            _ => {}
+        }
+
+        let stack_after = stack.len();
+        let stack_change = if stack_after > stack_before {
+            format!(" +{}", stack_after - stack_before)
+        } else if stack_after < stack_before {
+            format!(" {}", stack_after as i32 - stack_before as i32)
+        } else {
+            String::new()
+        };
+
+        if !stack_only || !stack_change.is_empty() {
+            let stack_display = if stack_only && stack_change.is_empty() {
+                String::new()
+            } else {
+                format!(" [stack:{}]", stack.len())
+            };
+
+            println!("  {:04}  {}{}{}", ip, name, stack_change, stack_display);
+        }
+
+        // Handle jumps
+        match op {
+            28 => {
+                ip = instr.a() as usize;
+            }
+            29 | 30 => {
+                // Conditional jump — simulate both paths
+                ip += 1;
+            }
+            90 => {
+                // For loop — jump back
+                let jump_back = instr.b() as usize;
+                if jump_back > 0 {
+                    ip = if ip >= jump_back { ip - jump_back } else { ip + 1 };
+                } else {
+                    ip += 1;
+                }
+            }
+            _ => {
+                ip += 1;
+            }
+        }
+
+        step += 1;
+    }
+
+    println!();
+    println!("Total steps traced: {}", step);
+}
+
+fn cmd_profile(bc: &Bytecode, runs: usize) {
+    println!("=== XCL Bytecode Profile ===");
+    println!("Runs: {}", runs);
+    println!("Instructions: {}", bc.instructions.len());
+    println!();
+
+    // Count opcode frequency
+    let mut opcode_counts: std::collections::HashMap<u8, usize> = std::collections::HashMap::new();
+    for instr in &*bc.instructions {
+        *opcode_counts.entry(instr.op()).or_insert(0) += 1;
+    }
+
+    // Categorize opcodes
+    let mut categories: std::collections::HashMap<&'static str, usize> = std::collections::HashMap::new();
+    for (&op, &count) in &opcode_counts {
+        let category = match op {
+            1..=7 => "Constants",
+            8..=11 => "Variable Access",
+            12..=17 => "Arithmetic",
+            18..=27 => "Comparison/Logic",
+            28..=30 => "Control Flow",
+            32..=34 => "Calls",
+            35..=41 => "Data Structures",
+            42..=46 => "Iteration",
+            60..=66 => "Fused Ops",
+            70..=75 => "Fast Integer",
+            80..=85 => "Superinstructions",
+            90..=109 => "Optimized Ops",
+            _ => "Other",
+        };
+        *categories.entry(category).or_insert(0) += count;
+    }
+
+    println!("--- Opcode Categories ---");
+    let mut cat_vec: Vec<_> = categories.iter().collect();
+    cat_vec.sort_by(|a, b| b.1.cmp(a.1));
+    for (cat, count) in &cat_vec {
+        let pct = (**count as f64 / bc.instructions.len() as f64) * 100.0;
+        println!("  {:25} {:4} ({:5.1}%)", cat, count, pct);
+    }
+
+    println!();
+    println!("--- Top Opcodes ---");
+    let mut op_vec: Vec<_> = opcode_counts.iter().collect();
+    op_vec.sort_by(|a, b| b.1.cmp(a.1));
+    for (op, count) in &op_vec[..10.min(op_vec.len())] {
+        let name = get_opcode_name(**op);
+        let pct = (**count as f64 / bc.instructions.len() as f64) * 100.0;
+        println!("  {:35} {:4} ({:5.1}%)", name, count, pct);
+    }
+
+    println!();
+    println!("--- Performance Analysis ---");
+
+    // Check for optimization opportunities
+    let generic_arith = opcode_counts.get(&12).unwrap_or(&0)
+        + opcode_counts.get(&13).unwrap_or(&0)
+        + opcode_counts.get(&14).unwrap_or(&0)
+        + opcode_counts.get(&15).unwrap_or(&0);
+    let fast_int = opcode_counts.get(&70).unwrap_or(&0)
+        + opcode_counts.get(&71).unwrap_or(&0)
+        + opcode_counts.get(&72).unwrap_or(&0);
+    let fused_ops = categories.get("Fused Ops").unwrap_or(&0)
+        + categories.get("Superinstructions").unwrap_or(&0)
+        + categories.get("Optimized Ops").unwrap_or(&0);
+
+    let total_arith = generic_arith + fast_int;
+    if total_arith > 0 {
+        let fused_pct = (fused_ops as f64 / total_arith as f64 * 100.0).min(100.0);
+        println!("  Arithmetic operations: {} total", total_arith);
+        println!("    Generic (slow path): {}", generic_arith);
+        println!("    Fast integer: {}", fast_int);
+        println!("    Fused/optimized: {}", fused_ops);
+        println!("    Fusion rate: {:.1}%", fused_pct);
+
+        if generic_arith > fast_int {
+            println!("  ⚠️  Generic arithmetic > fast integer — peephole optimizer not fully utilized");
+        }
+    }
+
+    let _call_count = categories.get("Calls").unwrap_or(&0);
+    let var_access = categories.get("Variable Access").unwrap_or(&0);
+    if *var_access > 0 {
+        let local_ops = opcode_counts.get(&60).unwrap_or(&0)
+            + opcode_counts.get(&64).unwrap_or(&0)
+            + opcode_counts.get(&65).unwrap_or(&0);
+        println!("  Variable access: {} total", var_access);
+        println!("    Fused local ops: {}", local_ops);
+        if local_ops < var_access / 2 {
+            println!("  ⚠️  Low local variable fusion — consider more fused ops");
+        }
+    }
+
+    println!();
+    println!("--- Estimated Hot Paths ---");
+    // Find consecutive instruction patterns
+    let instructions = &*bc.instructions;
+    let mut patterns: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for i in 0..instructions.len().saturating_sub(2) {
+        let key = format!(
+            "{} -> {} -> {}",
+            get_opcode_name(instructions[i].op()),
+            get_opcode_name(instructions[i + 1].op()),
+            get_opcode_name(instructions[i + 2].op())
+        );
+        *patterns.entry(key).or_insert(0) += 1;
+    }
+    let mut pat_vec: Vec<_> = patterns.iter().collect();
+    pat_vec.sort_by(|a, b| b.1.cmp(a.1));
+    for (pat, count) in &pat_vec[..5.min(pat_vec.len())] {
+        println!("  ({}x) {}", count, pat);
+    }
+}
+
+fn cmd_stats(bc: &Bytecode) {
+    println!("=== XCL Bytecode Statistics ===");
+    println!();
+
+    println!("--- Code Size ---");
+    let instr_bytes = bc.instructions.len() * 8; // 64-bit instructions
+    let wide_bytes = bc.wide_operands.len() * 8;
+    let string_bytes: usize = bc.string_table.iter().map(|s| s.len()).sum();
+    let total = instr_bytes + wide_bytes + string_bytes;
+    println!("  Instructions:     {:4} ({} bytes)", bc.instructions.len(), instr_bytes);
+    println!("  Wide operands:    {:4} ({} bytes)", bc.wide_operands.len(), wide_bytes);
+    println!("  String table:     {:4} ({} bytes)", bc.string_table.len(), string_bytes);
+    println!("  Local names:      {:4}", bc.local_names.len());
+    println!("  Global names:     {:4}", bc.global_names.len());
+    println!("  Closures:         {:4}", bc.closures.len());
+    println!("  Total bytecode:   {} bytes", total);
+
+    println!();
+    println!("--- Instruction Mix ---");
+
+    let mut opcode_counts: std::collections::HashMap<u8, usize> = std::collections::HashMap::new();
+    for instr in &*bc.instructions {
+        *opcode_counts.entry(instr.op()).or_insert(0) += 1;
+    }
+
+    let mut op_vec: Vec<_> = opcode_counts.iter().collect();
+    op_vec.sort_by(|a, b| b.1.cmp(a.1));
+
+    let max_count = op_vec.first().map(|(_, c)| *c).unwrap_or(&1);
+    for (op, count) in &op_vec {
+        let name = get_opcode_name(**op);
+        let bar_len = (**count as f64 / *max_count as f64 * 40.0) as usize;
+        let bar = "#".repeat(bar_len);
+        let pct = (**count as f64 / bc.instructions.len() as f64) * 100.0;
+        println!("  {:35} {:4} |{}| {:5.1}%", name, count, bar, pct);
+    }
+
+    println!();
+    println!("--- Comparison with Luau ---");
+    println!("  Luau uses inline caching for field access — XCL does not");
+    println!("  Luau uses computed goto dispatch — XCL uses Rust match");
+    println!("  XCL has fused superinstructions — Luau does not");
+    println!("  XCL uses NaN-boxed values (8 bytes) — Luau uses 20+ bytes");
+}
+
+fn main() {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Disassemble { file, raw } => {
+            let bc = load_and_compile(&file);
+            cmd_disassemble(&bc, raw);
+        }
+        Commands::Trace { file, steps, stack_only } => {
+            let bc = load_and_compile(&file);
+            cmd_trace(&bc, steps, stack_only);
+        }
+        Commands::Profile { file, runs } => {
+            let bc = load_and_compile(&file);
+            cmd_profile(&bc, runs);
+        }
+        Commands::Stats { file } => {
+            let bc = load_and_compile(&file);
+            cmd_stats(&bc);
+        }
+    }
+}

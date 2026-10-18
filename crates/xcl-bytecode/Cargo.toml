@@ -1,0 +1,14 @@
+[package]
+name = "xcl-bytecode"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "xcl-bytecode"
+path = "src/main.rs"
+
+[dependencies]
+xcl-vm = { workspace = true }
+clap = { workspace = true }
