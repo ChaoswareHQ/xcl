@@ -2,9 +2,28 @@
 //!
 //! # Supported macros
 //!
+//! Only 2 macros are needed:
+//!
 //! - `#[derive(Xcl)]` — Register a struct or enum in `TYPE_REGISTRY`.
-//! - `#[xcl_impl]` — Register an impl block in `IMPL_REGISTRY` (trait impl) or `NATIVE_REGISTRY` (inherent impl).
-//! - `xcl_universal_methods!()` — Register universal methods (`type`, `super`) available on all values.
+//! - `#[xcl_impl]` — Register an impl block: each method becomes a native entry in `NATIVE_REGISTRY`.
+//!
+//! Universal methods (`type`, `super`) are auto-registered by the VM at startup.
+//!
+//! # Example
+//!
+//! ```ignore
+//! #[derive(Xcl)]
+//! pub struct Https;
+//!
+//! #[xcl_impl]
+//! impl Https {
+//!     /// Perform an HTTPS GET request.
+//!     pub fn get(url: String) -> Value {
+//!         // ...
+//!     }
+//! }
+//! ```
+//! This registers `https.get` in the VM — no manual wrappers or statics needed.
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -192,12 +211,11 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
     let name = &input.ident;
     let name_str = name.to_string();
 
-    let (domain, kind, summary, super_type) = parse_xcl_helper_attrs(&input);
+    let (attr_domain, kind, summary, super_type) = parse_xcl_helper_attrs(&input);
 
-    let domain_expr = match domain {
-        Some(d) => quote!(Some(#d)),
-        None => quote!(None),
-    };
+    // Auto-detect domain from type name if not explicitly provided
+    let domain = attr_domain.unwrap_or_else(|| name_str.to_lowercase());
+    let domain_expr = quote!(Some(#domain));
 
     let summary_expr = match summary {
         Some(s) => quote!(Some(#s)),
@@ -363,8 +381,9 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
     }
 }
 
-/// `#[xcl_impl]` — Auto-registers a Rust impl block in `IMPL_REGISTRY` and/or `NATIVE_REGISTRY`.
+/// `xcl_universal_methods!()` — **Deprecated**: Universal methods are now auto-registered by the VM.
 ///
+<<<<<<< Updated upstream
 /// Supports two modes:
 ///
 /// 1. **Trait impl** (`impl Trait for Type`): Registers in `IMPL_REGISTRY` with method names.
@@ -1393,13 +1412,19 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Universal methods include:
 /// - `type` — Returns the type name of the value as a string.
 /// - `super` — Returns the parent (base) struct of a composed type.
+=======
+/// This macro is kept for backward compatibility but does nothing.
+/// The `type` and `super` methods are registered automatically when `VM::register_all()` is called.
+>>>>>>> Stashed changes
 ///
 /// # Example
 ///
 /// ```ignore
+/// // No longer needed — universal methods are auto-registered
 /// xcl_macros::xcl_universal_methods!();
 /// ```
 #[proc_macro]
+#[deprecated(since = "0.2.0", note = "Universal methods are now auto-registered by VM::register_all()")]
 pub fn xcl_universal_methods(_item: TokenStream) -> TokenStream {
     let expanded = quote! {
         /// Universal `type` method — returns the type name of any value.
@@ -1543,4 +1568,249 @@ pub fn xcl_universal_methods(_item: TokenStream) -> TokenStream {
     };
 
     expanded.into()
+}
+
+/// `#[xcl_impl]` — Auto-registers each method in a Rust impl block as a native entry.
+///
+/// Domain is auto-detected from the type name (e.g., `Https` -> `"https"`, `Fs` -> `"fs"`).
+/// Method names are used as-is — `get()` becomes `https.get`, `read()` becomes `fs.read`.
+///
+/// # Auto-import
+///
+/// By default, methods are NOT auto-imported. Use `#[xcl_impl(auto_import)]` to enable
+/// auto-import for all methods in the impl block. Auto-imported methods can be called
+/// as bare identifiers (e.g., `map [1, 2, 3] (x) -> x * 2` instead of `collections.map ...`).
+///
+/// Domains like `https` should NOT use auto_import because method names like `get` are too common.
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(Xcl)]
+/// pub struct Collections;
+///
+/// #[xcl_impl(auto_import)]
+/// impl Collections {
+///     /// Map a function over an array.
+///     pub fn map(arr: Vec<Value>, fn_: Value) -> Value {
+///         // ...
+///     }
+/// }
+/// ```
+/// This registers `collections.map` AND allows bare `map` to resolve to it.
+#[proc_macro_attribute]
+pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
+    // Parse optional attributes: #[xcl_impl(auto_import)]
+    let mut auto_import = false;
+    if !attr.is_empty() {
+        if let Ok(ident) = syn::parse2::<syn::Ident>(attr.into()) {
+            if ident == "auto_import" {
+                auto_import = true;
+            }
+        }
+    }
+
+    let impl_item = parse_macro_input!(item as ItemImpl);
+
+    // Extract the type name from the impl block's self type
+    let (type_name, type_path_expr) = match impl_item.self_ty.as_ref() {
+        syn::Type::Path(type_path) => {
+            if let Some(seg) = type_path.path.segments.last() {
+                let name = seg.ident.to_string();
+                let type_path_copy = type_path.clone();
+                (name, type_path_copy)
+            } else {
+                return syn::Error::new_spanned(&impl_item.self_ty, "Cannot extract type name from impl block")
+                    .to_compile_error()
+                    .into();
+            }
+        }
+        _ => {
+            return syn::Error::new_spanned(&impl_item.self_ty, "Cannot extract type name from impl block")
+                .to_compile_error()
+                .into();
+        }
+    };
+
+    // Auto-detect domain from type name
+    let domain = type_name.to_lowercase();
+
+    // Check if this is a trait impl or inherent impl
+    if let Some((trait_path, _)) = &impl_item.trait_ {
+        // Trait impl mode: register in IMPL_REGISTRY
+        let trait_name = if let Some(seg) = trait_path.segments.last() {
+            seg.ident.to_string()
+        } else {
+            return syn::Error::new_spanned(trait_path, "Cannot extract trait name")
+                .to_compile_error()
+                .into();
+        };
+
+        let mut method_names: Vec<String> = Vec::new();
+        for item in &impl_item.items {
+            if let syn::ImplItem::Fn(iif) = item {
+                method_names.push(iif.sig.ident.to_string());
+            }
+        }
+
+        let methods_tokens = if method_names.is_empty() {
+            quote!(&[])
+        } else {
+            let entries = method_names.iter().map(|m_name| {
+                quote! {
+                    ::xcl_vm::ImplMethod {
+                        name: #m_name,
+                    }
+                }
+            });
+            quote!(&[#(#entries),*])
+        };
+
+        let statik = syn::Ident::new(
+            &format!("__XCL_IMPL_{}_{}", type_name.to_uppercase(), trait_name.to_uppercase()),
+            proc_macro2::Span::call_site(),
+        );
+
+        let expanded = quote! {
+            #impl_item
+
+            #[::linkme::distributed_slice(::xcl_vm::IMPL_REGISTRY)]
+            #[allow(non_upper_case_globals)]
+            static #statik: ::xcl_vm::ImplDescriptor = ::xcl_vm::ImplDescriptor {
+                type_name: #type_name,
+                trait_name: #trait_name,
+                methods: #methods_tokens,
+            };
+        };
+
+        expanded.into()
+    } else {
+        // Inherent impl mode: register each method in NATIVE_REGISTRY
+        let mut native_entries: Vec<proc_macro2::TokenStream> = Vec::new();
+
+        for item in &impl_item.items {
+            if let syn::ImplItem::Fn(iif) = item {
+                let method_name = &iif.sig.ident;
+                let method_name_str = method_name.to_string();
+
+                let summary = extract_doc_summary(&iif.attrs);
+                let summary_expr = match summary {
+                    Some(s) => quote!(Some(#s)),
+                    None => quote!(None),
+                };
+
+                // Check return type
+                let ret_type = match &iif.sig.output {
+                    syn::ReturnType::Type(_, ty) => {
+                        let ty_str = rust_type_to_xcl_type(ty);
+                        quote!(Some(#ty_str))
+                    }
+                    syn::ReturnType::Default => quote!(None),
+                };
+
+                let statik = syn::Ident::new(
+                    &format!("__XCL_NATIVE_{}_{}", type_name.to_uppercase(), method_name_str.to_uppercase()),
+                    proc_macro2::Span::call_site(),
+                );
+
+                let domain_expr = quote!(Some(#domain));
+
+                // Generate wrapper function that converts args from Value to Rust types,
+                // calls the inherent method, and converts the result back to Value
+                let wrapper_name = syn::Ident::new(
+                    &format!("__xcl_wrapper_{}_{}", type_name.to_lowercase(), method_name_str),
+                    proc_macro2::Span::call_site(),
+                );
+
+                // Build arg extraction code for each parameter
+                let arg_extracts: Vec<proc_macro2::TokenStream> = iif.sig.inputs.iter().enumerate().map(|(i, arg)| {
+                    if let syn::FnArg::Typed(pt) = arg {
+                        let arg_type = &pt.ty;
+                        let arg_idx = syn::Index::from(i);
+                        let local_name = syn::Ident::new(&format!("arg_{}", i), proc_macro2::Span::call_site());
+
+                        // Check if this is Vec<Value> — extract as Value and convert
+                        let is_vec_value = matches!(arg_type.as_ref(), syn::Type::Path(type_path) if {
+                            if let Some(seg) = type_path.path.segments.first() {
+                                seg.ident == "Vec"
+                            } else {
+                                false
+                            }
+                        });
+
+                        if is_vec_value {
+                            quote! {
+                                let #local_name = {
+                                    let val = ::xcl_vm::extract_arg::<::xcl_vm::Value>(args, #arg_idx);
+                                    val.as_array().map(|arr| arr.iter().copied().collect::<Vec<::xcl_vm::Value>>()).unwrap_or_default()
+                                };
+                            }
+                        } else {
+                            quote! {
+                                let #local_name = ::xcl_vm::extract_arg::<#arg_type>(args, #arg_idx);
+                            }
+                        }
+                    } else {
+                        quote! {}
+                    }
+                }).collect();
+
+                // Build the argument list for the method call
+                let call_args: Vec<proc_macro2::TokenStream> = iif.sig.inputs.iter().enumerate().map(|(i, _arg)| {
+                    let local_name = syn::Ident::new(&format!("arg_{}", i), proc_macro2::Span::call_site());
+                    quote!(#local_name)
+                }).collect();
+
+                // Build the return conversion based on return type.
+                // Uses IntoValue trait: all types (String, i64, f64, bool, Value, Vec<T>,
+                // and custom structs) implement IntoValue, so the macro just calls .into_value().
+                let return_conversion = match &iif.sig.output {
+                    syn::ReturnType::Type(_, _ty) => {
+                        quote! {
+                            ::xcl_vm::IntoValue::into_value(#type_path_expr::#method_name(#(#call_args),*))
+                        }
+                    }
+                    syn::ReturnType::Default => {
+                        quote! {
+                            #type_path_expr::#method_name(#(#call_args),*);
+                            ::xcl_vm::Value::nil()
+                        }
+                    }
+                };
+
+                let auto_import_val = auto_import;
+                native_entries.push(quote! {
+                    #[::linkme::distributed_slice(::xcl_vm::NATIVE_REGISTRY)]
+                    #[allow(non_upper_case_globals)]
+                    static #statik: ::xcl_vm::NativeEntry = ::xcl_vm::NativeEntry {
+                        domain: #domain_expr,
+                        impl_type: None,
+                        override_method: None,
+                        method: #method_name_str,
+                        kind: ::xcl_vm::NativeKind::Pure,
+                        ptr: ::xcl_vm::RawPtr(#wrapper_name as *const ()),
+                        args: None,
+                        ret: #ret_type,
+                        named: &[],
+                        summary: #summary_expr,
+                        arg_desc: &[],
+                        auto_import: #auto_import_val,
+                    };
+
+                    fn #wrapper_name(args: &[::xcl_vm::Value]) -> ::xcl_vm::Value {
+                        #(#arg_extracts)*
+                        #return_conversion
+                    }
+                });
+            }
+        }
+
+        let expanded = quote! {
+            #impl_item
+
+            #(#native_entries)*
+        };
+
+        expanded.into()
+    }
 }

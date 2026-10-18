@@ -1,0 +1,24 @@
+# Test: URL parsing and building
+# Tests: https.parse_url, https.build_url
+
+# Parse URL
+$parsed = https.parse_url "https://api.example.com:8443/path/to/resource?key=value&foo=bar"
+print "Scheme:" $parsed.scheme
+print "Host:" $parsed.host
+print "Port:" $parsed.port
+print "Path:" $parsed.path
+print "Query:" $parsed.query
+
+if $parsed.scheme == "https" {
+    print "PASS: Scheme parsed correctly"
+}
+if $parsed.host == "api.example.com" {
+    print "PASS: Host parsed correctly"
+}
+if $parsed.port == 8443 {
+    print "PASS: Port parsed correctly"
+}
+
+# Build URL
+$built = https.build_url "https" "api.example.com" 443 "/search" { q: "hello", page: 1 }
+print "Built URL:" $built

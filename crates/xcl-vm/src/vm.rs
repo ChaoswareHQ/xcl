@@ -184,6 +184,10 @@ pub struct DomainSlot {
     pub methods: Vec<Option<BuiltinImpl>>,
     /// Fast string-to-slot-id index mapping method names to offsets in `methods`.
     pub index: HashMap<Box<str>, u32>,
+    /// If true, methods in this domain are auto-imported: bare identifiers like `map`
+    /// will resolve to `collections.map` when not found in the global scope.
+    /// Set to false for domains like `https` where method names (e.g., `get`) are too common.
+    pub auto_import: bool,
 }
 
 #[cfg(feature = "std")]
@@ -354,13 +358,26 @@ impl VM {
                         name: domain.into(),
                         methods: Vec::new(),
                         index: HashMap::new(),
+                        auto_import: false,
                     });
                     idx
                 });
                 let slot = &mut self.domain_table[didx as usize];
+                // Propagate auto_import flag from entry to domain slot
+                if entry.auto_import {
+                    slot.auto_import = true;
+                }
                 let midx = slot.methods.len() as u32;
                 slot.methods.push(Some(impl_));
                 slot.index.insert(entry.method.into(), midx);
+
+                // If auto_import is enabled, also register the bare method name globally
+                if entry.auto_import {
+                    let idx = self.global_table.len() as u32;
+                    self.global_table.push(Some(impl_));
+                    // Only insert if not already present (first one wins for conflicts)
+                    self.global_index.entry(entry.method.into()).or_insert(idx);
+                }
 
                 // Also register the full dotted name globally so "net.tcp.connect" works
                 let idx = self.global_table.len() as u32;
@@ -819,6 +836,16 @@ impl VM {
                     false
                 };
                 self.push(Value::bool(is_type));
+                Action::Next
+            }
+            OP_TYPE_CAST => {
+                // Stack: value, type_name — cast value to the target type
+                let type_name_s = self.pop().as_str();
+                let value = self.pop();
+                // For now, type cast is a no-op that returns the value unchanged.
+                // Future: implement actual type conversion based on type_name.
+                let _ = type_name_s;
+                self.push(value);
                 Action::Next
             }
             OP_JUMP => Action::Jump(i.a()),
@@ -1920,6 +1947,7 @@ fn opcode_name(op: u8) -> String {
         OP_NOT => "OP_NOT",
         OP_IN => "OP_IN",
         OP_TYPE_TEST => "OP_TYPE_TEST",
+        OP_TYPE_CAST => "OP_TYPE_CAST",
         OP_JUMP => "OP_JUMP",
         OP_JUMP_IF_FALSE => "OP_JUMP_IF_FALSE",
         OP_JUMP_IF_NIL => "OP_JUMP_IF_NIL",

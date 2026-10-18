@@ -291,6 +291,15 @@ pub enum AstNode {
         /// Target type name to test against.
         type_name: String,
     },
+    /// Type cast expression: `$x as i32`.
+    TypeCast {
+        /// Source location of the type cast.
+        span: Span,
+        /// Value expression being cast.
+        value: Box<AstNode>,
+        /// Target type name to cast to.
+        type_name: String,
+    },
 }
 
 /// Classification of custom type definitions in XCL.

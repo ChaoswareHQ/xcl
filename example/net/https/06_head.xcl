@@ -1,0 +1,11 @@
+# Test: HEAD request
+# Tests: https.head, headers only, no body
+
+$response = https.head "https://httpbin.org/get" none
+print "HEAD Status:" $response.status
+print "HEAD OK:" $response.ok
+print "Content-Type:" $response.content_type
+print "Content-Length:" $response.content_length
+if $response.ok {
+    print "PASS: HEAD request succeeded"
+}

@@ -229,6 +229,9 @@ pub const OP_COALESCE: u8 = 47;
 /// Dynamic type test: checks if top of stack matches type index `a`.
 pub const OP_TYPE_TEST: u8 = 52;
 
+/// Type cast: casts value on top of stack to type index `a`.
+pub const OP_TYPE_CAST: u8 = 53;
+
 /// Fused instruction: loads two local variables sequentially (`locals[a]`, `locals[b]`).
 pub const OP_LOAD_LOCAL_LOAD_LOCAL: u8 = 60;
 /// Fused instruction: adds two local variables (`locals[a] + locals[b]`).
@@ -1555,6 +1558,16 @@ impl Compiler {
                 let type_idx = self.intern(type_name);
                 self.emit(Instr::a1(OP_PUSH_STR, type_idx));
                 self.emit(Instr::none(OP_TYPE_TEST));
+            }
+
+            // Type cast: $x as TypeName
+            AstNode::TypeCast {
+                value, type_name, ..
+            } => {
+                self.node(value);
+                let type_idx = self.intern(type_name);
+                self.emit(Instr::a1(OP_PUSH_STR, type_idx));
+                self.emit(Instr::none(OP_TYPE_CAST));
             }
         }
     }

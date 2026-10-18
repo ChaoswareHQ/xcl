@@ -10,7 +10,8 @@
 //!
 //! * **Statements**: Parsed using recursive descent with lookahead. Handled constructs include
 //!   variable assignments (`$x = 42`), loop statements (`for`, `while`), branch statements (`if`/`else`),
-//!   function definitions (`fn`), custom type definitions (`Point = { ... }`), and `defer` cleanup blocks.
+//!   function definitions (`name(args) { ... }`), custom type definitions (`Point = { ... }`),
+//!   trait implementations (`Human is Walk { ... }`), and `defer` cleanup blocks.
 //! * **Expressions**: Parsed using Pratt / precedence climbing to correctly resolve operator
 //!   precedence and associativity for arithmetic, comparisons, logical operations, and pipeline (`|>`) chaining.
 //!
@@ -58,6 +59,8 @@ struct Parser<'a> {
     tokens: &'a [TokenWithText],
     pos: usize,
     source: &'a str,
+    /// Tracks nesting depth of pipeline stages; when > 0, lambda bodies should not consume `|>`.
+    pipeline_depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -66,6 +69,7 @@ impl<'a> Parser<'a> {
             tokens,
             pos: 0,
             source,
+            pipeline_depth: 0,
         }
     }
 
@@ -114,6 +118,12 @@ impl<'a> Parser<'a> {
         let mut out = Vec::new();
         while !self.at_eof() {
             if self.at(Token::Semi) {
+                self.consume();
+                continue;
+            }
+            // Skip stray RBrace at program level — can happen if a block-lambda
+            // consumed a closing brace that belonged to an outer scope.
+            if self.at(Token::RBrace) {
                 self.consume();
                 continue;
             }
@@ -247,6 +257,14 @@ impl<'a> Parser<'a> {
                 self.consume();
             }
             while self.at(Token::IdentPlain) {
+                // Check if this IdentPlain is followed by `=` — that means it's a new
+                // assignment statement, not a variant name. Stop parsing variants.
+                if matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.token),
+                    Some(Token::Assign)
+                ) {
+                    break;
+                }
                 let vname = self.consume().text;
                 let mut fields = Vec::new();
                 if self.at(Token::LBrace) {
@@ -289,7 +307,7 @@ impl<'a> Parser<'a> {
             self.expect(Token::LBrace);
             let mut body = Vec::new();
             while !self.at(Token::RBrace) && !self.at_eof() {
-                if self.at(Token::Semi) {
+                if self.at(Token::Semi) || self.at(Token::Comma) {
                     self.consume();
                     continue;
                 }
@@ -393,6 +411,7 @@ impl<'a> Parser<'a> {
         false // reached EOF without `}` → block-lambda
     }
 
+    #[allow(dead_code)]
     #[inline]
     fn lookahead_dict_literal_at(&self, brace_pos: usize) -> bool {
         // brace_pos points AT the `{` token. Start scanning from brace_pos + 1.
@@ -448,9 +467,7 @@ impl<'a> Parser<'a> {
                 Token::RParen => depth -= 1,
                 _ => {}
             }
-            if depth > 0 {
-                i += 1;
-            }
+            i += 1;
         }
         if depth != 0 {
             return false;
@@ -550,8 +567,15 @@ impl<'a> Parser<'a> {
         let span = self.span();
         self.consume();
         let value = if !self.at_eof() && !self.at(Token::Semi) && !self.at(Token::RBrace) {
-            let e = self.expr();
-            Some(Box::new(self.bare_call_to_zero_arg(e)))
+            // Don't parse if the next token starts a function definition (nested fn)
+            // because expr() would try to parse it as a call
+            let is_fn_def = self.at(Token::IdentPlain) && self.lookahead_fn_def();
+            if is_fn_def {
+                None
+            } else {
+                let e = self.expr();
+                Some(Box::new(self.bare_call_to_zero_arg(e)))
+            }
         } else {
             None
         };
@@ -629,6 +653,7 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse `name(params) { body }` — function definition without `fn` keyword.
     fn fn_def(&mut self) -> AstNode {
         let span = self.span();
         let name = self.consume().text.clone();
@@ -681,8 +706,21 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> String {
-        let base = self.consume().text.clone();
-        if self.at(Token::Lt) {
+        let base = match self.current().map(|t| &t.token) {
+            Some(Token::Str) => { self.consume(); "str".to_string() }
+            Some(Token::I8) => { self.consume(); "i8".to_string() }
+            Some(Token::I16) => { self.consume(); "i16".to_string() }
+            Some(Token::I32) => { self.consume(); "i32".to_string() }
+            Some(Token::I64) => { self.consume(); "i64".to_string() }
+            Some(Token::U8) => { self.consume(); "u8".to_string() }
+            Some(Token::U16) => { self.consume(); "u16".to_string() }
+            Some(Token::U32) => { self.consume(); "u32".to_string() }
+            Some(Token::U64) => { self.consume(); "u64".to_string() }
+            Some(Token::F32) => { self.consume(); "f32".to_string() }
+            Some(Token::F64) => { self.consume(); "f64".to_string() }
+            _ => self.consume().text.clone(),
+        };
+        if matches!(self.current().map(|t| &t.token), Some(Token::Lt)) {
             self.consume();
             let mut args = Vec::new();
             args.push(self.parse_type());
@@ -845,7 +883,8 @@ impl<'a> Parser<'a> {
 
     fn expr(&mut self) -> AstNode {
         let mut e = self.coalesce();
-        while self.at(Token::Pipeline) {
+        // Only consume `|>` when not inside a pipeline stage's lambda body
+        while self.at(Token::Pipeline) && self.pipeline_depth == 0 {
             self.consume();
             e = self.pipeline_stage(e);
         }
@@ -933,15 +972,22 @@ impl<'a> Parser<'a> {
                 Some(Token::Is) => {
                     let span = self.span();
                     self.consume();
-                    // Check if the next token is a type name (IdentPlain) — type test
-                    if self.at(Token::IdentPlain) {
-                        let type_name = self.consume().text;
+                    // Check if the next token is a type name — type test
+                    // Accepts IdentPlain (custom types) and primitive type keywords
+                    let is_type_keyword = matches!(
+                        self.current().map(|t| &t.token),
+                        Some(Token::Str | Token::I8 | Token::I16 | Token::I32 | Token::I64
+                            | Token::U8 | Token::U16 | Token::U32 | Token::U64
+                            | Token::F32 | Token::F64 | Token::Bool | Token::Any)
+                    );
+                    if self.at(Token::IdentPlain) || is_type_keyword {
+                        let type_name = self.parse_type();
                         e = AstNode::TypeTest {
                             span,
                             value: Box::new(e),
                             type_name,
                         };
-                    } else {
+                    } else if self.looks_like_expr_start() {
                         // Fallback: equality check
                         let r = Box::new(self.primary());
                         e = AstNode::BinaryOp {
@@ -951,17 +997,19 @@ impl<'a> Parser<'a> {
                             right: r,
                         };
                     }
+                    // If not a valid expr start (e.g., `}`), treat `is` as part of the
+                    // left-hand side identifier and don't consume it as an operator.
                     continue;
                 }
                 Some(Token::As) => {
                     let span = self.span();
                     self.consume();
-                    let r = Box::new(self.primary());
-                    e = AstNode::BinaryOp {
+                    // Parse as type cast: `$x as i32`
+                    let type_name = self.parse_type();
+                    e = AstNode::TypeCast {
                         span,
-                        left: Box::new(e),
-                        op: BinaryOperator::Eq,
-                        right: r,
+                        value: Box::new(e),
+                        type_name,
                     };
                     continue;
                 }
@@ -1010,6 +1058,17 @@ impl<'a> Parser<'a> {
                 | Some(Token::IntOct)
                 | Some(Token::Ident)
                 | Some(Token::IdentPlain)
+                | Some(Token::Str)
+                | Some(Token::I8)
+                | Some(Token::I16)
+                | Some(Token::I32)
+                | Some(Token::I64)
+                | Some(Token::U8)
+                | Some(Token::U16)
+                | Some(Token::U32)
+                | Some(Token::U64)
+                | Some(Token::F32)
+                | Some(Token::F64)
                 | Some(Token::Sub)
                 | Some(Token::Not)
                 | Some(Token::Bang)
@@ -1102,7 +1161,7 @@ impl<'a> Parser<'a> {
                 return self
                     .tokens
                     .get(pos + 1)
-                    .map(|t| t.token == Token::Arrow)
+                    .map(|t| matches!(t.token, Token::Arrow | Token::RArrow))
                     .unwrap_or(false);
             }
             pos += 1;
@@ -1112,7 +1171,7 @@ impl<'a> Parser<'a> {
 
     fn lambda(&mut self) -> AstNode {
         let span = self.span();
-        self.consume();
+        self.consume(); // consume LParen
         let mut params = Vec::new();
         while !self.at(Token::RParen) && !self.at_eof() {
             let name = self.consume().text.trim_start_matches('$').to_string();
@@ -1122,7 +1181,51 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(Token::RParen);
-        self.expect(Token::Arrow);
+        // Accept both => and -> for lambda arrow
+        if self.at(Token::Arrow) || self.at(Token::RArrow) {
+            self.consume();
+        }
+        let body = Box::new(self.expr());
+        AstNode::Lambda {
+            span,
+            params,
+            body,
+        }
+    }
+
+    /// Lookahead: does [ look like an index ($arr[0]) or an array literal ([1, 2, 3])?
+    /// An index has a single expression followed by ]. An array has commas.
+    fn lookahead_index(&self) -> bool {
+        // self.pos points at LBracket. Scan from pos+1.
+        let mut i = self.pos + 1;
+        let mut depth = 1;
+        while i < self.tokens.len() && depth > 0 {
+            match self.tokens[i].token {
+                Token::LBracket | Token::LParen | Token::LBrace => depth += 1,
+                Token::RBracket | Token::RParen | Token::RBrace => depth -= 1,
+                Token::Comma if depth == 1 => return false, // comma at top level = array literal
+                _ => {}
+            }
+            if depth > 0 {
+                i += 1;
+            }
+        }
+        true // no comma found = index expression
+    }
+
+    /// Parse pipe-style lambda: |x, y| expr
+    fn pipe_lambda(&mut self) -> AstNode {
+        let span = self.span();
+        self.consume(); // consume first |
+        let mut params = Vec::new();
+        while !self.at(Token::Pipe) && !self.at_eof() {
+            let name = self.consume().text.trim_start_matches('$').to_string();
+            params.push(name);
+            if self.at(Token::Comma) || self.at(Token::Semi) {
+                self.consume();
+            }
+        }
+        self.expect(Token::Pipe); // consume closing |
         let body = Box::new(self.expr());
         AstNode::Lambda {
             span,
@@ -1133,6 +1236,28 @@ impl<'a> Parser<'a> {
 
     fn postfix(&mut self) -> AstNode {
         let mut e = self.primary();
+        // Track whether this expression starts with a domain function (IdentPlain)
+        // Domain functions like `collections.map` should not have [ ] index operations
+        // because [ ] after them is a call arg (array literal), not an index.
+        let starts_with_ident_plain = {
+            // Walk backwards from current position to find the first token of this expression
+            if self.pos > 0 {
+                let mut pos = self.pos - 1;
+                while pos < self.tokens.len()
+                    && matches!(
+                        self.tokens.get(pos).map(|t| &t.token),
+                        Some(Token::Dot | Token::OptionalDot | Token::Ident | Token::IdentPlain)
+                    )
+                    && pos > 0
+                {
+                    pos -= 1;
+                }
+                matches!(self.tokens.get(pos).map(|t| &t.token), Some(Token::IdentPlain))
+            } else {
+                false
+            }
+        };
+
         loop {
             match self.current().map(|t| &t.token) {
                 Some(Token::Dot) | Some(Token::OptionalDot) => {
@@ -1145,14 +1270,22 @@ impl<'a> Parser<'a> {
                     };
                 }
                 Some(Token::LBracket) => {
-                    self.consume();
-                    let idx = self.expr();
-                    self.expect(Token::RBracket);
-                    e = AstNode::Index {
-                        span: self.span(),
-                        target: Box::new(e),
-                        index: Box::new(idx),
-                    };
+                    // Lookahead: if [ is followed by ] or by expr,], it's an index.
+                    // If [ is followed by expr, expr, ... ], it's an array literal (call arg).
+                    // For domain functions (IdentPlain), [ ] is always a call arg.
+                    if starts_with_ident_plain || !self.lookahead_index() {
+                        // Skip — let call detection handle it as a call arg
+                        break;
+                    } else {
+                        self.consume();
+                        let idx = self.expr();
+                        self.expect(Token::RBracket);
+                        e = AstNode::Index {
+                            span: self.span(),
+                            target: Box::new(e),
+                            index: Box::new(idx),
+                        };
+                    }
                 }
                 _ => break,
             }
@@ -1255,6 +1388,7 @@ impl<'a> Parser<'a> {
             if matches!(self.tokens.get(next).map(|t| &t.token), Some(Token::Assign)) {
                 let name = self.consume().text.clone();
                 self.consume();
+                // Named args parse full expressions (they're unambiguous)
                 let value = self.expr();
                 return CallArg {
                     value,
@@ -1262,8 +1396,12 @@ impl<'a> Parser<'a> {
                 };
             }
         }
+        // Positional args parse at unary level so binary operators (>, <, ==, +, -)
+        // are handled by the precedence climbing above postfix.
+        // This means `math.sqrt 16 > 3` parses as `(math.sqrt 16) > 3`, not `math.sqrt (16 > 3)`.
+        // Use parentheses for multi-operator args: `math.add (1 + 2)`.
         CallArg {
-            value: self.expr(),
+            value: self.unary(),
             name: None,
         }
     }
@@ -1316,6 +1454,42 @@ impl<'a> Parser<'a> {
 
             Token::IdentPlain => {
                 let name = t.text.clone();
+                // Check if this looks like a function definition: `name( ... ) {` or `name( ... ) ->`
+                // If so, don't parse as a call — let the caller handle it
+                if self.at(Token::LParen) && self.lookahead_fn_def_from_paren() {
+                    return AstNode::Ident { span, name };
+                }
+                // Standard function call: `name(args)` — parse with parentheses
+                if self.at(Token::LParen) {
+                    self.consume(); // consume (
+                    let mut args = Vec::new();
+                    while !self.at(Token::RParen) && !self.at_eof() {
+                        if self.at(Token::Comma) {
+                            self.consume();
+                            continue;
+                        }
+                        // Named arg: `name = value`
+                        if self.at(Token::IdentPlain) {
+                            let next = self.pos + 1;
+                            if matches!(self.tokens.get(next).map(|t| &t.token), Some(Token::Assign)) {
+                                let aname = self.consume().text.clone();
+                                self.consume(); // =
+                                let aval = self.expr();
+                                args.push(CallArg { value: aval, name: Some(aname) });
+                                continue;
+                            }
+                        }
+                        let aval = self.expr();
+                        args.push(CallArg { value: aval, name: None });
+                    }
+                    self.expect(Token::RParen);
+                    return AstNode::Call {
+                        span: span.clone(),
+                        callee: Box::new(AstNode::Ident { span, name }),
+                        args,
+                    };
+                }
+                // Space-separated domain-style call: `domain func arg`
                 let mut args = Vec::new();
                 while self.looks_like_arg() {
                     args.push(self.call_arg());
@@ -1401,6 +1575,30 @@ impl<'a> Parser<'a> {
                 e
             }
 
+            Token::Pipe => {
+                // Pipe-style lambda: |x, y| expr
+                // Token already consumed, self.pos is at the first param
+                let saved_pos = self.pos - 1; // back to the Pipe token
+                // Reconstruct the parser state to call pipe_lambda
+                self.pos = saved_pos;
+                return self.pipe_lambda();
+            }
+
+            Token::If => {
+                // `if` as an expression: $x = if cond { a } else { b }
+                // Token already consumed, self.pos is past the If token
+                self.pos -= 1; // back to the If token
+                return self.if_expr();
+            }
+
+            Token::RArrow => {
+                // Bare -> in expression context — likely a lambda without params
+                panic!(
+                    "XCL {}:{}: unexpected '->' in expression. Did you mean '(x) -> expr' for a lambda?",
+                    t.span.file, t.span.line
+                )
+            }
+
             _ => panic!(
                 "XCL {}:{}: unexpected token {:?} ({})",
                 t.span.file, t.span.line, t.token, t.text
@@ -1436,15 +1634,24 @@ impl<'a> Parser<'a> {
                 )
             }
             Some(Token::LBrace) => {
-                // Allow { } as a block-lambda arg, but reject {key: val} dict literals
-                // Dict literals are never allowed as function arguments
-                !self.lookahead_dict_literal_at(self.pos)
+                // Allow both block-lambda { stmts } and dict literals { key: val } as args
+                true
             }
             Some(t) => matches!(
                 t,
-                Token::Fn
-                    | Token::Bool
+                Token::Bool
                     | Token::Any
+                    | Token::Str
+                    | Token::I8
+                    | Token::I16
+                    | Token::I32
+                    | Token::I64
+                    | Token::U8
+                    | Token::U16
+                    | Token::U32
+                    | Token::U64
+                    | Token::F32
+                    | Token::F64
                     | Token::Int
                     | Token::Float
                     | Token::IntHex
@@ -1458,6 +1665,7 @@ impl<'a> Parser<'a> {
                     | Token::None_
                     | Token::LBracket
                     | Token::LParen
+                    | Token::Pipe
             ),
         }
     }
@@ -1500,16 +1708,49 @@ impl<'a> Parser<'a> {
                     | Some(Token::MulAssign)
                     | Some(Token::DivAssign)
             ),
+            Some(Token::IdentPlain) => {
+                // IdentPlain can be a positional arg (e.g., `allow file.read "/data/"`)
+                // but NOT if it looks like a type definition (`Name =`), impl (`Name is`),
+                // or bare function definition (`Name(`).
+                let next = self.tokens.get(self.pos + 1).map(|t| &t.token);
+                // Skip if it's an assignment: `$x = value` or `Name = {`
+                if matches!(next, Some(Token::Assign) | Some(Token::Colon)) {
+                    return false;
+                }
+                // Skip if it's `Name is Trait`
+                if matches!(next, Some(Token::Is)) {
+                    return false;
+                }
+                // Skip if it's `Name(` (bare function definition at statement level)
+                // But allow it in expression context (like `allow file.read`)
+                // The key: if followed by `(` and then `{` or `->`, it's a fn def
+                if matches!(next, Some(Token::LParen)) {
+                    // Check if this looks like a function definition
+                    if self.lookahead_fn_def_at(self.pos) {
+                        return false;
+                    }
+                }
+                true
+            }
             Some(Token::LBrace) => {
-                // Allow { } as a block-lambda arg, but reject {key: val} dict literals
-                // Dict literals are never allowed as function arguments
-                !self.lookahead_dict_literal_at(self.pos)
+                // Allow both block-lambda { stmts } and dict literals { key: val } as args
+                true
             }
             Some(t) => matches!(
                 t,
-                Token::Fn
-                    | Token::Bool
+                Token::Bool
                     | Token::Any
+                    | Token::Str
+                    | Token::I8
+                    | Token::I16
+                    | Token::I32
+                    | Token::I64
+                    | Token::U8
+                    | Token::U16
+                    | Token::U32
+                    | Token::U64
+                    | Token::F32
+                    | Token::F64
                     | Token::Int
                     | Token::Float
                     | Token::IntHex
@@ -1523,23 +1764,90 @@ impl<'a> Parser<'a> {
                     | Token::None_
                     | Token::LBracket
                     | Token::LParen
+                    | Token::Pipe
             ),
         }
     }
 
+    /// Check if position looks like a bare function definition: `Name( ... ) {` or `Name( ... ) ->`
+    fn lookahead_fn_def_at(&self, pos: usize) -> bool {
+        if !matches!(self.tokens.get(pos).map(|t| &t.token), Some(Token::IdentPlain)) {
+            return false;
+        }
+        if !matches!(self.tokens.get(pos + 1).map(|t| &t.token), Some(Token::LParen)) {
+            return false;
+        }
+        // Find matching closing paren
+        let mut depth = 1;
+        let mut i = pos + 2;
+        while i < self.tokens.len() && depth > 0 {
+            match self.tokens[i].token {
+                Token::LParen => depth += 1,
+                Token::RParen => depth -= 1,
+                _ => {}
+            }
+            if depth > 0 {
+                i += 1;
+            }
+        }
+        if depth != 0 {
+            return false;
+        }
+        // After closing paren, expect { or ->
+        matches!(
+            self.tokens.get(i).map(|t| &t.token),
+            Some(Token::LBrace) | Some(Token::RArrow)
+        )
+    }
+
     fn pipeline_stage(&mut self, input: AstNode) -> AstNode {
         let span = self.span();
-        let name = self.consume().text.clone();
+        // Parse the pipeline stage name, which can be a dotted path like `collections.filter`
+        let mut name = self.consume().text.clone();
+        while self.at(Token::Dot) {
+            self.consume(); // consume Dot
+            let field = self.consume().text.clone();
+            name = format!("{}.{}", name, field);
+        }
+        // Increment pipeline depth so lambda bodies don't consume the next `|>` stage.
+        self.pipeline_depth += 1;
         let arg = if self.looks_like_arg() {
             Some(Box::new(self.expr()))
         } else {
             None
         };
+        self.pipeline_depth -= 1;
         AstNode::Pipeline {
             span,
             input: Box::new(input),
             stages: vec![PipelineStage { name, arg }],
         }
+    }
+
+    /// Check if current position (at LParen) looks like a function definition.
+    /// Used by primary() to avoid parsing `name()` as a call when it's a fn def.
+    fn lookahead_fn_def_from_paren(&self) -> bool {
+        // self.pos points at LParen. Scan for matching RParen.
+        let mut depth = 1;
+        let mut i = self.pos + 1;
+        while i < self.tokens.len() && depth > 0 {
+            match self.tokens[i].token {
+                Token::LParen => depth += 1,
+                Token::RParen => depth -= 1,
+                _ => {}
+            }
+            if depth > 0 {
+                i += 1;
+            }
+        }
+        if depth != 0 {
+            return false;
+        }
+        // After closing paren, expect { or ->
+        matches!(
+            self.tokens.get(i).map(|t| &t.token),
+            Some(Token::LBrace) | Some(Token::RArrow)
+        )
     }
 }
 

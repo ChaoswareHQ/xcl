@@ -1,0 +1,9 @@
+# Test: PATCH request
+# Tests: https.patch
+
+$response = https.patch "https://httpbin.org/patch" '{"patch":"data"}' none
+print "PATCH Status:" $response.status
+print "PATCH OK:" $response.ok
+if $response.ok {
+    print "PASS: PATCH request succeeded"
+}

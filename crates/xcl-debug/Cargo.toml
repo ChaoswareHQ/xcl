@@ -1,0 +1,17 @@
+[package]
+name = "xcl-debug"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+homepage.workspace = true
+
+[[bin]]
+name = "xcl-debug"
+path = "src/main.rs"
+
+[dependencies]
+xcl-vm.workspace = true

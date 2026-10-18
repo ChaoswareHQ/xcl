@@ -1,0 +1,20 @@
+# Test: Response headers and bytes
+# Tests: response.headers, response.bytes, response.content_type
+
+$response = https.get "https://httpbin.org/get" none
+print "Status:" $response.status
+print "Content-Type:" $response.content_type
+print "Content-Length:" $response.content_length
+print "Final URL:" $response.final_url
+
+# Check headers map
+$headers = $response.headers
+print "Headers type:" type $headers
+
+# Check bytes array
+$bytes = $response.bytes
+print "Bytes type:" type $bytes
+
+if $response.ok {
+    print "PASS: Response has all fields"
+}

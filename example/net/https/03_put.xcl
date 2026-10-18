@@ -1,0 +1,9 @@
+# Test: PUT request
+# Tests: https.put, update operation
+
+$response = https.put "https://httpbin.org/put" '{"key":"value"}' none
+print "PUT Status:" $response.status
+print "PUT OK:" $response.ok
+if $response.ok {
+    print "PASS: PUT request succeeded"
+}

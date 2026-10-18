@@ -1,0 +1,47 @@
+# Test the deploy function structure
+deploy(account, domain) {
+    # Load credentials
+    $env = io.read_env ".env"
+    if $env.is_err {
+        print "FATAL: Missing .env"
+        return none
+    }
+
+    # Cloudflare deployment
+    cloudflare $account {
+        # Check DNS
+        $dns = api.list "dns/records"
+        if $dns.is_ok {
+            $matching = collections.filter $dns.value {
+                |record| record.name == $domain
+            }
+
+            if collections.array_len $matching > 0 {
+                $record = collections.array_get $matching 0
+                print "Updating:" $record.id
+            }
+        }
+
+        # Deploy worker
+        $code = "worker code"
+        $deploy = function.deploy "my-worker" $code
+
+        # Analytics pipeline
+        $analytics = api.request "analytics/query" {
+            since: "-1h"
+            until: "now"
+        }
+        if $analytics.is_ok {
+            $data = $analytics.value
+            print "Requests:" $data.requests
+            print "Threats:" $data.threats
+        }
+    }
+
+    # Post-deployment report
+    $report = text.format "Deployed to {}" $domain
+    io.file.write "/data/output/report.txt" $report
+    print $report
+}
+
+deploy "my-account" "app.example.com"

@@ -1,0 +1,13 @@
+# Test with block lambda
+
+cloudflare "my-account" {
+    $dns = api.list "dns/records"
+    if $dns.is_ok {
+        $matching = collections.filter $dns.value {
+            $record = $dns.value[0]
+            $record.name == "test"
+        }
+    }
+}
+
+print "Done"

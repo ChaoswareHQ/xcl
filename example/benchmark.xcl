@@ -1,0 +1,674 @@
+# ============================================
+# COMPREHENSIVE XCL PARSER BENCHMARK
+# Tests all syntax features to find parser errors
+# ============================================
+
+# ============================================
+# 1. LITERALS
+# ============================================
+
+# Integers
+$int1 = 42
+$int2 = -10
+$hex = 0xFF
+$bin = 0b1010
+$oct = 0o755
+$big = 1_000_000
+
+# Floats
+$float1 = 3.14159
+$float2 = 0.0
+$float3 = -2.5
+
+# Strings
+$str1 = "hello world"
+$str2 = 'single quotes'
+$str3 = r"raw string C:\path\to\file"
+$multiline = """
+    multiline
+    string
+    content
+"""
+
+# Booleans
+$bool1 = true
+$bool2 = false
+
+# Nil
+$nil = none
+
+# ============================================
+# 2. ARRAYS & DICTS
+# ============================================
+
+# Arrays
+$arr1 = [1, 2, 3, 4, 5]
+$arr2 = []
+$arr3 = ["a", "b", "c"]
+$nested = [[1, 2], [3, 4]]
+
+# Dicts
+$dict1 = { host: "localhost", port: 8080 }
+$dict2 = {}
+$nested_dict = {
+    database: { host: "db.local", port: 5432 }
+    cache: { enabled: true }
+}
+
+# Complex dict with various types
+$complex = {
+    name: "test"
+    count: 42
+    ratio: 3.14
+    active: true
+    empty: none
+    items: [1, 2, 3]
+    nested: { key: "value" }
+}
+
+# ============================================
+# 3. VARIABLE ASSIGNMENTS
+# ============================================
+
+# Simple assignment
+$x = 10
+$y = 20
+
+# Type-annotated assignment
+$typed: str = "typed string"
+$number: int = 100
+
+# Compound assignments
+$a = 10
+$a += 5
+$a -= 3
+$a *= 2
+$a /= 4
+
+# Null coalescing assignment
+$maybe = none
+$maybe ??= "default"
+
+# ============================================
+# 4. FIELD ACCESS & INDEXING
+# ============================================
+
+# Dot access
+$host = $dict1.host
+$port = $dict1.port
+
+# Nested access
+$dbHost = $nested_dict.database.host
+
+# Safe navigation
+$safe = $dict1?.missing?.deep
+
+# Index access
+$first = $arr1[0]
+$last = $arr1[4]
+
+# ============================================
+# 5. BINARY OPERATORS
+# ============================================
+
+# Arithmetic
+$add = 10 + 20
+$sub = 100 - 50
+$mul = 10 * 5
+$div = 100 / 10
+$mod = 17 % 5
+
+# Precedence test
+$prec1 = 10 + 20 * 3       # Should be 70
+$prec2 = (10 + 20) * 3     # Should be 90
+
+# Comparison
+$eq = 10 == 10
+$ne = 10 != 20
+$lt = 5 < 10
+$gt = 10 > 5
+$le = 5 <= 5
+$ge = 10 >= 5
+
+# Logical
+$and1 = true and true
+$or1 = false or true
+$and2 = true && true
+$or2 = false || true
+
+# Null coalescing
+$coalesce = $nil ?? "fallback"
+
+# Membership
+$in1 = "a" in ["a", "b", "c"]
+$in2 = 5 in [1, 2, 3, 4, 5]
+
+# ============================================
+# 6. UNARY OPERATORS
+# ============================================
+
+$neg = -10
+$not1 = not true
+$not2 = !false
+
+# ============================================
+# 7. RANGES
+# ============================================
+
+$range1 = 1..10
+$range2 = 0..10
+$range3 = 5..100
+
+# ============================================
+# 8. FUNCTION DEFINITIONS
+# ============================================
+
+# Basic function
+greet(name) {
+    print "Hello, " name "!"
+}
+
+# Function with return type
+add(a, b) -> int {
+    a + b
+}
+
+# Function with type-annotated params
+divide(x: float, y: float) -> float {
+    x / y
+}
+
+# Function with default params
+connect(host, port = 443) {
+    print "Connecting to " host ":" port
+}
+
+# Function with return statement
+max(a, b) {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+# Function with multiple statements
+complex(x, y) {
+    $temp = x + y
+    $result = $temp * 2
+    if $result > 100 {
+        return 100
+    }
+    return $result
+}
+
+# ============================================
+# 9. LAMBDAS
+# ============================================
+
+# Single-expression lambda
+$double = (x) -> x * 2
+$square = (x) -> x * x
+
+# Multi-parameter lambda
+$add = (a, b) -> a + b
+
+# Block lambda
+$process = (item) {
+    $upper = text.upper item
+    text.trim $upper
+}
+
+# Zero-param block lambda
+$task = {
+    print "Running task"
+    42
+}
+
+# ============================================
+# 10. PIPELINE OPERATOR
+# ============================================
+
+# Simple pipeline
+$result1 = [1, 2, 3, 4, 5]
+    |> collections.filter (x) -> x > 2
+    |> collections.map (x) -> x * 10
+
+# Pipeline with reduce
+$result2 = [1, 2, 3, 4, 5]
+    |> collections.filter (x) -> x > 2
+    |> collections.map (x) -> x * 10
+    |> collections.reduce 0 (acc, x) -> acc + x
+
+# ============================================
+# 11. CONTROL FLOW
+# ============================================
+
+# If/else as expression
+$message = if $int1 > 10 {
+    "big number"
+} else {
+    "small number"
+}
+
+# If without else
+if $bool1 {
+    print "True branch"
+}
+
+# Nested if/else
+$grade = if $int1 >= 90 {
+    "A"
+} else {
+    if $int1 >= 80 {
+        "B"
+    } else {
+        "C"
+    }
+}
+
+# For loop
+$total = 0
+for $item in $arr1 {
+    $total += $item
+}
+
+# For with break and continue
+for $item in $arr1 {
+    if $item == 3 {
+        continue
+    }
+    if $item > 4 {
+        break
+    }
+    print $item
+}
+
+# While loop
+$i = 0
+while $i < 10 {
+    $i += 1
+}
+
+# ============================================
+# 12. TYPE DEFINITIONS
+# ============================================
+
+# Record type
+User = {
+    name: str
+    age: int
+    email: str
+}
+
+# Create instance
+$alice = User {
+    name: "Alice"
+    age: 30
+    email: "alice@example.com"
+}
+
+# Sum type (tagged union)
+Status = |
+    Pending |
+    Active |
+    Completed |
+    Failed
+|
+
+# Sum type with data
+Result = |
+    Ok { value: any } |
+    Err { message: str }
+|
+
+# Use sum type variants
+$ok = Result.Ok { value: 42 }
+$err = Result.Err { message: "not found" }
+
+# Trait definition
+Printable = {
+to_string() -> str
+summary() -> str
+}
+
+# ============================================
+# 13. TRAIT IMPLEMENTATIONS
+# ============================================
+
+MyService is CloudService {
+bucket_create(name) {
+        api.create "storage/buckets" {
+            name: name
+        }
+    }
+bucket_list() {
+        api.list "storage/buckets"
+    }
+}
+
+# ============================================
+# 14. TYPE TESTS
+# ============================================
+
+$isPrintable = $alice is Printable
+
+# ============================================
+# 15. DEFER
+# ============================================
+
+$file = io.file.open "log.txt"
+defer {
+    io.file.close $file
+}
+
+# ============================================
+# 16. DOMAIN FUNCTIONS
+# ============================================
+
+# Math
+$sqrt = math.sqrt 16
+$abs = math.abs -10
+$pi = math.pi
+
+# Text
+$upper = text.upper "hello"
+$lower = text.lower "HELLO"
+$trimmed = text.trim "  hi  "
+$split = text.split "a,b,c" ","
+$joined = text.join ["a", "b"] "-"
+
+# Collections
+$len = collections.array_len $arr1
+$get = collections.array_get $arr1 0
+$pushed = collections.array_push $arr1 6
+
+# File I/O
+$content = io.file.read "config.json"
+$wrote = io.file.write "out.txt" "data"
+$exists = io.file.exists "config.json"
+
+# System
+$timestamp = sys.now
+$hostname = sys.hostname
+
+# JSON
+$parsed = json.parse '{"key":"value"}'
+$stringified = json.stringify $dict1
+
+# ============================================
+# 17. HTTPS (URL with colons - CRITICAL TEST)
+# ============================================
+
+# Simple URL - this often fails with colon parsing
+$response1 = https.get "https://api.example.com/data"
+
+# URL with query params
+$response2 = https.get "https://api.example.com/search?q=test&page=1"
+
+# URL with port
+$response3 = https.get "https://localhost:8080/api"
+
+# POST with body
+$response4 = https.post "https://api.example.com/data" '{"key":"value"}'
+
+# HTTPS with options map
+$response5 = https.get "https://api.example.com/data" {
+    timeout: 5000
+    query: { page: 1, limit: 10 }
+    headers: { Authorization: "Bearer token123" }
+}
+
+# Complex HTTPS request
+$response6 = https.request "POST" "https://api.example.com/submit" {
+    timeout: 10000
+    query: { action: "create" }
+    headers: {
+        "Content-Type": "application/json"
+        "Authorization": "Bearer secret"
+    }
+    body: '{"name":"test","value":42}'
+}
+
+# ============================================
+# 18. CONTEXT BLOCKS
+# ============================================
+
+# Cloud provider context
+cloudflare "my-account" {
+    $config = cloudflare.config
+    $buckets = bucket.list ""
+    $dns = api.list "dns/records"
+
+    # Nested contexts
+    bucket "my-bucket" {
+        $objects = bucket.list ""
+        $put = bucket.put "file.txt" "content"
+    }
+}
+
+# Domain-scoped operations
+domain.run "bucket.name" "xcl-test" {
+    $list = bucket.list ""
+    $put = bucket.put "hello.txt" "Hello!"
+}
+
+# ============================================
+# 19. SECURITY POLICY
+# ============================================
+
+sec.policy {
+    allow file.read "/data/"
+    allow network.connect "api.cloudflare.com"
+    deny process.exec
+    limit memory 512mb
+    limit cpu_time 60s
+}
+
+# ============================================
+# 20. ERROR HANDLING
+# ============================================
+
+$op = io.file.read "config.json"
+if $op.is_ok {
+    $data = $op.value
+    $parsed = json.parse $data
+    print "Loaded config"
+}
+if $op.is_err {
+    print "Error:" $op.error.message
+    sys.exit 1
+}
+
+# ============================================
+# 21. BLOCKS
+# ============================================
+
+# Block as expression
+$result = {
+    $temp = 10 + 20
+    $temp * 2
+}
+
+# Block with multiple statements
+{
+    $local = "only visible here"
+    print $local
+}
+
+# ============================================
+# 22. COMPLEX REAL-WORLD EXAMPLE
+# ============================================
+deploy(account, domain) {
+    # Load credentials
+    $env = io.read_env ".env"
+    if $env.is_err {
+        print "FATAL: Missing .env"
+        return none
+    }
+
+    # Define security policy
+    sec.policy {
+        allow file.read "/data/"
+        allow network.connect "api.cloudflare.com"
+        deny process.exec
+        limit memory 512mb
+    }
+
+    # Cloudflare deployment
+    cloudflare $account {
+        # Check DNS
+        $dns = api.list "dns/records"
+        if $dns.is_ok {
+            $matching = collections.filter $dns.value {
+                |record| record.name == $domain
+            }
+
+            if collections.array_len $matching > 0 {
+                $record = collections.array_get $matching 0
+                print "Updating:" $record.id
+            }
+        }
+
+        # Deploy worker
+        $code = """
+            addEventListener('fetch', event => {
+                event.respondWith(new Response('Hello!'));
+            });
+        """
+        $deploy = function.deploy "my-worker" $code
+
+        # Analytics pipeline
+        $analytics = api.request "analytics/query" {
+            since: "-1h"
+            until: "now"
+        }
+        if $analytics.is_ok {
+            $data = $analytics.value
+            print "Requests:" $data.requests
+            print "Threats:" $data.threats
+        }
+    }
+
+    # Post-deployment report
+    $report = text.format "Deployed to {}" $domain
+    io.file.write "/data/output/report.txt" $report
+    print $report
+}
+
+# Call the function
+deploy "my-account" "app.example.com"
+
+# ============================================
+# 23. EDGE CASES
+# ============================================
+
+# Empty blocks
+$empty_block = { }
+
+# Nested parentheses
+$nested_parens = ((1 + 2) * (3 + 4))
+
+# Complex expression
+$complex_expr = (10 + 20) * 3 - (40 / 5) + (6 % 4)
+
+# Multiple operators
+$multi_op = 10 + 20 * 3 - 40 / 5
+
+# String concatenation
+$concat = "Hello" ", " "World" "!"
+
+# Function call with multiple args
+$multi_arg = math.add 1 2
+
+# Lambda in pipeline
+$pipeline_lambda = [1, 2, 3] |> collections.map (x) -> x * 2
+
+# Dict with function calls
+$dict_calls = {
+    name: text.upper "test"
+    count: collections.array_len [1, 2, 3]
+    active: true
+}
+
+# Array with expressions
+$arr_exprs = [1 + 2, 3 * 4, 5 - 6]
+
+# ============================================
+# 24. URL PARSING (CRITICAL TEST)
+# ============================================
+
+# Parse URL with https://
+$parsed_url = https.parse_url "https://api.example.com:8080/path?query=value"
+
+# Build URL
+$built_url = https.build_url "https" "api.example.com" 443 "/path"
+
+# ============================================
+# 25. FUNCTION CALLS WITH VARIOUS SYNTAX
+# ============================================
+
+# Bare call (no parens)
+$bare = sys.now
+
+# Single arg
+$single = math.sqrt 16
+
+# Multiple args
+$multiple = math.add 1 2
+
+# Dict arg
+$dict_arg = api.create "dns/records" {
+    type: "A"
+    name: "example.com"
+    content: "1.2.3.4"
+}
+
+# Array arg
+$array_arg = collections.array_len [1, 2, 3]
+
+# Lambda arg
+$lambda_arg = collections.map [1, 2, 3] (x) -> x * 2
+
+# ============================================
+# 26. COMPOUND ASSIGNMENTS
+# ============================================
+
+$compound = 10
+$compound += 5
+$compound -= 3
+$compound *= 2
+$compound /= 4
+
+# ============================================
+# 27. SAFE NAVIGATION CHAIN
+# ============================================
+
+$safe_chain = $complex?.nested?.missing?.deep?.very_deep
+
+# ============================================
+# 28. MEMBERSHIP IN COMPLEX STRUCTURES
+# ============================================
+
+$member1 = "key" in { key: "value" }
+$member2 = 5 in [1, 2, 3, 4, 5]
+$member3 = "substring" in "this is a test string"
+
+# ============================================
+# 29. NULL COALESCING CHAIN
+# ============================================
+
+$coalesce_chain = $nil ?? $maybe ?? "final default"
+
+# ============================================
+# 30. LOGICAL OPERATOR PRECEDENCE
+# ============================================
+
+$logic1 = true and false or true
+$logic2 = true or false and false
+$logic3 = (true or false) and false
+
+# ============================================
+# END OF BENCHMARK
+# ============================================
+
+print "Benchmark complete"

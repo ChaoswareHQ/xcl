@@ -1152,6 +1152,77 @@ impl NativeArg for usize {
     }
 }
 
+// — Custom type to Value conversion —
+
+/// Trait for converting custom Rust structs into a typed [`Value`] map.
+///
+/// The `#[xcl_impl]` macro detects when a method returns a type that implements
+/// this trait and calls `.into_value()` automatically, so the method returns
+/// a properly typed map instead of a generic `Value`.
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(Xcl)]
+/// pub struct HttpResponse;
+///
+/// impl IntoValue for HttpResponse {
+///     fn into_value(self) -> Value {
+///         let mut m = HashMap::new();
+///         m.insert("status".to_string(), Value::from_i48(self.status));
+///         m.insert("body".to_string(), Value::from_str_boxed(self.body));
+///         Value::from_map_boxed(m)
+///     }
+/// }
+/// ```
+pub trait IntoValue {
+    /// Convert this struct into a [`Value`] map.
+    fn into_value(self) -> Value;
+}
+
+impl IntoValue for Value {
+    fn into_value(self) -> Value {
+        self
+    }
+}
+
+impl IntoValue for String {
+    fn into_value(self) -> Value {
+        Value::from_str_boxed(self)
+    }
+}
+
+impl IntoValue for i64 {
+    fn into_value(self) -> Value {
+        Value::from_i48(self)
+    }
+}
+
+impl IntoValue for i32 {
+    fn into_value(self) -> Value {
+        Value::from_i48(self as i64)
+    }
+}
+
+impl IntoValue for f64 {
+    fn into_value(self) -> Value {
+        Value::from_f64(self)
+    }
+}
+
+impl IntoValue for bool {
+    fn into_value(self) -> Value {
+        Value::bool(self)
+    }
+}
+
+impl<T: IntoValue> IntoValue for Vec<T> {
+    fn into_value(self) -> Value {
+        let arr: Vec<Value> = self.into_iter().map(|t| t.into_value()).collect();
+        Value::from_array_boxed(arr)
+    }
+}
+
 /// Executable function descriptor containing bytecode and closure environment.
 #[derive(Clone, Debug)]
 pub struct FuncValue {
@@ -1199,6 +1270,10 @@ pub struct NativeEntry {
     pub summary: Option<&'static str>,
     /// Description pairs for each argument: `(name, description)`.
     pub arg_desc: &'static [(&'static str, &'static str)],
+    /// If true, this method is eligible for auto-import: bare identifiers like `map` will
+    /// resolve to `collections.map` when the domain is auto-import enabled.
+    /// Domains like `https` should set this to false to avoid conflicts (e.g., `get` is too common).
+    pub auto_import: bool,
 }
 
 /// A wrapper around a raw function pointer that implements [`Sync`] and [`Send`].

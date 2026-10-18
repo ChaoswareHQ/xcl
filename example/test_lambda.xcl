@@ -1,0 +1,20 @@
+# Minimal lambda test
+
+# Test arrow lambda
+$double = (x) -> x * 2
+print $double
+
+# Test arrow lambda with $ param
+$triple = ($x) -> $x * 3
+print $triple
+
+# Test pipe lambda
+$quad = |x| x * 4
+print $quad
+
+# Test in function call
+$arr = [1, 2, 3]
+$result = collections.map $arr (x) -> x * 2
+print $result
+
+print "Lambda tests passed"

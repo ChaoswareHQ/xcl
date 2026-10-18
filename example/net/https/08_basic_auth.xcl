@@ -1,0 +1,20 @@
+# Test: Basic Auth
+# Tests: auth option in request
+
+$response = https.get "https://httpbin.org/basic-auth/user/passwd" {
+    auth: { user: "user", pass: "passwd" }
+}
+print "Auth Status:" $response.status
+print "Auth OK:" $response.ok
+if $response.ok {
+    print "PASS: Basic auth succeeded"
+}
+
+# Test wrong credentials
+$wrong = https.get "https://httpbin.org/basic-auth/user/passwd" {
+    auth: { user: "user", pass: "wrong" }
+}
+print "Wrong auth status:" $wrong.status
+if $wrong.is_client_error {
+    print "PASS: Wrong auth detected as client error"
+}

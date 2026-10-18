@@ -11,6 +11,10 @@
 //! let result = xcl_plugins::evaluate("print \"hello\"", &mut vm);
 //! ```
 
+mod io;
+mod fs;
+mod net;
+
 pub use xcl_vm;
 
 use xcl_vm::{VM, Value};

@@ -121,15 +121,45 @@ pub enum Token {
     #[token("as")]
     As,
 
-    /// `fn` function definition keyword.
-    #[token("fn")]
-    Fn,
     /// `bool` type keyword.
     #[token("bool")]
     Bool,
     /// `any` dynamic type keyword.
     #[token("any")]
     Any,
+    /// `str` string type keyword.
+    #[token("str")]
+    Str,
+    /// `i8` type keyword.
+    #[token("i8")]
+    I8,
+    /// `i16` type keyword.
+    #[token("i16")]
+    I16,
+    /// `i32` type keyword.
+    #[token("i32")]
+    I32,
+    /// `i64` type keyword.
+    #[token("i64")]
+    I64,
+    /// `u8` type keyword.
+    #[token("u8")]
+    U8,
+    /// `u16` type keyword.
+    #[token("u16")]
+    U16,
+    /// `u32` type keyword.
+    #[token("u32")]
+    U32,
+    /// `u64` type keyword.
+    #[token("u64")]
+    U64,
+    /// `f32` type keyword.
+    #[token("f32")]
+    F32,
+    /// `f64` type keyword.
+    #[token("f64")]
+    F64,
 
     /// Variable identifier prefixed with `$` (e.g. `$total`, `$x_1`).
     #[regex(r"\$[a-zA-Z_][a-zA-Z0-9_]*")]
@@ -361,12 +391,12 @@ impl LineMap {
 /// ```
 /// use xcl_vm::lexer::{lex, Token};
 ///
-/// let source = "fn add(a, b) { a + b }";
+/// let source = "add(a, b) { a + b }";
 /// let tokens = lex(source, "math.xcl");
 ///
-/// assert_eq!(tokens[0].token, Token::Fn);
-/// assert_eq!(tokens[1].text, "add");
-/// assert_eq!(tokens[2].token, Token::LParen);
+/// assert_eq!(tokens[0].token, Token::IdentPlain);
+/// assert_eq!(tokens[0].text, "add");
+/// assert_eq!(tokens[1].token, Token::LParen);
 /// ```
 #[inline]
 pub fn lex(source: &str, file: &str) -> Vec<TokenWithText> {

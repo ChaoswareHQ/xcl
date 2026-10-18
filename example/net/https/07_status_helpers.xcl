@@ -1,0 +1,25 @@
+# Test: Status helpers
+# Tests: is_redirect, is_client_error, is_server_error
+
+# Test 404 client error
+$response = https.get "https://httpbin.org/status/404" none
+print "404 Status:" $response.status
+print "is_client_error:" $response.is_client_error
+print "is_server_error:" $response.is_server_error
+print "ok:" $response.ok
+if $response.is_client_error {
+    print "PASS: 404 detected as client error"
+}
+
+# Test 500 server error
+$response2 = https.get "https://httpbin.org/status/500" none
+print "500 Status:" $response2.status
+print "is_server_error:" $response2.is_server_error
+if $response2.is_server_error {
+    print "PASS: 500 detected as server error"
+}
+
+# Test 301 redirect
+$response3 = https.get "https://httpbin.org/status/301" none
+print "301 Status:" $response3.status
+print "is_redirect:" $response3.is_redirect

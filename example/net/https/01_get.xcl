@@ -1,0 +1,17 @@
+# Test: Basic GET request
+# Tests: https.get, response fields (status, body, ok, content_type, content_length)
+
+$response = https.get "https://httpbin.org/get" none
+print "GET Status:" $response.status
+print "GET OK:" $response.ok
+print "Content-Type:" $response.content_type
+print "Content-Length:" $response.content_length
+print "Final URL:" $response.final_url
+
+# Verify response structure
+if $response.ok {
+    print "PASS: GET request succeeded"
+}
+if $response.content_type != "" {
+    print "PASS: Content-Type received"
+}

@@ -13,3 +13,6 @@ homepage.workspace = true
 xcl-macros.workspace = true
 xcl-vm.workspace = true
 linkme.workspace = true
+ureq = { workspace = true, default-features = false, features = ["_tls", "json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
