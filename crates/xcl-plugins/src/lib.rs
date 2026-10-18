@@ -11,9 +11,14 @@
 //! let result = xcl_plugins::evaluate("print \"hello\"", &mut vm);
 //! ```
 
+#[cfg(feature = "io")]
 mod io;
+#[cfg(feature = "fs")]
 mod fs;
+#[cfg(feature = "net")]
 mod net;
+#[cfg(feature = "encoding")]
+mod encoding;
 
 pub use xcl_vm;
 

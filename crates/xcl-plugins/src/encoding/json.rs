@@ -1,5 +1,3 @@
-<<<<<<< HEAD
-=======
 //! JSON encoding and decoding for XCL values.
 //!
 //! Converts between XCL `Value` and `serde_json::Value` bidirectionally.
@@ -342,4 +340,3 @@ mod tests {
         assert_eq!(s, "42");
     }
 }
->>>>>>> 1aea8a05633db723e7f0ce648f5ca4182fce7072

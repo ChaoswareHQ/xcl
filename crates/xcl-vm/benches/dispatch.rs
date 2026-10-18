@@ -239,6 +239,118 @@ fn bench_string_concat(c: &mut Criterion) {
     vm.print_opcode_histogram(15);
 }
 
+/// Fast-path integer arithmetic: exercises the int+int fast path in OP_ADD, OP_SUB, OP_MUL
+fn bench_fastpath_int_arithmetic(c: &mut Criterion) {
+    let source = r#"
+        $i = 0
+        $a = 1
+        $b = 2
+        $c = 3
+        while $i < 20000 {
+            $a = $a + $b
+            $b = $b - 1
+            $c = $c * 2
+            $a = $a / 2
+            $b = $b % 3
+            $i = $i + 1
+        }
+        $a
+    "#;
+
+    let mut vm = VM::new();
+    vm.register_all();
+    c.bench_function("fastpath_int_arithmetic_20k", |b| {
+        b.iter(|| {
+            let result = evaluate(black_box(source), black_box(&mut vm));
+            #[cfg(feature = "opcode-stats")]
+            {
+                vm.arena.reset();
+            }
+            result
+        })
+    });
+    #[cfg(feature = "opcode-stats")]
+    vm.print_opcode_histogram(15);
+}
+
+/// Fast-path float arithmetic: exercises the float+float fast path
+fn bench_fastpath_float_arithmetic(c: &mut Criterion) {
+    let source = r#"
+        $i = 0
+        $a = 1.5
+        $b = 2.5
+        $c = 3.14
+        while $i < 20000 {
+            $a = $a + $b
+            $b = $b - 0.5
+            $c = $c * 1.1
+            $a = $a / 2.0
+            $i = $i + 1
+        }
+        $a
+    "#;
+
+    let mut vm = VM::new();
+    vm.register_all();
+    c.bench_function("fastpath_float_arithmetic_20k", |b| {
+        b.iter(|| {
+            let result = evaluate(black_box(source), black_box(&mut vm));
+            #[cfg(feature = "opcode-stats")]
+            {
+                vm.arena.reset();
+            }
+            result
+        })
+    });
+    #[cfg(feature = "opcode-stats")]
+    vm.print_opcode_histogram(15);
+}
+
+/// Fast-path comparison: exercises int/int and float/float comparison fast paths
+fn bench_fastpath_comparison(c: &mut Criterion) {
+    let source = r#"
+        $i = 0
+        $count = 0
+        while $i < 20000 {
+            if $i < 10000 {
+                $count = $count + 1
+            }
+            if $i > 5000 {
+                $count = $count + 1
+            }
+            if $i <= 15000 {
+                $count = $count + 1
+            }
+            if $i >= 100 {
+                $count = $count + 1
+            }
+            if $i == 10000 {
+                $count = $count + 1
+            }
+            if $i != 0 {
+                $count = $count + 1
+            }
+            $i = $i + 1
+        }
+        $count
+    "#;
+
+    let mut vm = VM::new();
+    vm.register_all();
+    c.bench_function("fastpath_comparison_20k", |b| {
+        b.iter(|| {
+            let result = evaluate(black_box(source), black_box(&mut vm));
+            #[cfg(feature = "opcode-stats")]
+            {
+                vm.arena.reset();
+            }
+            result
+        })
+    });
+    #[cfg(feature = "opcode-stats")]
+    vm.print_opcode_histogram(15);
+}
+
 criterion_group!(
     benches,
     bench_arithmetic_loop,
@@ -250,5 +362,8 @@ criterion_group!(
     bench_branching,
     bench_nested_calls,
     bench_string_concat,
+    bench_fastpath_int_arithmetic,
+    bench_fastpath_float_arithmetic,
+    bench_fastpath_comparison,
 );
 criterion_main!(benches);

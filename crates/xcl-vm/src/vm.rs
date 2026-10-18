@@ -727,67 +727,167 @@ impl VM {
             OP_ADD => {
                 let b = self.pop();
                 let a = self.pop();
-                self.push(a.add(b, &self.arena));
+                if a.is_int() && b.is_int() {
+                    let ai = a.as_i48();
+                    let bi = b.as_i48();
+                    if let Some(sum) = ai.checked_add(bi) {
+                        self.push(Value::from_i48(sum));
+                    } else {
+                        self.push(Value::from_f64(ai as f64 + bi as f64));
+                    }
+                } else if a.is_float() && b.is_float() {
+                    self.push(Value::from_f64(a.as_f64() + b.as_f64()));
+                } else {
+                    self.push(a.add(b, &self.arena));
+                }
                 Action::Next
             }
             OP_SUB => {
                 let b = self.pop();
                 let a = self.pop();
-                self.push(a.sub_(b));
+                if a.is_int() && b.is_int() {
+                    let ai = a.as_i48();
+                    let bi = b.as_i48();
+                    if let Some(diff) = ai.checked_sub(bi) {
+                        self.push(Value::from_i48(diff));
+                    } else {
+                        self.push(Value::from_f64(ai as f64 - bi as f64));
+                    }
+                } else if a.is_float() && b.is_float() {
+                    self.push(Value::from_f64(a.as_f64() - b.as_f64()));
+                } else {
+                    self.push(a.sub_(b));
+                }
                 Action::Next
             }
             OP_MUL => {
                 let b = self.pop();
                 let a = self.pop();
-                self.push(a.mul(b, &self.arena));
+                if a.is_int() && b.is_int() {
+                    let ai = a.as_i48();
+                    let bi = b.as_i48();
+                    if let Some(prod) = ai.checked_mul(bi) {
+                        self.push(Value::from_i48(prod));
+                    } else {
+                        self.push(Value::from_f64(ai as f64 * bi as f64));
+                    }
+                } else if a.is_float() && b.is_float() {
+                    self.push(Value::from_f64(a.as_f64() * b.as_f64()));
+                } else {
+                    self.push(a.mul(b, &self.arena));
+                }
                 Action::Next
             }
             OP_DIV => {
                 let b = self.pop();
                 let a = self.pop();
-                self.push(a.div_(b));
+                if a.is_int() && b.is_int() {
+                    let bi = b.as_i48();
+                    if bi == 0 {
+                        self.push(Value::from_f64(f64::INFINITY));
+                    } else {
+                        self.push(Value::from_i48(a.as_i48() / bi));
+                    }
+                } else if a.is_float() && b.is_float() {
+                    self.push(Value::from_f64(a.as_f64() / b.as_f64()));
+                } else {
+                    self.push(a.div_(b));
+                }
                 Action::Next
             }
             OP_MOD => {
                 let b = self.pop();
                 let a = self.pop();
-                self.push(a.mod_(b));
+                if a.is_int() && b.is_int() {
+                    let bi = b.as_i48();
+                    if bi == 0 {
+                        self.push(Value::from_f64(f64::NAN));
+                    } else {
+                        self.push(Value::from_i48(a.as_i48() % bi));
+                    }
+                } else if a.is_float() && b.is_float() {
+                    self.push(Value::from_f64(a.as_f64() % b.as_f64()));
+                } else {
+                    self.push(a.mod_(b));
+                }
                 Action::Next
             }
             OP_EQ => {
                 let b = self.pop();
                 let a = self.pop();
-                self.push(Value::bool(a.eq_(b)));
+                let result = if a.is_int() && b.is_int() {
+                    a.as_i48() == b.as_i48()
+                } else if a.is_float() && b.is_float() {
+                    a.as_f64() == b.as_f64()
+                } else {
+                    a.eq_(b)
+                };
+                self.push(Value::bool(result));
                 Action::Next
             }
             OP_NEQ => {
                 let b = self.pop();
                 let a = self.pop();
-                self.push(Value::bool(!a.eq_(b)));
+                let result = if a.is_int() && b.is_int() {
+                    a.as_i48() != b.as_i48()
+                } else if a.is_float() && b.is_float() {
+                    a.as_f64() != b.as_f64()
+                } else {
+                    !a.eq_(b)
+                };
+                self.push(Value::bool(result));
                 Action::Next
             }
             OP_LT => {
                 let b = self.pop();
                 let a = self.pop();
-                self.push(Value::bool(a.lt(b)));
+                let result = if a.is_int() && b.is_int() {
+                    a.as_i48() < b.as_i48()
+                } else if a.is_float() && b.is_float() {
+                    a.as_f64() < b.as_f64()
+                } else {
+                    a.lt(b)
+                };
+                self.push(Value::bool(result));
                 Action::Next
             }
             OP_GT => {
                 let b = self.pop();
                 let a = self.pop();
-                self.push(Value::bool(a.gt(b)));
+                let result = if a.is_int() && b.is_int() {
+                    a.as_i48() > b.as_i48()
+                } else if a.is_float() && b.is_float() {
+                    a.as_f64() > b.as_f64()
+                } else {
+                    a.gt(b)
+                };
+                self.push(Value::bool(result));
                 Action::Next
             }
             OP_LE => {
                 let b = self.pop();
                 let a = self.pop();
-                self.push(Value::bool(a.lt(b) || a.eq_(b)));
+                let result = if a.is_int() && b.is_int() {
+                    a.as_i48() <= b.as_i48()
+                } else if a.is_float() && b.is_float() {
+                    a.as_f64() <= b.as_f64()
+                } else {
+                    a.lt(b) || a.eq_(b)
+                };
+                self.push(Value::bool(result));
                 Action::Next
             }
             OP_GE => {
                 let b = self.pop();
                 let a = self.pop();
-                self.push(Value::bool(a.gt(b) || a.eq_(b)));
+                let result = if a.is_int() && b.is_int() {
+                    a.as_i48() >= b.as_i48()
+                } else if a.is_float() && b.is_float() {
+                    a.as_f64() >= b.as_f64()
+                } else {
+                    a.gt(b) || a.eq_(b)
+                };
+                self.push(Value::bool(result));
                 Action::Next
             }
             OP_AND => {

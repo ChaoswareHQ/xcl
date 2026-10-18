@@ -1,6 +1,6 @@
 # XCL
 
-XCL is a scripting language built on a fast, stack-based virtual machine written in Rust. It features NaN-boxed value representation, bump allocation for fast temporary objects, a rich standard library organized into domains, and a pipeline-friendly syntax.
+XCL is a scripting language built on a fast, stack-based virtual machine written in Rust. It features NaN-boxed value representation, bump allocation for fast temporary objects, a rich standard library organized into domains, auto-import for convenient bare-identifier calls, and a pipeline-friendly syntax inspired by Rust and functional languages.
 
 ## Quick Start
 
@@ -10,6 +10,9 @@ cargo run -p xcl-cli -- script.xcl
 
 # Evaluate an expression inline
 cargo run -p xcl-cli -- -e 'print "Hello, world!"'
+
+# Debug parser issues
+cargo run -p xcl-debug -- --tree script.xcl
 ```
 
 ## Language Walkthrough
@@ -29,7 +32,7 @@ XCL uses **NaN-boxing** to represent all values in a single 64-bit word. Primiti
 | None | Absence of a value | `none` |
 | Array | Ordered list | `[1, 2, 3]` |
 | Map | Key-value store | `{ name: "Alice", age: 30 }` |
-| Function | Callable block | `fn add(a, b) { a + b }` |
+| Function | Callable block | `add(a, b) { a + b }` |
 
 **Integer overflow:** When integer arithmetic exceeds 48 bits, XCL automatically falls back to floating-point representation without raising an error.
 
@@ -38,6 +41,33 @@ $x = 42
 $pi = 3.14159
 $flag = true
 $empty = none
+```
+
+### Primitive Type Keywords
+
+XCL supports Rust-like primitive type keywords for type annotations and type tests:
+
+| Keyword | Type | Description |
+|---|---|---|
+| `i8` | Signed 8-bit integer | -128 to 127 |
+| `i16` | Signed 16-bit integer | -32,768 to 32,767 |
+| `i32` | Signed 32-bit integer | Standard integer size |
+| `i64` | Signed 64-bit integer | Large signed integers |
+| `u8` | Unsigned 8-bit integer | 0 to 255 |
+| `u16` | Unsigned 16-bit integer | 0 to 65,535 |
+| `u32` | Unsigned 32-bit integer | Standard unsigned size |
+| `u64` | Unsigned 64-bit integer | Large unsigned integers |
+| `f32` | 32-bit float | Single precision |
+| `f64` | 64-bit float | Double precision |
+| `str` | String | UTF-8 text |
+| `bool` | Boolean | true/false |
+| `any` | Dynamic | Any type |
+
+```xcl
+$count: i32 = 42
+$price: f64 = 19.99
+$name: str = "Alice"
+$active: bool = true
 ```
 
 ### Variables
@@ -181,35 +211,50 @@ for $i in 0..100 {
 
 ### Functions
 
-Declare functions with the `fn` keyword. The last expression is returned implicitly, or use `return` for an explicit return.
+Declare functions without any keyword — just the name, parameters, and body block:
 
 ```xcl
-fn add(a, b) {
+add(a, b) {
     a + b
 }
 
-fn greet(name) {
+greet(name) {
     return "Hello, " + name
 }
 
-result = add 3 4
+$result = add 3 4
 ```
 
-**Lambda functions** use the `=>` arrow syntax with explicit parameters:
+Functions support typed parameters and return type annotations:
 
 ```xcl
-$double = ($x) => $x * 2
-print $double 21  # 42
+calculate(a: i32, b: f64) -> f64 {
+    $result = a + b
+    return $result
+}
+```
+
+**Lambda functions** support three syntax styles:
+
+```xcl
+# Arrow lambda — explicit params in parens
+$square = (x) -> x * x
+
+# Pipe lambda — concise, like Rust closures
+$double = |x| x * 2
+
+# Block lambda — for multi-statement bodies
+$complex = { |x, y| x + y }
 ```
 
 Lambdas can capture variables from their enclosing scope:
 
 ```xcl
 $multiplier = 10
-$scale = ($x) => $x * $multiplier
+$scale = (x) -> x * $multiplier
 ```
 
-**Note:** The `$it` implicit parameter has been removed. All lambda parameters must be declared explicitly.
+**Note:** All lambda parameters must be declared explicitly.
 
 ### Arrays
 
@@ -239,9 +284,9 @@ print $person.age    # 30
 
 ### Custom Types
 
-XCL supports defining custom types through **record types** and **sum types** (tagged unions).
+XCL supports defining custom types through **record types**, **sum types** (tagged unions/enums), and **traits** (interfaces) — all without any special keywords.
 
-**Record types** define structured data with named, typed fields:
+**Record types** use assignment syntax to define structured data with named, typed fields:
 
 ```xcl
 Point = {
@@ -255,40 +300,52 @@ Person = {
 }
 ```
 
-A record with only method definitions becomes a **trait** (interface) automatically. Records with fields are data types.
-
-**Sum types** (tagged unions) define a type that can be one of several variants:
+**Sum types** (enums/tagged unions) define a type that can be one of several variants using the `|` separator:
 
 ```xcl
-Shape = | Circle { r: f64 } | Square { side: f64 } | Line
+# Simple unit variants
+Direction = Left | Right | Up | Down
 
-Message = | Text { content: str } | Image { url: str }
+# Enum with associated data
+Message = Text { content: str } | Image { url: str, width: u32 } | Empty
+
+# Mixed variants
+Command = Stop | Move { x: i32, y: i32 } | Jump { height: f64 }
 ```
 
-Each variant can carry its own set of fields, or be unit-like (e.g., `Line` with no fields). Variants are separated by the `|` pipe operator.
+Each variant can carry its own set of fields, or be unit-like (e.g., `Stop` with no fields).
 
-### Traits and Interfaces
-
-A **trait** defines a set of method signatures that a type must implement. When a type definition contains only methods (no fields), XCL treats it as a trait:
+**Traits** (interfaces) are defined as types containing only method signatures (no fields):
 
 ```xcl
 Drawable = {
-    draw() -> none
-    area() -> f64
+    draw() { }
+    resize(width: u32, height: u32) { }
 }
 ```
 
-Implement a trait on a type using an **impl block** with the `is` keyword:
+**Trait implementation** uses the `is` keyword. Multiple traits are listed with commas:
 
 ```xcl
-Circle is Drawable {
-    draw() {
-        print "Drawing circle"
-    }
+Clickable = {
+    click() { }
+}
 
-    area() {
-        math.pi * r * r
+# Single trait
+Button is Drawable {
+    draw() {
+        print "drawing button"
     }
+    resize(w: u32, h: u32) {
+        print "resizing"
+    }
+}
+
+# Multiple traits
+Widget is Drawable, Clickable {
+    draw() { print "drawing" }
+    resize(w: u32, h: u32) { print "resizing" }
+    click() { print "clicked" }
 }
 ```
 
@@ -299,15 +356,15 @@ Annotate variables and function parameters with explicit types using the `:` syn
 ```xcl
 # Variable type annotation
 $name: str = "Alice"
-$count: i64 = 42
+$count: i32 = 42
 
 # Function parameter types
-fn greet(name: str, age: i64) {
+greet(name: str, age: i32) {
     print "Hello, " + name
 }
 
 # Return type annotation
-fn add(a: i64, b: i64) -> i64 {
+add(a: i32, b: i32) -> i32 {
     a + b
 }
 ```
@@ -316,25 +373,32 @@ Type annotations help document intent and enable the compiler to perform type ch
 
 ### Type Testing
 
-Check the runtime type of a value with the `is` keyword:
+Check the runtime type of a value with the `is` operator:
 
 ```xcl
-if $value is String {
+if $value is str {
     print "it's a string"
 }
 
-if $shape is Circle {
-    print "it's a circle with radius " + $shape.r
+if $number is i32 {
+    print "it's an integer"
+}
+
+# Enum variant test
+$dir = Left
+if $dir is Left {
+    print "going left"
 }
 ```
 
 ### Type Casting
 
-Use the `as` keyword to cast between types. A failed cast returns `none`.
+Use the `as` operator to cast between types:
 
 ```xcl
-$number = "42" as int
-$text = 42 as string
+$raw = 42
+$casted = $raw as i32
+$float_cast = $raw as f64
 ```
 
 ### Domains
@@ -343,40 +407,50 @@ XCL organizes standard library functions into **domains** (namespaces). Function
 
 ```xcl
 io.print "Hello, world!"
-math.sqrt 16
-encoding.json.stringify $data
+net.https.get "https://api.example.com/data"
+encoding.json.parse '{"key": "value"}'
 ```
 
-Domains can be nested into subdomains:
+### Auto-Import
+
+Certain domains support **auto-import**, allowing their methods to be called as bare identifiers without the domain prefix. This is enabled for commonly-used domains like `io` and `fs`:
 
 ```xcl
-cloud.aws.sign "GET" "https://s3.amazonaws.com/" ""
+# These work without domain prefix (auto-import enabled)
+print "Hello, world!"      # Same as io.print
+$input = input "Name: "    # Same as io.input
+$content = read "file.txt" # Same as fs.read
+write "out.txt" $content   # Same as fs.write
+
+# These require full qualification (auto-import disabled to avoid conflicts)
+net.https.get "https://api.example.com/data"
+net.tcp.connect "127.0.0.1" 8080
 ```
+
+Domains like `net.https` disable auto-import because method names like `get`, `post` are too common and would conflict with other code.
 
 ### Domain Expansion
 
-Domain expansion lets you set a context for a block of code, so the domain methods are available without repeating the full path. This is especially useful for cloud providers, databases, and other services that require configuration.
+Domain expansion lets you set a context for a block of code, so the domain methods are available without repeating the full path. This is especially useful for cloud providers and services that require configuration.
 
 **Domain blocks** establish a context scope with a configuration value:
 
 ```xcl
-aws "us-east-1" {
-    $config = aws.config()
+cloud "aws" "us-east-1" {
+    $config = cloud.config
     print "Region:" $config.region
 }
 ```
 
-Inside the block, `aws.config()` returns the configuration for the region set by the block.
-
-**Nested domain blocks** allow switching contexts within a scope. The inner block temporarily overrides the outer context, and the outer context is restored automatically when the inner block exits:
+**Nested domain blocks** allow switching contexts within a scope:
 
 ```xcl
-aws "us-east-1" {
-    aws "eu-west-1" {
-        $config = aws.config()
+cloud "aws" "us-east-1" {
+    cloud "aws" "eu-west-1" {
+        $config = cloud.config
         print "Nested region:" $config.region  # eu-west-1
     }
-    $config = aws.config()
+    $config = cloud.config
     print "Restored region:" $config.region    # us-east-1
 }
 ```
@@ -384,155 +458,130 @@ aws "us-east-1" {
 **Domain values** can be set and retrieved using `domain.run` and `domain.get`:
 
 ```xcl
-aws "us-east-1" {
-    domain.run "bucket.name" "my-test-bucket" {
-        $bucket = domain.get "bucket.name"
-        print "Bucket context:" $bucket  # my-test-bucket
-    }
+domain.run "bucket.name" "my-test-bucket" {
+    $bucket = domain.get "bucket.name"
+    print "Bucket context:" $bucket  # my-test-bucket
 }
 ```
 
-`domain.run` sets a key-value pair in the domain context for the duration of the block, and `domain.get` retrieves it.
-
-**Cloud provider contexts** use `cloud.run` with the provider name and region as positional string arguments:
+**Bare calls** at statement boundaries automatically expand to zero-argument calls:
 
 ```xcl
-cloud.run "aws" "us-east-1" {
-    $provider = cloud.get
-    $config = cloud.config
-    print "Provider:" $provider
-    print "Region:" $config.region
-}
-```
-
-**Bare calls** at statement boundaries automatically expand to zero-argument calls. Writing `cloudflare.config` is equivalent to `cloudflare.config()`:
-
-```xcl
-cloudflare "" {
-    $config = cloudflare.config    # equivalent to cloudflare.config()
-    print "Account:" $config.account
-}
-```
-
-This also works for methods on `$`-variables:
-
-```xcl
-$result = bucket.create "test"
-if $result.is_ok {       # equivalent to $result.is_ok()
-    print "Created"
-}
-```
-
-**Space-separated arguments** are the only calling style in XCL. Arguments follow the function name directly without parentheses:
-
-```xcl
-aws.sign "GET" "https://s3.amazonaws.com/" ""
-print "Hello, world!"
-```
-
-Parenthesized arguments like `func("arg")` are not allowed — use space-separated form instead.
-
-**Dict literals are not allowed as function arguments.** Configuration must be passed as positional string arguments:
-
-```xcl
-# Correct — positional strings
-cloud.run "aws" "us-east-1" {
-    print "Running in AWS"
-}
-
-# Illegal — dict literals as arguments are rejected
-# cloud.run "aws" { region: "us-east-1" } { ... }
-```
-
-**Method calls on domain results** use dot notation to access properties or call methods on the value returned by a domain function:
-
-```xcl
-$response = net.get "https://api.example.com/data"
-print $response.body
-print $response.status
-```
-
-**Cloud provider domains** use domain expansion to manage credentials, regions, and service contexts. Each provider (AWS, Azure, GCP, Cloudflare, Alibaba, etc.) provides its own domain block and a set of service methods:
-
-```xcl
-cloudflare "" {
-    # R2 bucket operations
-    $create = bucket.create "xcl-test-bucket"
-    if $create.is_ok {
-        print "Bucket created"
-    }
-
-    # Workers function operations
-    $workers = function.list
-    if $workers.is_ok {
-        print "Workers list: OK"
-    }
+cloud "aws" "us-east-1" {
+    $config = cloud.config    # equivalent to cloud.config()
 }
 ```
 
 ### Standard Library Domains
 
-| Domain | Purpose |
-|---|---|
-| `io` | Input/output: `print`, `input`, file operations |
-| `math` | Mathematics: `sqrt`, `pi`, `random`, complex numbers, matrices |
-| `encoding` | Data formats: JSON, YAML, TOML, XML, CSV, hex |
-| `net` | Networking: TCP, UDP, HTTP, DNS, TLS |
-| `cloud` | Cloud providers: AWS (S3, Lambda, API Gateway) |
-| `text` | String manipulation and processing |
-| `collections` | Array and dictionary utilities |
-| `util` | Cross-platform utilities: OS, environment, paths, time |
-| `core` | Foundational types: `Error`, `Result`, traits |
-| `lang` | Language introspection and support |
+| Domain | Purpose | Auto-Import |
+|---|---|---|
+| `io` | Console I/O: `print`, `println`, `input`, file read/write/seek | ✓ Yes |
+| `fs` | Filesystem: `read`, `write`, `exists`, `copy`, `remove`, `mkdir`, `list_dir` | ✓ Yes |
+| `net.https` | HTTPS client: `get`, `post`, `put`, `delete`, `patch`, `head`, `options` | ✗ No |
+| `net.http` | HTTP client (non-TLS) | ✗ No |
+| `net.tcp` | TCP socket: `connect`, `listen`, `accept`, `send`, `recv` | ✗ No |
+| `net.udp` | UDP socket: `bind`, `send_to`, `recv_from` | ✗ No |
+| `net.tls` | TLS connections | ✗ No |
+| `net.dns` | DNS resolution | ✗ No |
+| `net.ssh` | SSH connections | ✗ No |
+| `encoding.json` | JSON: `parse`, `stringify`, `pretty` | ✗ No |
+| `encoding.yaml` | YAML: `parse`, `stringify` | ✗ No |
+| `encoding.toml` | TOML: `parse`, `stringify` | ✗ No |
+| `encoding.csv` | CSV: `parse`, `stringify` | ✗ No |
+| `encoding.xml` | XML: `parse`, `stringify` | ✗ No |
+| `cloud` | Cloud providers: AWS, Azure, GCP, Alibaba, OCI, IBM, GitHub | ✗ No |
+| `collections.arr` | Array utilities: `map`, `filter`, `reduce`, `sort`, `reverse`, `first`, `last`, `flatten`, `unique`, `chunk`, `zip`, `concat`, `slice`, `contains`, `index_of`, `join`, `sum`, `min`, `max`, `avg` | ✗ No |
+| `collections.dict` | Dictionary utilities: `keys`, `values`, `entries`, `get`, `set`, `has`, `size`, `merge`, `filter`, `map` | ✗ No |
+| `collections.defer` | Deferred execution | ✗ No |
+| `core.result` | Result type: `ok`, `err`, `is_ok`, `is_err`, `unwrap`, `unwrap_or`, `map`, `map_err`, `and_then`, `or_else` | ✗ No |
+| `domain` | Domain context management: `run`, `get`, `set`, `clear` | ✗ No |
+| `math.scalar` | Scalar math: `sqrt`, `abs`, `min`, `max`, `round`, `floor`, `ceil`, `pow`, `log`, `sin`, `cos`, `tan`, `pi`, `random` | ✗ No |
+| `math.complex` | Complex numbers | ✗ No |
+| `math.vec` | Vector math | ✗ No |
+| `math.mat` | Matrix math | ✗ No |
+| `math.quat` | Quaternion math | ✗ No |
+| `text.str` | String manipulation: `upper`, `lower`, `trim`, `split`, `join`, `replace`, `contains`, `starts_with`, `ends_with`, `length` | ✗ No |
+| `sys.env` | Environment variables: `get`, `set`, `list` | ✗ No |
+| `sys.os` | OS information: `name`, `version`, `arch` | ✗ No |
+| `sys.process` | Process management: `spawn`, `kill`, `pid` | ✗ No |
+| `sys.time` | Time utilities: `now`, `sleep`, `timestamp` | ✗ No |
+| `sys.signal` | Signal handling | ✗ No |
+| `sys.thread` | Thread management | ✗ No |
+| `sys.socket` | Low-level socket operations | ✗ No |
+| `sys.syscall` | System calls | ✗ No |
+| `ffi` | Foreign Function Interface: `load`, `call`, `symbol`, `free` | ✗ No |
+| `lang` | Language introspection | ✗ No |
+| `plugin` | Plugin system | ✗ No |
+| `proc` | Process execution | ✗ No |
+| `util` | Cross-platform utilities | ✗ No |
 
-**Example — I/O:**
+**Example — I/O (auto-imported):**
 
 ```xcl
-io.print "Enter your name: "
-$name = io.input()
-io.print "Hello, " + $name
+print "Enter your name: "
+$name = input
+print "Hello, " + $name
 ```
 
-**Example — Math:**
+**Example — Filesystem (auto-imported):**
 
 ```xcl
-math.sqrt 16          # 4.0
-math.pi               # 3.14159...
-math.random           # a random number
+$content = read "data.txt"
+write "output.txt" $content
+if exists "config.json" {
+    print "Config found"
+}
 ```
 
-**Example — Encoding:**
+**Example — HTTPS:**
 
 ```xcl
+$response = net.https.get "https://api.example.com/users"
+print $response.body
+print $response.status
+```
+
+**Example — JSON:**
+
+```xcl
+$data = { "name": "Alice", "age": 30 }
 $json = encoding.json.stringify $data
-$parsed = encoding.json.parse $jsonString
-```
-
-**Example — Networking:**
-
-```xcl
-$response = net.get "https://api.example.com/data"
-$body = $response.body
+$parsed = encoding.json.parse $json
 ```
 
 **Example — Cloud with domain expansion:**
 
 ```xcl
-aws "us-east-1" {
-    $config = aws.config()
-    $signed = aws.sign "GET" "https://s3.amazonaws.com/" ""
-
-    domain.run "bucket.name" "my-bucket" {
-        $bucket = domain.get "bucket.name"
-        print "Working with bucket:" $bucket
-    }
+cloud "aws" "us-east-1" {
+    $config = cloud.config
+    print "Provider:" $config.provider
+    print "Region:" $config.region
 }
+```
 
-# Or use cloud.run directly with positional args
-cloud.run "aws" "us-east-1" {
-    $provider = cloud.get
-    print "Provider:" $provider
-}
+**Example — Collections:**
+
+```xcl
+# Array operations
+$squares = collections.arr.map [1, 2, 3, 4, 5] (x) -> x * x
+$evens = collections.arr.filter $squares (x) -> x % 2 == 0
+
+# Pipeline style
+$result = [1, 2, 3, 4, 5] |> collections.arr.map (x) -> x * 2
+```
+
+**Example — FFI:**
+
+```xcl
+# Load a shared library
+$lib = ffi.load "libexample.so"
+
+# Call an exported function
+$result = ffi.call $lib "my_function"
+
+# Unload library
+ffi.free $lib
 ```
 
 ### Result and Error Types
@@ -553,7 +602,7 @@ Source code → Lexer → Parser → Compiler → Bytecode → VM → Output
 ```
 
 1. **Lexing** — Source code is tokenized by a DFA-based lexer (powered by `logos`). Punctuation and keywords are zero-allocation.
-2. **Parsing** — Tokens are parsed into an abstract syntax tree (AST).
+2. **Parsing** — Tokens are parsed into an abstract syntax tree (AST) using a Pratt parser with full support for lambdas, pipelines, type definitions, and context blocks.
 3. **Compilation** — The AST is compiled to bytecode instructions.
 4. **Execution** — The stack-based VM interprets the bytecode.
 
@@ -568,27 +617,61 @@ Source code → Lexer → Parser → Compiler → Bytecode → VM → Output
 | Crate | Description |
 |---|---|
 | `xcl-vm` | Core VM: lexer, parser, bytecode compiler, and runtime |
-| `xcl-macros` | Procedural macros: `#[xcl_fn]` for native functions, `#[xcl_type]` for type descriptors |
-| `xcl-plugins` | Standard library plugins: `io`, `math`, `encoding`, `net`, `cloud`, and more |
+| `xcl-macros` | Procedural macros: `#[xcl_fn]` for native functions, `#[derive(Xcl)]` for type registration, `#[xcl_impl]` for impl blocks |
+| `xcl-plugins` | Standard library plugins: all domains (io, fs, net, encoding, cloud, ffi, etc.) |
 | `xcl-cli` | Command-line interface for running XCL scripts |
+| `xcl-debug` | Parser debug tool: tokenize, parse, and visualize AST trees |
 | `xcl-doc` | Documentation generator that reads macro metadata and produces an HTML site |
 | `xcl-decompile` | Bytecode decompiler for inspecting compiled programs |
 
 ## Writing Native Functions
 
-Extend XCL from Rust using the `#[xcl_fn]` procedural macro:
+Extend XCL from Rust using the `#[xcl_fn]` procedural macro. The macro auto-detects domain and method name from the function name (e.g., `io_open` → domain=`io`, method=`open`):
 
 ```rust
 use xcl_macros::xcl_fn;
 use xcl_vm::Value;
 
-#[xcl_fn(name = "greet", domain = "std", args = "name: str", ret = "str")]
-pub fn greet_fn(name: &str) -> Value {
+/// Greet a user by name.
+#[xcl_fn]
+pub fn io_greet(name: &str) -> Value {
     Value::from_str_boxed(format!("Hello, {}!", name))
 }
 ```
 
-The macro handles registration with the VM at compile time using `linkme`, with zero runtime overhead.
+For impl blocks, use `#[xcl_impl]` with optional `auto_import` to enable bare-identifier calls:
+
+```rust
+use xcl_macros::{Xcl, xcl_impl};
+
+#[derive(Xcl)]
+pub struct MyDomain;
+
+#[xcl_impl(auto_import)]
+impl MyDomain {
+    /// Print a message.
+    pub fn print(text: String) {
+        println!("{}", text);
+    }
+}
+```
+
+The macros handle registration with the VM at compile time using `linkme`, with zero runtime overhead.
+
+## Parser Debug Tool
+
+The `xcl-debug` tool helps diagnose parser issues by tokenizing and visualizing XCL code:
+
+```bash
+# Show token stream
+cargo run -p xcl-debug -- --tokens script.xcl
+
+# Show AST tree
+cargo run -p xcl-debug -- --tree script.xcl
+
+# Show verbose AST with line:column spans
+cargo run -p xcl-debug -- --tree --verbose script.xcl
+```
 
 ## Documentation Generation
 
@@ -615,7 +698,7 @@ Options:
 
 ## Building
 
-XCL is written in Rust and supports `no_std` environments.
+XCL is written in Rust and supports `no_std` environments. Optimized with trimmed dependencies for minimal binary size (~1 MB release build).
 
 ```bash
 # Build all crates
@@ -625,12 +708,12 @@ cargo build --release
 cargo run -p xcl-cli -- script.xcl
 
 # Run tests
-cargo test
+cargo test --workspace
 ```
 
 ## Examples
 
-See the [`example/`](example/) directory for sample XCL scripts, including cloud provider integration examples.
+See the [`example/`](example/) directory for sample XCL scripts covering all language features, including HTTPS, cloud providers, lambdas, and the comprehensive benchmark.
 
 ## Contributing
 
