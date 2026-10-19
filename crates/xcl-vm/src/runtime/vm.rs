@@ -27,9 +27,9 @@
 //! Running bytecode with a virtual machine:
 //!
 //! ```
-//! use xcl_vm::VM;
-//! use xcl_vm::lexer::lex;
-//! use xcl_vm::parser::parse;
+//! use xcl_vm::runtime::VM;
+//! use xcl_vm::compiler::lexer::lex;
+//! use xcl_vm::compiler::parser::parse;
 //! use xcl_vm::bytecode::compile;
 //!
 //! let mut vm = VM::new();
@@ -69,7 +69,7 @@ use hashbrown::HashMap;
 use std::collections::HashMap;
 
 use crate::bytecode::*;
-use crate::value::{BuiltinImpl, ImplDescriptor, TAG_INT, TraitDescriptor, TypeDescriptor, Value};
+use crate::runtime::value::{BuiltinImpl, ImplDescriptor, TAG_INT, TraitDescriptor, TypeDescriptor, Value};
 use bumpalo::Bump;
 use smallvec::SmallVec;
 
@@ -225,11 +225,11 @@ pub struct VM {
     /// Fast bump allocator arena for temporary heap objects created during execution.
     pub arena: Bump,
     /// Registry of well-known constructor and type names (`Ok`, `Err`, `Result`).
-    pub well_known: crate::wellknown::WellKnown,
+    pub well_known: crate::utils::wellknown::WellKnown,
     pub(crate) frames: Vec<Frame>,
     /// Pending frame to be pushed onto the frame stack (used by OP_CALL).
     pending: Option<Frame>,
-    closures: Vec<crate::value::FuncValue>,
+    closures: Vec<crate::runtime::value::FuncValue>,
     /// Stack-based context for domain blocks (e.g., `browser "brave" { ... }`).
     /// Each key maps to a stack of values, enabling nested domain contexts.
     pub(crate) context_stack: HashMap<String, Vec<Value>>,
@@ -282,8 +282,8 @@ impl VM {
     ///
     /// # Arguments
     ///
-    /// * `wk` - Configured [`crate::wellknown::WellKnown`] metadata.
-    pub fn set_well_known(&mut self, wk: crate::wellknown::WellKnown) {
+    /// * `wk` - Configured [`crate::utils::wellknown::WellKnown`] metadata.
+    pub fn set_well_known(&mut self, wk: crate::utils::wellknown::WellKnown) {
         self.well_known = wk;
     }
 
@@ -331,17 +331,17 @@ impl VM {
     /// Scans the distributed [`crate::native::NATIVE_REGISTRY`] slice
     /// and populates the VM's domain and global dispatch tables.
     pub fn register_all_natives(&mut self) {
-        use crate::native::NATIVE_REGISTRY;
-        use crate::value::{BuiltinImpl, NativeKind};
+        use crate::utils::native::NATIVE_REGISTRY;
+        use crate::runtime::value::{BuiltinImpl, NativeKind};
 
         for entry in NATIVE_REGISTRY.iter() {
             let impl_ = match entry.kind {
                 NativeKind::Pure => {
-                    let f: crate::value::BuiltinFn = unsafe { core::mem::transmute(entry.ptr.0) };
+                    let f: crate::runtime::value::BuiltinFn = unsafe { core::mem::transmute(entry.ptr.0) };
                     BuiltinImpl::Pure(f)
                 }
                 NativeKind::Ctx => {
-                    let f: crate::value::BuiltinCtxFn =
+                    let f: crate::runtime::value::BuiltinCtxFn =
                         unsafe { core::mem::transmute(entry.ptr.0) };
                     BuiltinImpl::Ctx(f)
                 }
@@ -394,7 +394,7 @@ impl VM {
     /// Scans the distributed [`crate::native::TYPE_REGISTRY`] slice
     /// and indexes all registered custom types by name.
     pub fn register_all_types(&mut self) {
-        use crate::native::TYPE_REGISTRY;
+        use crate::utils::native::TYPE_REGISTRY;
         for desc in TYPE_REGISTRY.iter() {
             self.type_index.insert(desc.name.into(), desc);
         }
@@ -403,7 +403,7 @@ impl VM {
     /// Scans the distributed [`crate::native::TRAIT_REGISTRY`] slice
     /// and indexes all registered trait definitions by name.
     pub fn register_all_traits(&mut self) {
-        use crate::native::TRAIT_REGISTRY;
+        use crate::utils::native::TRAIT_REGISTRY;
         for desc in TRAIT_REGISTRY.iter() {
             self.trait_index.insert(desc.name.into(), desc);
         }
@@ -412,7 +412,7 @@ impl VM {
     /// Scans the distributed [`crate::native::IMPL_REGISTRY`] slice
     /// and collects all registered trait implementation blocks.
     pub fn register_all_impls(&mut self) {
-        use crate::native::IMPL_REGISTRY;
+        use crate::utils::native::IMPL_REGISTRY;
         self.impl_index.clear();
         for desc in IMPL_REGISTRY.iter() {
             self.impl_index.push(desc);
@@ -454,14 +454,14 @@ impl VM {
     /// * `receiver` - The receiver value (typically a `Value::Map`).
     /// * `method_name` - The method name being looked up.
     fn resolve_parent_domain(&self, receiver: Value, _method_name: &str) -> Option<String> {
-        use crate::native::TYPE_REGISTRY;
+        use crate::utils::native::TYPE_REGISTRY;
 
         // Only maps can have parent types
         let map = receiver.as_map()?;
 
         // Find the type descriptor that matches this map
         for desc in TYPE_REGISTRY.iter() {
-            if desc.kind == crate::value::TypeKind::Record {
+            if desc.kind == crate::runtime::value::TypeKind::Record {
                 let mut matches = true;
                 for field in desc.fields {
                     if !map.contains_key(field.name) {
@@ -499,7 +499,7 @@ impl VM {
     /// Returns the saved state for later restoration via `restore_globals`.
     pub fn save_and_override_globals(
         &mut self,
-        overrides: &[(&'static str, crate::value::BuiltinImpl)],
+        overrides: &[(&'static str, crate::runtime::value::BuiltinImpl)],
     ) -> Vec<(Box<str>, Option<u32>)> {
         let mut saved = Vec::with_capacity(overrides.len());
         for (name, impl_) in overrides {
@@ -546,9 +546,9 @@ impl VM {
     /// # Examples
     ///
     /// ```
-    /// use xcl_vm::VM;
-    /// use xcl_vm::lexer::lex;
-    /// use xcl_vm::parser::parse;
+    /// use xcl_vm::runtime::VM;
+    /// use xcl_vm::compiler::lexer::lex;
+    /// use xcl_vm::compiler::parser::parse;
     /// use xcl_vm::bytecode::compile;
     ///
     /// let mut vm = VM::new();
@@ -653,6 +653,7 @@ impl VM {
     fn dispatch(&mut self, top: usize, i: Instr) -> Action {
         #[cfg(feature = "opcode-stats")]
         self.opcode_counter.record(i.op());
+
         match i.op() {
             OP_NOP => Action::Next,
             OP_PUSH_NIL => {
@@ -1792,11 +1793,175 @@ impl VM {
                 }
             }
 
+            // ── LOAD_CONST_LOCAL: load constant directly to local slot ──
+            // Operand a = local slot, b = value/index, c = kind:
+            //   0 = inline int (value in b, 16-bit unsigned)
+            //   1 = float from wide_operands[b]
+            //   2 = string from string_table[b]
+            //   3 = nil
+            //   4 = true
+            //   5 = false
+            //   6 = wide int from wide_operands[b]
+            OP_LOAD_CONST_LOCAL => {
+                let slot = i.a() as usize;
+                let b = i.b();
+                let kind = i.c();
+                let val = match kind {
+                    0 => Value::from_i48(b as i64),
+                    1 => {
+                        let bits = self.frames[top].code.wide_operands[b as usize];
+                        Value::from_f64(bits as f64)
+                    }
+                    2 => {
+                        let s = self.frames[top].code.string_table[b as usize].to_string();
+                        Value::from_str(s, &self.arena)
+                    }
+                    3 => Value::nil(),
+                    4 => Value::bool(true),
+                    5 => Value::bool(false),
+                    6 => {
+                        let v = self.frames[top].code.wide_operands[b as usize];
+                        Value::from_i48(v)
+                    }
+                    _ => Value::nil(),
+                };
+                let l = &mut self.frames[top].locals;
+                unsafe {
+                    *l.get_unchecked_mut(slot) = val;
+                }
+                Action::Next
+            }
+
+            // ── MATH_UNARY: locals[a] = math_op(locals[b]) ──
+            // Operand a = dest slot, b = src slot, c = math function id
+            OP_MATH_UNARY => {
+                let l = &mut self.frames[top].locals;
+                let dest = i.a() as usize;
+                let src = i.b() as usize;
+                let func_id = i.c();
+                let val = unsafe { *l.get_unchecked(src) };
+                let result = if val.is_float() || val.is_int() {
+                    let fv = if val.is_int() { val.as_i48() as f64 } else { val.as_f64() };
+                    let rv = match func_id {
+                        MATH_SQRT => fv.sqrt(),
+                        MATH_SIN => fv.sin(),
+                        MATH_COS => fv.cos(),
+                        MATH_TAN => fv.tan(),
+                        MATH_EXP => fv.exp(),
+                        MATH_LOG => if fv > 0.0 { fv.ln() } else { f64::NAN },
+                        MATH_ABS => fv.abs(),
+                        MATH_FLOOR => fv.floor(),
+                        MATH_CEIL => fv.ceil(),
+                        MATH_ROUND => fv.round(),
+                        MATH_TANH => fv.tanh(),
+                        MATH_LOG2 => if fv > 0.0 { fv.log2() } else { f64::NAN },
+                        MATH_LOG10 => if fv > 0.0 { fv.log10() } else { f64::NAN },
+                        MATH_CBRT => fv.cbrt(),
+                        _ => fv,
+                    };
+                    Value::from_f64(rv)
+                } else {
+                    Value::from_f64(f64::NAN)
+                };
+                unsafe {
+                    *l.get_unchecked_mut(dest) = result;
+                }
+                Action::Next
+            }
+
+            // ── GET_INDEX_LOCAL_LOCAL_STORE: locals[a] = locals[c][locals[b]] ──
+            OP_GET_INDEX_LOCAL_LOCAL_STORE => {
+                let l = &mut self.frames[top].locals;
+                let dest = i.a() as usize;
+                let idx_slot = i.b() as usize;
+                let arr_slot = i.c() as usize;
+                let target = unsafe { *l.get_unchecked(arr_slot) };
+                let idx = unsafe { *l.get_unchecked(idx_slot) };
+                let result = if let Some(arr) = target.as_array() {
+                    let i = idx.as_int();
+                    let i = if i < 0 { arr.len() as i64 + i } else { i };
+                    arr.get(i as usize).copied().unwrap_or(Value::nil())
+                } else if let Some(m) = target.as_map() {
+                    idx.as_str()
+                        .and_then(|k| m.get(k).copied())
+                        .unwrap_or(Value::nil())
+                } else {
+                    Value::nil()
+                };
+                unsafe {
+                    *l.get_unchecked_mut(dest) = result;
+                }
+                Action::Next
+            }
+
+            // ── GET_FIELD_LOCAL_STORE: locals[a] = locals[c].(string_table[b]) ──
+            OP_GET_FIELD_LOCAL_STORE => {
+                let dest = i.a() as usize;
+                let str_idx = i.b() as usize;
+                let obj_slot = i.c() as usize;
+                let field_name = self.frames[top].code.string_table[str_idx].to_string();
+                let l = &mut self.frames[top].locals;
+                let obj = unsafe { *l.get_unchecked(obj_slot) };
+                let result = if let Some(map) = obj.as_map() {
+                    map.get(&field_name).copied().unwrap_or(Value::nil())
+                } else {
+                    Value::nil()
+                };
+                unsafe {
+                    *l.get_unchecked_mut(dest) = result;
+                }
+                Action::Next
+            }
+
+            // ── MOD_LOCAL_LOCAL_STORE: locals[a] = locals[c] % locals[b] ──
+            OP_MOD_LOCAL_LOCAL_STORE => {
+                let l = &mut self.frames[top].locals;
+                let dest = i.a() as usize;
+                let src2 = i.b() as usize;
+                let src1 = i.c() as usize;
+                let a = unsafe { *l.get_unchecked(src1) };
+                let b = unsafe { *l.get_unchecked(src2) };
+                if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                    let bi = b.as_i48();
+                    let r = if bi != 0 {
+                        a.as_i48() % bi
+                    } else {
+                        0
+                    };
+                    unsafe {
+                        *l.get_unchecked_mut(dest) = Value::from_i48(r);
+                    }
+                } else {
+                    unsafe {
+                        *l.get_unchecked_mut(dest) = a.mod_(b);
+                    }
+                }
+                Action::Next
+            }
+
+            // ── ARRAY_PUSH_LOCAL: append locals[b] to array in locals[a] ──
+            OP_ARRAY_PUSH_LOCAL => {
+                let l = &mut self.frames[top].locals;
+                let arr_slot = i.a() as usize;
+                let val_slot = i.b() as usize;
+                let val = unsafe { *l.get_unchecked(val_slot) };
+                let arr = unsafe { *l.get_unchecked(arr_slot) };
+                if let Some(arr_mut) = arr.as_array_mut() {
+                    arr_mut.push(val);
+                }
+                unsafe {
+                    *l.get_unchecked_mut(arr_slot) = arr;
+                }
+                Action::Next
+            }
+
             _ => Action::Next,
         }
     }
+}
 
-    fn enter_call(&mut self, func: crate::value::FuncValue, args: Vec<Value>) -> Action {
+impl VM {
+    fn enter_call(&mut self, func: crate::runtime::value::FuncValue, args: Vec<Value>) -> Action {
         let Some(bc) = &func.bytecode else {
             self.push(Value::nil());
             return Action::Next;
@@ -2087,5 +2252,15 @@ fn opcode_name(op: u8) -> String {
         OP_SUB_LOCAL_LOCAL_STORE => "OP_SUB_LL_ST",
         OP_DIV_LOCAL_LOCAL_STORE => "OP_DIV_LL_ST",
         OP_WHILE_LT_LOCAL => "OP_WHILE_LT_L",
+        OP_MATH_UNARY => "OP_MATH_UN",
+        OP_GET_INDEX_LOCAL_LOCAL_STORE => "OP_GET_IDX_LL_ST",
+        OP_GET_FIELD_LOCAL_STORE => "OP_GET_FLD_ST",
+        OP_MOD_LOCAL_LOCAL_STORE => "OP_MOD_LL_ST",
+        OP_LOAD_CONST_LOCAL => "OP_LOAD_CST_L",
+        OP_ARRAY_PUSH_LOCAL => "OP_ARR_PUSH_L",
+        OP_INC_LOCAL => "OP_INC_L",
+        OP_DEC_LOCAL => "OP_DEC_L",
+        OP_ADD_INT_STORE_LOCAL => "OP_ADD_INT_ST",
+        OP_INC_LOCAL_INT => "OP_INC_L_INT",
     )
 }

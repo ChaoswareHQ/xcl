@@ -13,8 +13,8 @@
 //! # Examples
 //!
 //! ```
-//! use xcl_vm::args::split_named_args;
-//! use xcl_vm::Value;
+//! use xcl_vm::utils::args::split_named_args;
+//! use xcl_vm::runtime::Value;
 //! use hashbrown::HashMap;
 //!
 //! // Calling with positional arguments only:
@@ -24,7 +24,7 @@
 //! assert!(named.is_empty());
 //! ```
 
-use crate::value::Value;
+use crate::runtime::value::Value;
 use hashbrown::HashMap;
 
 /// Splits a slice of function arguments into positional arguments and a map of named arguments.
@@ -47,8 +47,8 @@ use hashbrown::HashMap;
 /// # Examples
 ///
 /// ```
-/// use xcl_vm::args::split_named_args;
-/// use xcl_vm::Value;
+/// use xcl_vm::utils::args::split_named_args;
+/// use xcl_vm::runtime::Value;
 /// use hashbrown::HashMap;
 ///
 /// let args = [Value::from_i48(1), Value::from_i48(2)];

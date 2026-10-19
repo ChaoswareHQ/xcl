@@ -30,7 +30,7 @@
 //! Checking whether an error kind string is a recognized standard error:
 //!
 //! ```
-//! use xcl_vm::errors::{is_known_kind, universal, filesystem};
+//! use xcl_vm::runtime::errors::{is_known_kind, universal, filesystem};
 //!
 //! assert!(is_known_kind(universal::NOT_FOUND));
 //! assert!(is_known_kind(filesystem::IS_A_DIRECTORY));
@@ -187,7 +187,7 @@ impl Group {
     /// # Examples
     ///
     /// ```
-    /// use xcl_vm::errors::Group;
+    /// use xcl_vm::runtime::errors::Group;
     ///
     /// let universal_kinds = Group::Universal.kinds();
     /// assert!(universal_kinds.contains(&"not_found"));
@@ -204,7 +204,7 @@ impl Group {
     /// # Examples
     ///
     /// ```
-    /// use xcl_vm::errors::Group;
+    /// use xcl_vm::runtime::errors::Group;
     ///
     /// assert_eq!(Group::Universal.name(), "universal");
     /// assert_eq!(Group::Filesystem.name(), "filesystem");
@@ -230,7 +230,7 @@ impl Group {
 /// # Examples
 ///
 /// ```
-/// use xcl_vm::errors::is_known_kind;
+/// use xcl_vm::runtime::errors::is_known_kind;
 ///
 /// assert!(is_known_kind("not_found"));
 /// assert!(is_known_kind("is_a_directory"));

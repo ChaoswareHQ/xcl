@@ -21,8 +21,8 @@
 //! Matching on an AST node to inspect its type:
 //!
 //! ```
-//! use xcl_vm::ast::{AstNode, BinaryOperator};
-//! use xcl_vm::Span;
+//! use xcl_vm::compiler::{AstNode, BinaryOperator};
+//! use xcl_vm::compiler::span::Span;
 //!
 //! let node = AstNode::BinaryOp {
 //!     span: Span::empty(),
@@ -46,7 +46,7 @@ use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use crate::span::Span;
+use crate::compiler::span::Span;
 
 /// Abstract syntax tree node representing a parsed XCL language construct.
 ///

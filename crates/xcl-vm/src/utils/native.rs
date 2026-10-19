@@ -21,7 +21,7 @@
 //! Inspecting registered native entries:
 //!
 //! ```
-//! use xcl_vm::native::NATIVE_REGISTRY;
+//! use xcl_vm::utils::native::NATIVE_REGISTRY;
 //!
 //! // Iterate over all statically registered native functions:
 //! for entry in NATIVE_REGISTRY.iter() {
@@ -30,7 +30,7 @@
 //! }
 //! ```
 
-pub use crate::value::{
+pub use crate::runtime::value::{
     extract_arg, ImplDescriptor, ImplMethod, NamedParam, NativeEntry, NativeKind, RawPtr,
     TraitDescriptor, TraitMethod, TypeDescriptor, TypeField, TypeKind, TypeVariant, Value,
     SUBTYPE_ERROR, SUBTYPE_HANDLE, SUBTYPE_NONE, SUBTYPE_RESULT, SUBTYPE_USER_BASE, VARIANT_DEFAULT,
@@ -49,7 +49,7 @@ use linkme::distributed_slice;
 /// # Examples
 ///
 /// ```
-/// use xcl_vm::native::NATIVE_REGISTRY;
+/// use xcl_vm::utils::native::NATIVE_REGISTRY;
 ///
 /// let native_count = NATIVE_REGISTRY.len();
 /// println!("Total registered native functions: {}", native_count);
@@ -67,7 +67,7 @@ pub static NATIVE_REGISTRY: [NativeEntry] = [..];
 /// # Examples
 ///
 /// ```
-/// use xcl_vm::native::TYPE_REGISTRY;
+/// use xcl_vm::utils::native::TYPE_REGISTRY;
 ///
 /// for ty in TYPE_REGISTRY.iter() {
 ///     println!("Registered type: {}", ty.name);
@@ -84,7 +84,7 @@ pub static TYPE_REGISTRY: [TypeDescriptor] = [..];
 /// # Examples
 ///
 /// ```
-/// use xcl_vm::native::TRAIT_REGISTRY;
+/// use xcl_vm::utils::native::TRAIT_REGISTRY;
 ///
 /// for trait_ in TRAIT_REGISTRY.iter() {
 ///     println!("Trait {} has {} methods", trait_.name, trait_.methods.len());
@@ -101,7 +101,7 @@ pub static TRAIT_REGISTRY: [TraitDescriptor] = [..];
 /// # Examples
 ///
 /// ```
-/// use xcl_vm::native::IMPL_REGISTRY;
+/// use xcl_vm::utils::native::IMPL_REGISTRY;
 ///
 /// for imp in IMPL_REGISTRY.iter() {
 ///     println!("Type {} implements trait {}", imp.type_name, imp.trait_name);

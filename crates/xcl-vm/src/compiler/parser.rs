@@ -20,9 +20,9 @@
 //! Parsing source code into an AST:
 //!
 //! ```
-//! use xcl_vm::lexer::lex;
-//! use xcl_vm::parser::parse;
-//! use xcl_vm::ast::AstNode;
+//! use xcl_vm::compiler::lexer::lex;
+//! use xcl_vm::compiler::parser::parse;
+//! use xcl_vm::compiler::ast::AstNode;
 //!
 //! let source = "$total = 100 + 50;";
 //! let tokens = lex(source, "main.xcl");
@@ -48,12 +48,12 @@ use alloc::vec;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use crate::ast::{
+use crate::compiler::ast::{
     AstNode, BinaryOperator, CallArg, Param, PipelineStage, SumVariant, TypeField, TypeKind,
     UnaryOperator,
 };
-use crate::lexer::{Token, TokenWithText, extract_string};
-use crate::span::Span;
+use crate::compiler::lexer::{Token, TokenWithText, extract_string};
+use crate::compiler::span::Span;
 
 struct Parser<'a> {
     tokens: &'a [TokenWithText],
@@ -1173,6 +1173,67 @@ impl<'a> Parser<'a> {
         true // no comma found = index expression
     }
 
+    /// Try to parse lambda parameters: a list of $-identifiers separated by commas, ending with RParen.
+    /// Returns Some(params) if successful and consumes the RParen, otherwise None without consuming tokens.
+    fn try_parse_lambda_params(&mut self) -> Option<Vec<String>> {
+        // self.pos points to the first token after LParen
+        let mut params = Vec::new();
+        let mut pos = self.pos;
+
+        if pos >= self.tokens.len() {
+            return None;
+        }
+
+        // Parse first param
+        match &self.tokens[pos].token {
+            Token::Ident => {
+                let name = self.tokens[pos].text.trim_start_matches('$').to_string();
+                params.push(name);
+                pos += 1;
+            }
+            Token::RParen => {
+                // Empty params: () => expr
+                self.pos = pos + 1; // consume RParen
+                return Some(params);
+            }
+            _ => return None,
+        }
+
+        // Parse remaining params
+        loop {
+            if pos >= self.tokens.len() {
+                return None;
+            }
+            match &self.tokens[pos].token {
+                Token::Comma | Token::Semi => {
+                    pos += 1;
+                    if pos >= self.tokens.len() {
+                        return None;
+                    }
+                    // Check for next param
+                    match &self.tokens[pos].token {
+                        Token::Ident => {
+                            let name = self.tokens[pos].text.trim_start_matches('$').to_string();
+                            params.push(name);
+                            pos += 1;
+                        }
+                        Token::RParen => {
+                            // Trailing comma: ($x,) => expr
+                            self.pos = pos + 1;
+                            return Some(params);
+                        }
+                        _ => return None,
+                    }
+                }
+                Token::RParen => {
+                    self.pos = pos + 1; // consume RParen
+                    return Some(params);
+                }
+                _ => return None,
+            }
+        }
+    }
+
     /// Parse pipe-style lambda: |$x, $y| expr — params must use $ prefix
     fn pipe_lambda(&mut self) -> AstNode {
         let span = self.span();
@@ -1538,9 +1599,35 @@ impl<'a> Parser<'a> {
             }
 
             Token::LParen => {
-                let e = self.expr();
-                self.expect(Token::RParen);
-                e
+                // Check for arrow lambda: ($x, $y) => expr
+                // First, try to parse params: a list of $-identifiers separated by commas
+                let save_pos = self.pos;
+                let params = self.try_parse_lambda_params();
+                if let Some(params) = params {
+                    // Successfully parsed params and consumed RParen
+                    // Now expect =>
+                    if self.at(Token::Arrow) {
+                        self.consume(); // consume =>
+                        let body = Box::new(self.expr());
+                        return AstNode::Lambda {
+                            span: span.clone(),
+                            params,
+                            body,
+                        };
+                    } else {
+                        // Not a lambda, rewind and parse as regular parenthesized expr
+                        self.pos = save_pos;
+                        let e = self.expr();
+                        self.expect(Token::RParen);
+                        return e;
+                    }
+                } else {
+                    // Not lambda params, parse as regular parenthesized expr
+                    self.pos = save_pos;
+                    let e = self.expr();
+                    self.expect(Token::RParen);
+                    return e;
+                }
             }
 
             Token::Pipe => {
@@ -1841,8 +1928,8 @@ impl<'a> Parser<'a> {
 /// # Examples
 ///
 /// ```
-/// use xcl_vm::lexer::lex;
-/// use xcl_vm::parser::parse;
+/// use xcl_vm::compiler::lexer::lex;
+/// use xcl_vm::compiler::parser::parse;
 ///
 /// let tokens = lex("1 + 2 * 3", "<eval>");
 /// let ast = parse(&tokens, "1 + 2 * 3");

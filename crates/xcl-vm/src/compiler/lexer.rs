@@ -38,7 +38,7 @@
 //! Tokenizing an XCL expression:
 //!
 //! ```
-//! use xcl_vm::lexer::{lex, Token};
+//! use xcl_vm::compiler::lexer::{lex, Token};
 //!
 //! let tokens = lex("$x = 10 + 20;", "script.xcl");
 //! assert_eq!(tokens[0].token, Token::Ident);
@@ -59,7 +59,7 @@ use alloc::string::ToString;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use crate::span::Span;
+use crate::compiler::span::Span;
 use logos::Logos;
 
 /// Tokens produced by the XCL lexer.
@@ -389,7 +389,7 @@ impl LineMap {
 /// # Examples
 ///
 /// ```
-/// use xcl_vm::lexer::{lex, Token};
+/// use xcl_vm::compiler::lexer::{lex, Token};
 ///
 /// let source = "add(a, b) { a + b }";
 /// let tokens = lex(source, "math.xcl");
@@ -441,7 +441,7 @@ pub fn lex(source: &str, file: &str) -> Vec<TokenWithText> {
 /// # Examples
 ///
 /// ```
-/// use xcl_vm::lexer::extract_string;
+/// use xcl_vm::compiler::lexer::extract_string;
 ///
 /// assert_eq!(extract_string(r#""hello\nworld""#), "hello\nworld");
 /// assert_eq!(extract_string(r#"r"raw\path""#), r#"raw\path"#);

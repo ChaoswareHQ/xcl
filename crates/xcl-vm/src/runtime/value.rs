@@ -34,7 +34,7 @@
 //! # Heap Allocation & Bump Arenas
 //!
 //! Temporary objects generated during execution (such as intermediate strings, slices,
-//! and maps) are allocated from a [`bumpalo::Bump`] arena owned by [`crate::vm::VM`].
+//! and maps) are allocated from a [`bumpalo::Bump`] arena owned by [`crate::runtime::vm::VM`].
 //! This provides microsecond allocation speed and batch cleanup on loop or VM reset.
 //!
 //! Long-lived objects (such as exported plugins or leaked constants) can be created with
@@ -1078,7 +1078,7 @@ impl From<&str> for Value {
 /// # Examples
 ///
 /// ```
-/// use xcl_vm::value::{extract_arg, Value};
+/// use xcl_vm::runtime::{extract_arg, Value};
 ///
 /// let args = [Value::from_i48(100), Value::bool(true)];
 /// let first: i64 = extract_arg(&args, 0);
@@ -1319,7 +1319,7 @@ pub enum BuiltinImpl {
 impl BuiltinImpl {
     /// Executes the underlying native function using the provided VM and arguments.
     #[inline]
-    pub fn call(&self, vm: &mut crate::vm::VM, args: &[Value]) -> Value {
+    pub fn call(&self, vm: &mut crate::runtime::vm::VM, args: &[Value]) -> Value {
         match self {
             BuiltinImpl::Pure(f) => f(args),
             BuiltinImpl::Ctx(f) => {
@@ -1437,7 +1437,7 @@ pub struct ImplMethod {
 ///
 /// Provides access to the VM instance, arguments, memory arena, context stack, and defer queue.
 pub struct DomainCtx<'a> {
-    pub(crate) vm: &'a mut crate::vm::VM,
+    pub(crate) vm: &'a mut crate::runtime::vm::VM,
     pub(crate) args: &'a [Value],
 }
 
@@ -1600,7 +1600,7 @@ impl<'a> DomainCtx<'a> {
         &mut self,
         impl_type_name: &str,
     ) -> Vec<(Box<str>, Option<u32>)> {
-        use crate::native::{NATIVE_REGISTRY, IMPL_REGISTRY};
+        use crate::utils::native::{NATIVE_REGISTRY, IMPL_REGISTRY};
 
         // Find all impl descriptors for this type — collect trait names
         let impl_descs = IMPL_REGISTRY.iter().filter(|desc| {
@@ -1661,7 +1661,7 @@ impl<'a> DomainCtx<'a> {
 
 /// Guard that restores global function overrides when dropped.
 pub struct GlobalOverrideGuard<'a> {
-    vm: &'a mut crate::vm::VM,
+    vm: &'a mut crate::runtime::vm::VM,
     saved: Vec<(Box<str>, Option<u32>)>,
 }
 

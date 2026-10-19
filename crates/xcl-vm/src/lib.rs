@@ -17,35 +17,35 @@
 //!
 //! Source code passes through four distinct phases:
 //!
-//! 1. **Lexical Analysis ([`lexer`])**
-//!    Transforms raw UTF-8 source text into a linear token stream ([`TokenWithText`](lexer::TokenWithText))
+//! 1. **Lexical Analysis ([`compiler::lexer`])**
+//!    Transforms raw UTF-8 source text into a linear token stream ([`TokenWithText`](compiler::lexer::TokenWithText))
 //!    using [`logos`]. Source locations are tracked via [`Span`].
 //!
-//! 2. **Parsing ([`parser`] & [`ast`])**
-//!    Converts the token stream into an Abstract Syntax Tree ([`AstNode`](ast::AstNode)).
+//! 2. **Parsing ([`compiler::parser`] & [`compiler::ast`])**
+//!    Converts the token stream into an Abstract Syntax Tree ([`AstNode`](compiler::ast::AstNode)).
 //!    Statements and expressions are parsed using recursive descent and Pratt operator-precedence climbing.
 //!
 //! 3. **Bytecode Compilation ([`bytecode`])**
-//!    Translates AST nodes into 64-bit packed instructions ([`Instr`]).
+//!    Translates AST nodes into 64-bit packed instructions ([`Instr`](bytecode::Instr)).
 //!    Applies peephole optimization to fuse common arithmetic and loop patterns into single superinstructions.
 //!
-//! 4. **Runtime Execution ([`vm`] & [`value`])**
-//!    Executes bytecode on a stack-based virtual machine ([`VM`]) operating on 64-bit
-//!    NaN-boxed [`Value`] words.
+//! 4. **Runtime Execution ([`runtime::vm`] & [`runtime::value`])**
+//!    Executes bytecode on a stack-based virtual machine ([`VM`](runtime::vm::VM)) operating on 64-bit
+//!    NaN-boxed [`Value`](runtime::value::Value) words.
 //!
 //! # Representation and Memory Architecture
 //!
-//! * **NaN-Boxed Values ([`Value`])**:
+//! * **NaN-Boxed Values ([`Value`](runtime::value::Value))**:
 //!   All runtime values fit into an 8-byte machine word. Primitives (integers up to 48 bits, floats,
 //!   booleans, and nil) require zero heap allocation. Heap objects (strings, arrays, maps, closures,
 //!   and OS handles) store their pointer addresses in the lower 48 bits of a quiet NaN payload.
 //!
 //! * **Bump Allocation ([`bumpalo::Bump`])**:
 //!   Temporary heap allocations generated during execution are serviced by the VM's internal
-//!   bump arena ([`VM::arena`](vm::VM::arena)), ensuring microsecond allocation speeds and instant
+//!   bump arena ([`VM::arena`](runtime::vm::VM::arena)), ensuring microsecond allocation speeds and instant
 //!   batch deallocation.
 //!
-//! * **Compact 64-bit Instructions ([`Instr`])**:
+//! * **Compact 64-bit Instructions ([`Instr`](bytecode::Instr))**:
 //!   Bytecode instructions pack an 8-bit opcode, 32-bit primary operand `a`, 16-bit operand `b`,
 //!   and 8-bit operand `c` into a single 64-bit word for optimal CPU cache utilization.
 //!
@@ -58,7 +58,7 @@
 //! * [`TYPE_REGISTRY`] — Static slice of custom type definitions.
 //! * [`IMPL_REGISTRY`] — Static slice of trait implementation blocks.
 //!
-//! Calling [`VM::register_all`](vm::VM::register_all) loads all registered extensions into the VM.
+//! Calling [`VM::register_all`](runtime::vm::VM::register_all) loads all registered extensions into the VM.
 //!
 //! # Examples
 //!
@@ -110,7 +110,8 @@
 //! You can also drive each stage of the compilation pipeline individually:
 //!
 //! ```
-//! use xcl_vm::{VM, lexer, parser, bytecode};
+//! use xcl_vm::{VM, bytecode};
+//! use xcl_vm::compiler::{lexer, parser};
 //!
 //! let source = "$total = 10 * 3; $total";
 //! let tokens = lexer::lex(source, "calc.xcl");
@@ -223,51 +224,40 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-/// Argument parsing utilities for named and positional arguments.
-pub mod args;
-/// Abstract syntax tree nodes representing parsed XCL code.
-pub mod ast;
 /// Bytecode compiler and instruction set for the XCL VM.
 pub mod bytecode;
-/// Error types and error grouping for XCL execution.
-pub mod errors;
-/// Lexer that tokenizes XCL source code into tokens.
-pub mod lexer;
-/// Native function registry and built-in function infrastructure.
-pub mod native;
-/// Parser that builds an AST from tokenized XCL source.
-pub mod parser;
-/// Source location spans for error reporting and debugging.
-pub mod span;
-/// Value types, heap objects, and native function bindings.
-pub mod value;
-/// Virtual machine runtime for executing XCL bytecode.
-pub mod vm;
-/// Well-known types and their metadata.
-pub mod wellknown;
+/// Bytecode optimization passes: dead store elimination, constant propagation, LICM.
+pub mod optimizer;
 
-pub use args::split_named_args;
+/// Source code to AST compilation: lexer, parser, AST nodes, and source spans.
+pub mod compiler;
+/// VM execution engine: virtual machine, values, and error types.
+pub mod runtime;
+/// Supporting infrastructure: argument parsing, native registry, well-known types.
+pub mod utils;
+
 pub use bytecode::{Bytecode, Instr};
-pub use errors::{Group, is_known_kind};
-pub use native::{IMPL_REGISTRY, NATIVE_REGISTRY, TRAIT_REGISTRY, TYPE_REGISTRY};
-pub use span::Span;
-pub use value::{
-    BuiltinImpl, DomainCtx, FuncValue, GlobalOverrideGuard, HandleKind, ImplDescriptor, ImplMethod,
-    IntoValue, NamedParam, NativeArg, NativeEntry, NativeKind, RawPtr, SUBTYPE_ERROR, SUBTYPE_HANDLE,
-    SUBTYPE_NONE, SUBTYPE_RESULT, SUBTYPE_USER_BASE, TraitDescriptor, TraitMethod, TypeDescriptor,
-    TypeField, TypeKind, TypeVariant, VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK,
-    Value, extract_arg, XclType, XclObject,
+pub use compiler::AstNode;
+pub use runtime::{
+    BuiltinImpl, DomainCtx, DomainSlot, FuncValue, GlobalOverrideGuard, Group, HandleKind,
+    ImplDescriptor, ImplMethod, IntoValue, NamedParam, NativeArg, NativeEntry, NativeKind, RawPtr,
+    SUBTYPE_ERROR, SUBTYPE_HANDLE, SUBTYPE_NONE, SUBTYPE_RESULT, SUBTYPE_USER_BASE,
+    TraitDescriptor, TraitMethod, TypeDescriptor, TypeField, TypeKind, TypeVariant,
+    VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK, Value, VM, extract_arg, is_known_kind, XclObject,
+    XclType,
 };
-pub use vm::{DomainSlot, VM};
-pub use wellknown::WellKnown;
+pub use compiler::span::Span;
+pub use utils::{
+    IMPL_REGISTRY, NATIVE_REGISTRY, TRAIT_REGISTRY, TYPE_REGISTRY, WellKnown, split_named_args,
+};
 
 /// Evaluates XCL source code using the provided virtual machine.
 ///
 /// Runs the complete execution pipeline:
-/// 1. Tokenizes `source` using [`lexer::lex`].
-/// 2. Builds an AST using [`parser::parse`].
+/// 1. Tokenizes `source` using [`compiler::lexer::lex`].
+/// 2. Builds an AST using [`compiler::parser::parse`].
 /// 3. Compiles the AST into bytecode using [`bytecode::compile`].
-/// 4. Executes the bytecode on `vm` via [`VM::run`].
+/// 4. Executes the bytecode on `vm` via [`VM::run`](runtime::vm::VM::run).
 ///
 /// # Arguments
 ///
@@ -288,8 +278,8 @@ pub use wellknown::WellKnown;
 /// assert_eq!(result.as_i48(), 30);
 /// ```
 pub fn evaluate(source: &str, vm: &mut VM) -> Value {
-    let tokens = lexer::lex(source, "<input>");
-    let ast = parser::parse(&tokens, source);
+    let tokens = compiler::lexer::lex(source, "<input>");
+    let ast = compiler::parser::parse(&tokens, source);
     let bytecode = bytecode::compile(&ast);
     vm.run(&bytecode)
 }
