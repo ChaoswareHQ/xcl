@@ -19,17 +19,6 @@ logos.workspace = true
 bumpalo.workspace = true
 smallvec.workspace = true
 hashbrown.workspace = true
-linkme.workspace = true
 xcl-macros.workspace = true
 
 [dev-dependencies]
-criterion.workspace = true
-mlua.workspace = true
-
-[[bench]]
-name = "dispatch"
-harness = false
-
-[[bench]]
-name = "luau_comparison"
-harness = false

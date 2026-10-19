@@ -68,14 +68,11 @@ use hashbrown::HashMap;
 use std::collections::HashMap;
 
 use crate::bytecode::*;
-use crate::runtime::vm::ops::consts::OP_JUMP;
 use crate::runtime::value::{
-    BuiltinImpl, ImplDescriptor, TAG_INT, TraitDescriptor, TypeDescriptor, Value,
+    BuiltinImpl, ImplDescriptor, NativeEntry, TraitDescriptor, TypeDescriptor, Value,
 };
 use bumpalo::Bump;
 use smallvec::SmallVec;
-
-// ── Helper functions for fast hashing ──
 
 /// Fast string hash for field name lookups (FNV-1a).
 #[inline(always)]
@@ -86,81 +83,6 @@ pub fn fast_hash(bytes: &[u8]) -> u64 {
         h = h.wrapping_mul(0x0100_0000_01B3);
     }
     h
-}
-
-// ── Helper functions for integer arithmetic with overflow fallback ──
-
-#[inline(always)]
-fn checked_add_overflow(a: i64, b: i64) -> i64 {
-    a.checked_add(b)
-        .unwrap_or_else(|| (a as f64 + b as f64) as i64)
-}
-
-#[inline(always)]
-fn checked_sub_overflow(a: i64, b: i64) -> i64 {
-    a.checked_sub(b)
-        .unwrap_or_else(|| (a as f64 - b as f64) as i64)
-}
-
-#[inline(always)]
-fn checked_mul_overflow(a: i64, b: i64) -> i64 {
-    a.checked_mul(b)
-        .unwrap_or_else(|| (a as f64 * b as f64) as i64)
-}
-
-#[inline(always)]
-fn checked_div_overflow(a: i64, b: i64) -> i64 {
-    a.checked_div(b)
-        .unwrap_or_else(|| (a as f64 / b as f64) as i64)
-}
-
-// ── Helper functions to reduce dispatch boilerplate ──
-// Each function handles a fused binary arithmetic opcode by reading two locals,
-// performing the operation with int/float/fallback paths, and writing back.
-
-type BinaryIntOp = fn(i64, i64) -> i64;
-type BinaryFloatOp = fn(f64, f64) -> f64;
-type BinaryFallbackOp = fn(Value, Value, &bumpalo::Bump) -> Value;
-
-#[inline(always)]
-fn fused_local_store(
-    locals: &mut SmallVec<[Value; 16]>,
-    instr: Instr,
-    int_op: BinaryIntOp,
-    float_op: BinaryFloatOp,
-    fallback: BinaryFallbackOp,
-    arena: &bumpalo::Bump,
-) -> Action {
-    let dest = instr.a() as usize;
-    let src = instr.b() as usize;
-    let a = unsafe { *locals.get_unchecked(dest) };
-    let b = unsafe { *locals.get_unchecked(src) };
-    if a.tag() == TAG_INT && b.tag() == TAG_INT {
-        let r = int_op(a.as_i48(), b.as_i48());
-        unsafe {
-            *locals.get_unchecked_mut(dest) = Value::from_i48(r);
-        }
-    } else if a.is_float() && b.is_float() {
-        unsafe {
-            *locals.get_unchecked_mut(dest) = Value::from_f64(float_op(a.as_f64(), b.as_f64()));
-        }
-    } else {
-        unsafe {
-            *locals.get_unchecked_mut(dest) = fallback(a, b, arena);
-        }
-    }
-    Action::Next
-}
-
-#[cfg(feature = "opcode-stats")]
-/// Generate opcode_name match from a list of opcode => display_name pairs.
-macro_rules! opcode_names {
-    ( $op:expr, $( $opcode:ident => $name:expr ),+ $(,)? ) => {
-        match $op {
-            $( $opcode => $name.to_string(), )+
-            _ => format!("0x{:02X}", $op),
-        }
-    };
 }
 
 /// Tracks opcode dispatch frequency for profiling.
@@ -222,6 +144,8 @@ pub(crate) struct Frame {
     stack_base: u32,
     /// Deferred closures to run when this frame returns (LIFO order).
     defer_stack: SmallVec<[Value; 4]>,
+    /// Positional arguments passed into this frame (`$1`, `$#`, `$@`, `$*`).
+    argv: SmallVec<[Value; 4]>,
 }
 
 /// A dispatch table slot containing all methods registered for a specific domain namespace.
@@ -237,18 +161,6 @@ pub struct DomainSlot {
     /// will resolve to `collections.map` when not found in the global scope.
     /// Set to false for domains like `https` where method names (e.g., `get`) are too common.
     pub auto_import: bool,
-}
-
-#[cfg(feature = "std")]
-struct CachedRegistry {
-    global_index: HashMap<Box<str>, u32>,
-    global_table: Vec<Option<BuiltinImpl>>,
-    domain_index: HashMap<Box<str>, u32>,
-    domain_table: Vec<DomainSlot>,
-    type_index: HashMap<Box<str>, &'static TypeDescriptor>,
-    trait_index: HashMap<Box<str>, &'static TraitDescriptor>,
-    impl_index: Vec<&'static ImplDescriptor>,
-    opcode_table: [Option<super::opcode::OpcodeFn>; 256],
 }
 
 /// The XCL Virtual Machine runtime instance.
@@ -272,6 +184,10 @@ pub struct VM {
     pub trait_index: HashMap<Box<str>, &'static TraitDescriptor>,
     /// Flat list of all registered trait implementation descriptors.
     pub impl_index: Vec<&'static ImplDescriptor>,
+    /// Flat list of registered native entries (for override_by_trait lookups).
+    pub native_entries: Vec<&'static NativeEntry>,
+    /// Flat list of registered type descriptors (for axiom type/super lookups).
+    pub type_entries: Vec<&'static TypeDescriptor>,
     /// Fast bump allocator arena for temporary heap objects created during execution.
     pub arena: Bump,
     pub(crate) frames: Vec<Frame>,
@@ -285,6 +201,10 @@ pub struct VM {
     opcode_table: [Option<super::opcode::OpcodeFn>; 256],
     #[cfg(feature = "opcode-stats")]
     opcode_counter: OpcodeCounter,
+    /// Name of the currently running script (`$0`).
+    script_name: Box<str>,
+    /// Top-level positional script arguments.
+    script_args: Vec<Value>,
 }
 
 impl Default for VM {
@@ -315,6 +235,8 @@ impl VM {
             type_index: Default::default(),
             trait_index: Default::default(),
             impl_index: Vec::new(),
+            native_entries: Vec::new(),
+            type_entries: Vec::new(),
             arena: Bump::new(),
             frames: Vec::with_capacity(16),
             pending: None,
@@ -323,57 +245,130 @@ impl VM {
             opcode_table: [None; 256],
             #[cfg(feature = "opcode-stats")]
             opcode_counter: OpcodeCounter::new(),
+            script_name: "<input>".into(),
+            script_args: Vec::new(),
         }
     }
 
-    /// Registers all compile-time natives, types, traits, impls, and opcodes from the distributed slices.
+    /// Sets the script name (`$0`) and top-level positional arguments (`$1..$N`).
     ///
-    /// Combines [`VM::register_all_natives`], [`VM::register_all_types`],
-    /// [`VM::register_all_traits`], [`VM::register_all_impls`], and [`VM::register_all_opcodes`].
-    pub fn register_all(&mut self) {
-        #[cfg(feature = "std")]
-        {
-            static CACHE: std::sync::OnceLock<CachedRegistry> = std::sync::OnceLock::new();
-            if self.global_table.is_empty() && self.domain_table.is_empty() {
-                let cached = CACHE.get_or_init(|| {
-                    let mut tmp = VM::new();
-                    tmp.register_all_natives();
-                    tmp.register_all_types();
-                    tmp.register_all_traits();
-                    tmp.register_all_impls();
-                    tmp.register_all_opcodes();
-                    CachedRegistry {
-                        global_index: tmp.global_index,
-                        global_table: tmp.global_table,
-                        domain_index: tmp.domain_index,
-                        domain_table: tmp.domain_table,
-                        type_index: tmp.type_index,
-                        trait_index: tmp.trait_index,
-                        impl_index: tmp.impl_index,
-                        opcode_table: tmp.opcode_table,
-                    }
-                });
-                self.global_index.clone_from(&cached.global_index);
-                self.global_table.clone_from(&cached.global_table);
-                self.domain_index.clone_from(&cached.domain_index);
-                self.domain_table.clone_from(&cached.domain_table);
-                self.type_index.clone_from(&cached.type_index);
-                self.trait_index.clone_from(&cached.trait_index);
-                self.impl_index.clone_from(&cached.impl_index);
-                self.opcode_table = cached.opcode_table;
-                return;
-            }
-        }
-        self.register_all_natives();
-        self.register_all_types();
-        self.register_all_traits();
-        self.register_all_impls();
-        self.register_all_opcodes();
+    /// Call this before [`VM::run`]. Script arguments apply to the root frame;
+    /// function frames use their own call arguments.
+    pub fn set_script_args(&mut self, name: &str, args: Vec<Value>) {
+        self.script_name = name.into();
+        self.script_args = args;
     }
 
-    /// Populates the extension opcode dispatch table from [`super::opcode::OPCODE_REGISTRY`].
-    pub fn register_all_opcodes(&mut self) {
-        for entry in super::opcode::OPCODE_REGISTRY.iter() {
+    /// Registers core language axioms (`type`, `super`) directly.
+    /// Called automatically by [`VM::new`] or can be called manually.
+    pub fn register_core(&mut self) {
+        use crate::runtime::value::{BuiltinImpl, NativeKind};
+        let entries = super::axioms::axiom_entries();
+        for entry in &entries {
+            let impl_ = match entry.kind {
+                NativeKind::Pure => {
+                    let f: crate::runtime::value::BuiltinFn =
+                        unsafe { core::mem::transmute(entry.ptr.0) };
+                    BuiltinImpl::Pure(f)
+                }
+                NativeKind::Ctx => {
+                    let f: crate::runtime::value::BuiltinCtxFn =
+                        unsafe { core::mem::transmute(entry.ptr.0) };
+                    BuiltinImpl::Ctx(f)
+                }
+            };
+            let idx = self.global_table.len() as u32;
+            self.global_table.push(Some(impl_));
+            self.global_index.insert(entry.method.into(), idx);
+            // Store static refs for override_by_trait
+            // We leak the entries into static storage so we can store &'static refs
+            self.native_entries
+                .push(unsafe { &*(entry as *const crate::runtime::value::NativeEntry) });
+        }
+    }
+
+    /// Registers native functions from a static slice.
+    pub fn register_natives(&mut self, entries: &'static [NativeEntry]) {
+        use crate::runtime::value::{BuiltinImpl, NativeKind};
+        for entry in entries {
+            let impl_ = match entry.kind {
+                NativeKind::Pure => {
+                    let f: crate::runtime::value::BuiltinFn =
+                        unsafe { core::mem::transmute(entry.ptr.0) };
+                    BuiltinImpl::Pure(f)
+                }
+                NativeKind::Ctx => {
+                    let f: crate::runtime::value::BuiltinCtxFn =
+                        unsafe { core::mem::transmute(entry.ptr.0) };
+                    BuiltinImpl::Ctx(f)
+                }
+            };
+
+            if let Some(domain) = entry.domain {
+                let full_name = format!("{}.{}", domain, entry.method);
+
+                let didx = *self.domain_index.entry(domain.into()).or_insert_with(|| {
+                    let idx = self.domain_table.len() as u32;
+                    self.domain_table.push(DomainSlot {
+                        name: domain.into(),
+                        methods: Vec::new(),
+                        index: HashMap::new(),
+                        auto_import: false,
+                    });
+                    idx
+                });
+                let slot = &mut self.domain_table[didx as usize];
+                if entry.auto_import {
+                    slot.auto_import = true;
+                }
+                let midx = slot.methods.len() as u32;
+                slot.methods.push(Some(impl_));
+                slot.index.insert(entry.method.into(), midx);
+
+                if entry.auto_import {
+                    let idx = self.global_table.len() as u32;
+                    self.global_table.push(Some(impl_));
+                    self.global_index.entry(entry.method.into()).or_insert(idx);
+                }
+
+                let idx = self.global_table.len() as u32;
+                self.global_table.push(Some(impl_));
+                self.global_index.insert(full_name.into(), idx);
+            } else {
+                let idx = self.global_table.len() as u32;
+                self.global_table.push(Some(impl_));
+                self.global_index.insert(entry.method.into(), idx);
+            }
+            self.native_entries.push(entry);
+        }
+    }
+
+    /// Registers type descriptors from a static slice.
+    pub fn register_types(&mut self, entries: &'static [TypeDescriptor]) {
+        for desc in entries {
+            self.type_index.insert(desc.name.into(), desc);
+            self.type_entries.push(desc);
+        }
+    }
+
+    /// Registers trait descriptors from a static slice.
+    pub fn register_traits(&mut self, entries: &'static [TraitDescriptor]) {
+        for desc in entries {
+            self.trait_index.insert(desc.name.into(), desc);
+        }
+    }
+
+    /// Registers impl descriptors from a static slice.
+    pub fn register_impls(&mut self, entries: &'static [ImplDescriptor]) {
+        self.impl_index.clear();
+        for desc in entries {
+            self.impl_index.push(desc);
+        }
+    }
+
+    /// Registers opcode entries from a static slice.
+    pub fn register_opcodes(&mut self, entries: &'static [super::opcode::OpcodeEntry]) {
+        for entry in entries.iter() {
             self.opcode_table[entry.code as usize] = Some(entry.handler);
         }
     }
@@ -409,98 +404,6 @@ impl VM {
         &mut self.frames[top].locals
     }
 
-    /// Scans the distributed [`crate::native::NATIVE_REGISTRY`] slice
-    /// and populates the VM's domain and global dispatch tables.
-    pub fn register_all_natives(&mut self) {
-        use crate::runtime::value::{BuiltinImpl, NativeKind};
-        use crate::utils::native::NATIVE_REGISTRY;
-
-        for entry in NATIVE_REGISTRY.iter() {
-            let impl_ = match entry.kind {
-                NativeKind::Pure => {
-                    let f: crate::runtime::value::BuiltinFn =
-                        unsafe { core::mem::transmute(entry.ptr.0) };
-                    BuiltinImpl::Pure(f)
-                }
-                NativeKind::Ctx => {
-                    let f: crate::runtime::value::BuiltinCtxFn =
-                        unsafe { core::mem::transmute(entry.ptr.0) };
-                    BuiltinImpl::Ctx(f)
-                }
-            };
-
-            if let Some(domain) = entry.domain {
-                // Build the full dotted name: domain + "." + method
-                let full_name = format!("{}.{}", domain, entry.method);
-
-                // Register in domain table for domain-based lookup
-                let didx = *self.domain_index.entry(domain.into()).or_insert_with(|| {
-                    let idx = self.domain_table.len() as u32;
-                    self.domain_table.push(DomainSlot {
-                        name: domain.into(),
-                        methods: Vec::new(),
-                        index: HashMap::new(),
-                        auto_import: false,
-                    });
-                    idx
-                });
-                let slot = &mut self.domain_table[didx as usize];
-                // Propagate auto_import flag from entry to domain slot
-                if entry.auto_import {
-                    slot.auto_import = true;
-                }
-                let midx = slot.methods.len() as u32;
-                slot.methods.push(Some(impl_));
-                slot.index.insert(entry.method.into(), midx);
-
-                // If auto_import is enabled, also register the bare method name globally
-                if entry.auto_import {
-                    let idx = self.global_table.len() as u32;
-                    self.global_table.push(Some(impl_));
-                    // Only insert if not already present (first one wins for conflicts)
-                    self.global_index.entry(entry.method.into()).or_insert(idx);
-                }
-
-                // Also register the full dotted name globally so "net.tcp.connect" works
-                let idx = self.global_table.len() as u32;
-                self.global_table.push(Some(impl_));
-                self.global_index.insert(full_name.into(), idx);
-            } else {
-                let idx = self.global_table.len() as u32;
-                self.global_table.push(Some(impl_));
-                self.global_index.insert(entry.method.into(), idx);
-            }
-        }
-    }
-
-    /// Scans the distributed [`crate::native::TYPE_REGISTRY`] slice
-    /// and indexes all registered custom types by name.
-    pub fn register_all_types(&mut self) {
-        use crate::utils::native::TYPE_REGISTRY;
-        for desc in TYPE_REGISTRY.iter() {
-            self.type_index.insert(desc.name.into(), desc);
-        }
-    }
-
-    /// Scans the distributed [`crate::native::TRAIT_REGISTRY`] slice
-    /// and indexes all registered trait definitions by name.
-    pub fn register_all_traits(&mut self) {
-        use crate::utils::native::TRAIT_REGISTRY;
-        for desc in TRAIT_REGISTRY.iter() {
-            self.trait_index.insert(desc.name.into(), desc);
-        }
-    }
-
-    /// Scans the distributed [`crate::native::IMPL_REGISTRY`] slice
-    /// and collects all registered trait implementation blocks.
-    pub fn register_all_impls(&mut self) {
-        use crate::utils::native::IMPL_REGISTRY;
-        self.impl_index.clear();
-        for desc in IMPL_REGISTRY.iter() {
-            self.impl_index.push(desc);
-        }
-    }
-
     /// Looks up a globally registered builtin or native function by name.
     ///
     /// # Arguments
@@ -523,48 +426,6 @@ impl VM {
         let slot = self.domain_table.get(didx as usize)?;
         let &midx = slot.index.get(method)?;
         slot.methods.get(midx as usize).and_then(|e| e.as_ref())
-    }
-
-    /// Resolves the parent domain for super delegation.
-    ///
-    /// When a method is not found on the receiver's type, this method checks the
-    /// TYPE_REGISTRY for a `parent_type` field and returns the parent's domain name
-    /// if the parent type has registered native methods.
-    ///
-    /// # Arguments
-    ///
-    /// * `receiver` - The receiver value (typically a `Value::Map`).
-    /// * `method_name` - The method name being looked up.
-    fn resolve_parent_domain(&self, receiver: Value, _method_name: &str) -> Option<String> {
-        use crate::utils::native::TYPE_REGISTRY;
-
-        // Only maps can have parent types
-        let map = receiver.as_map()?;
-
-        // Find the type descriptor that matches this map
-        for desc in TYPE_REGISTRY.iter() {
-            if desc.kind == crate::runtime::value::TypeKind::Record {
-                let mut matches = true;
-                for field in desc.fields {
-                    if !map.contains_key(field.name) {
-                        matches = false;
-                        break;
-                    }
-                }
-                if matches && !desc.fields.is_empty() {
-                    // Found the type — check if it has a parent_type
-                    if let Some(parent_name) = desc.parent_type {
-                        // The parent type name IS the domain for NATIVE_REGISTRY lookup
-                        // because #[xcl_impl] on inherent impls registers methods under
-                        // domain = Some(type_name)
-                        return Some(parent_name.to_string());
-                    }
-                    // No parent — stop searching
-                    return None;
-                }
-            }
-        }
-        None
     }
 
     /// Looks up a universal method (domain=None) by name.
@@ -654,8 +515,10 @@ impl VM {
         self.globals.resize(needed, Value::nil());
 
         // Register user-defined functions in globals so OP_CALL can find them
+        // Use an offset so indices don't collide with global_table (builtins)
+        let globals_offset = self.global_table.len() as u32;
         for (name, func) in &bc.user_functions {
-            let idx = self.globals.len() as u32;
+            let idx = globals_offset + self.globals.len() as u32;
             self.globals
                 .push(Value::from_func(func.clone(), &self.arena));
             self.global_index.insert(name.as_ref().into(), idx);
@@ -675,6 +538,7 @@ impl VM {
             range_end: 0,
             stack_base: 0,
             defer_stack: SmallVec::new(),
+            argv: SmallVec::from_slice(&self.script_args),
         });
 
         while let Some(top) = self.frames.len().checked_sub(1) {
@@ -738,982 +602,27 @@ impl VM {
         #[cfg(feature = "opcode-stats")]
         self.opcode_counter.record(i.op());
 
-        // Try core opcode dispatch only for migrated opcodes
-        if ops::is_core_migrated(i.op()) {
-            if let Some(result) = ops::dispatch_core(self, top, i) {
-                return match result {
-                    crate::runtime::opcode::OpcodeResult::Next => Action::Next,
-                    crate::runtime::opcode::OpcodeResult::Jump(addr) => Action::Jump(addr),
-                    crate::runtime::opcode::OpcodeResult::Return => Action::Return,
-                    crate::runtime::opcode::OpcodeResult::PushFrame => Action::PushFrame,
-                };
-            }
+        // Core opcode dispatch
+        if let Some(result) = ops::dispatch_core(self, top, i) {
+            return match result {
+                crate::runtime::opcode::OpcodeResult::Next => Action::Next,
+                crate::runtime::opcode::OpcodeResult::Jump(addr) => Action::Jump(addr),
+                crate::runtime::opcode::OpcodeResult::Return => Action::Return,
+                crate::runtime::opcode::OpcodeResult::PushFrame => Action::PushFrame,
+            };
         }
 
-        match i.op() {
-            OP_TYPE_TEST => {
-                // Stack: value, type_name
-                let type_name_s = self.pop().as_str();
-                let value = self.pop();
-                let is_type = if let Some(tn) = type_name_s {
-                    // Check if the value is a map with a "tag" field matching the type name
-                    if let Some(map) = value.as_map() {
-                        if let Some(tag_val) = map.get("tag") {
-                            if let Some(tag) = tag_val.as_str() {
-                                tag == tn
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        // Check type index for registered types
-                        self.type_index.contains_key(tn) && !value.is_nil()
-                    }
-                } else {
-                    false
-                };
-                self.push(Value::bool(is_type));
-                Action::Next
+        // Extension opcode lookup
+        let op_code = i.op();
+        if let Some(handler) = self.opcode_table[op_code as usize] {
+            match handler(self, top, i) {
+                super::opcode::OpcodeResult::Next => Action::Next,
+                super::opcode::OpcodeResult::Jump(addr) => Action::Jump(addr),
+                super::opcode::OpcodeResult::Return => Action::Return,
+                super::opcode::OpcodeResult::PushFrame => Action::PushFrame,
             }
-            OP_TYPE_CAST => {
-                // Stack: value, type_name — cast value to the target type
-                let type_name_s = self.pop().as_str();
-                let value = self.pop();
-                // For now, type cast is a no-op that returns the value unchanged.
-                // Future: implement actual type conversion based on type_name.
-                let _ = type_name_s;
-                self.push(value);
-                Action::Next
-            }
-            OP_CALL => {
-                let n = i.a() as usize;
-                let mut args = Vec::with_capacity(n);
-                for _ in 0..n {
-                    args.push(self.pop());
-                }
-                args.reverse();
-                let callee = self.pop();
-
-                if let Some(name) = callee.as_str() {
-                    // 1. Check global builtins first (handles "net.tcp.connect", "io.read", etc.)
-                    if let Some(&idx) = self.global_index.get(name) {
-                        if let Some(Some(impl_)) = self.global_table.get(idx as usize) {
-                            let impl_copy = *impl_;
-                            let result = impl_copy.call(self, &args);
-                            self.push(result);
-                            return Action::Next;
-                        }
-                        // Check user-defined globals
-                        if (idx as usize) < self.globals.len() {
-                            let func = self.globals[idx as usize];
-                            if let Some(f) = func.as_func() {
-                                return self.enter_call(f.clone(), args);
-                            }
-                        }
-                    }
-                    // 2. Check domain methods (e.g. "io.read") — only for two-part names
-                    // For three+ part names like "net.tcp.connect", step 1 already handled it
-                    if name.split('.').count() == 2 {
-                        if let Some(dot_pos) = name.find('.') {
-                            let domain = &name[..dot_pos];
-                            let method = &name[dot_pos + 1..];
-                            if let Some(impl_) = self.resolve_domain_method(domain, method) {
-                                let impl_copy = *impl_;
-                                let result = impl_copy.call(self, &args);
-                                self.push(result);
-                                return Action::Next;
-                            }
-                        }
-                    }
-                    // 2b. Domain expansion: if callee is a domain name, check for block/dict args.
-                    if self.domain_index.contains_key(name) {
-                        // Case 1: one arg is a function — execute it with domain methods in scope.
-                        if let Some((func_idx, func)) = args
-                            .iter()
-                            .enumerate()
-                            .find_map(|(i, a)| a.as_func().map(|f| (i, f.clone())))
-                        {
-                            let call_args: Vec<Value> = args
-                                .into_iter()
-                                .enumerate()
-                                .filter(|(i, _)| *i != func_idx)
-                                .map(|(_, v)| v)
-                                .collect();
-                            let &didx = self.domain_index.get(name).unwrap();
-                            let slot = &self.domain_table[didx as usize];
-                            let mut saved: Vec<(Box<str>, Option<u32>)> = Vec::new();
-                            for (method_name, &midx) in slot.index.iter() {
-                                let existing = self
-                                    .global_index
-                                    .insert(method_name.clone(), self.global_table.len() as u32);
-                                saved.push((method_name.clone(), existing));
-                                let impl_ = slot.methods[midx as usize];
-                                self.global_table.push(impl_);
-                            }
-                            let func_value = Value::from_func(func.clone(), &self.arena);
-                            let result = self.call_value(func_value, &call_args);
-                            for (method_name, existing) in saved.into_iter().rev() {
-                                self.global_table.pop();
-                                if let Some(idx) = existing {
-                                    self.global_index.insert(method_name.clone(), idx);
-                                } else {
-                                    self.global_index.remove(&method_name);
-                                }
-                            }
-                            self.push(result);
-                            return Action::Next;
-                        }
-                        // Case 2: one arg is a map — each key is a method name, each value is the arg.
-                        if let Some((_map_idx, map)) = args
-                            .iter()
-                            .enumerate()
-                            .find_map(|(i, a)| a.as_map().map(|m| (i, m)))
-                        {
-                            let &didx = self.domain_index.get(name).unwrap();
-                            // Collect method calls to avoid borrow conflict
-                            let calls: Vec<(u32, Value)> = self.domain_table[didx as usize]
-                                .index
-                                .iter()
-                                .filter_map(|(method_name, &midx)| {
-                                    map.get(&**method_name).map(|v| (midx, *v))
-                                })
-                                .collect();
-                            let mut last_result = Value::nil();
-                            for (midx, value) in calls {
-                                let impl_ = self.domain_table[didx as usize].methods[midx as usize]
-                                    .as_ref()
-                                    .copied()
-                                    .unwrap();
-                                last_result = impl_.call(self, &[value]);
-                            }
-                            self.push(last_result);
-                            return Action::Next;
-                        }
-                    }
-                    // 3. Fallback: search all globals by name
-                    let found = self
-                        .globals
-                        .iter()
-                        .find_map(|g| g.as_func().filter(|f| &*f.name == name).cloned());
-                    if let Some(func) = found {
-                        return self.enter_call(func, args);
-                    }
-                } else if let Some(func) = callee.as_func() {
-                    return self.enter_call(func.clone(), args);
-                }
-                self.push(Value::nil());
-                Action::Next
-            }
-            OP_CALL_METHOD => {
-                // Dispatch a method call on a value by looking up its type's domain.
-                // Stack: receiver, arg1, arg2, ... -> result
-                let field_idx = i.a() as usize;
-                let nargs = i.b() as usize;
-                let string_table = self.frames[top].code.string_table.clone();
-                let method_name = &string_table[field_idx];
-
-                // Collect args (excluding receiver)
-                let mut args = Vec::with_capacity(nargs);
-                for _ in 0..nargs {
-                    args.push(self.pop());
-                }
-                args.reverse();
-                let receiver = self.pop();
-
-                // Look up the domain from the receiver's type.
-                // For typed maps (Result, Error, Handle), use the subtype to find the domain.
-                let domain_name = if let Some(subtype) = receiver.map_subtype() {
-                    match subtype {
-                        1 => Some("result"), // SUBTYPE_RESULT
-                        2 => Some("error"),  // SUBTYPE_ERROR
-                        3 => Some("handle"), // SUBTYPE_HANDLE
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-
-                if let Some(domain) = domain_name {
-                    if let Some(impl_) = self.resolve_domain_method(domain, method_name) {
-                        let impl_copy = *impl_;
-                        // Prepend receiver as the first argument
-                        let mut all_args = Vec::with_capacity(nargs + 1);
-                        all_args.push(receiver);
-                        all_args.extend(args);
-                        let result = impl_copy.call(self, &all_args);
-                        self.push(result);
-                        return Action::Next;
-                    }
-                }
-
-                // Super delegation: if method not found, check TYPE_REGISTRY for parent_type
-                // and delegate to the parent's NATIVE_REGISTRY entry
-                if let Some(parent_domain) = self.resolve_parent_domain(receiver, method_name) {
-                    if let Some(impl_) = self.resolve_domain_method(&parent_domain, method_name) {
-                        let impl_copy = *impl_;
-                        let mut all_args = Vec::with_capacity(nargs + 1);
-                        all_args.push(receiver);
-                        all_args.extend(args);
-                        let result = impl_copy.call(self, &all_args);
-                        self.push(result);
-                        return Action::Next;
-                    }
-                }
-
-                // Universal methods: check for domain=None entries (e.g., type, super)
-                if let Some(impl_) = self.resolve_universal_method(method_name) {
-                    let impl_copy = *impl_;
-                    let mut all_args = Vec::with_capacity(nargs + 1);
-                    all_args.push(receiver);
-                    all_args.extend(args);
-                    let result = impl_copy.call(self, &all_args);
-                    self.push(result);
-                    return Action::Next;
-                }
-
-                // Not found
-                self.push(Value::nil());
-                Action::Next
-            }
-            OP_GET_FIELD => {
-                let field_idx = i.a() as usize;
-                let target = self.pop();
-                let field = &self.frames[top].code.string_table[field_idx];
-
-                // First try map field access (fast path for dict/struct access)
-                if let Some(map) = target.as_map() {
-                    if let Some(v) = map.get(field.as_ref()).copied() {
-                        self.push(v);
-                        return Action::Next;
-                    }
-                }
-
-                // Then try universal methods (type, super) for non-map or missing fields
-                if let Some(impl_) = self.resolve_universal_method(field) {
-                    let impl_copy = *impl_;
-                    let all_args = [target];
-                    let result = impl_copy.call(self, &all_args);
-                    self.push(result);
-                    return Action::Next;
-                }
-
-                // Not found
-                self.push(Value::nil());
-                Action::Next
-            }
-            OP_FOR_ITER_START => {
-                let iterable = self.pop();
-                let f = &mut self.frames[top];
-                f.iter.clear();
-                if let Some(arr) = iterable.as_array() {
-                    f.iter.extend_from_slice(arr);
-                }
-                f.iter_idx = 0;
-                Action::Next
-            }
-            OP_FOR_ITER_NEXT => {
-                let f = &mut self.frames[top];
-                if (f.iter_idx as usize) < f.iter.len() {
-                    let v = f.iter[f.iter_idx as usize];
-                    f.iter_idx += 1;
-                    self.push(v);
-                    Action::Next
-                } else {
-                    Action::Jump(i.a())
-                }
-            }
-            OP_FOR_RANGE_START => {
-                let end = self.pop().as_int();
-                let start = self.pop().as_int();
-                let f = &mut self.frames[top];
-                f.range_cur = start;
-                f.range_end = end;
-                Action::Next
-            }
-            OP_FOR_RANGE_NEXT => {
-                let f = &mut self.frames[top];
-                if f.range_cur < f.range_end {
-                    let v = f.range_cur;
-                    f.range_cur += 1;
-                    self.push(Value::from_i48(v));
-                    Action::Next
-                } else {
-                    Action::Jump(i.a())
-                }
-            }
-            OP_LOAD_LOCAL_LOAD_LOCAL => {
-                let l = &self.frames[top].locals;
-                let a = unsafe { *l.get_unchecked(i.a() as usize) };
-                let b = unsafe { *l.get_unchecked(i.b() as usize) };
-                self.push(a);
-                self.push(b);
-                Action::Next
-            }
-            OP_LOAD_LOCAL_PUSH_INT => {
-                let v = unsafe { *self.frames[top].locals.get_unchecked(i.a() as usize) };
-                self.push(v);
-                self.push(Value::from_i48(i.b() as i64));
-                Action::Next
-            }
-            OP_LOAD_LOCAL_STORE_LOCAL => {
-                let v = unsafe { *self.frames[top].locals.get_unchecked(i.a() as usize) };
-                unsafe {
-                    *self.frames[top].locals.get_unchecked_mut(i.b() as usize) = v;
-                }
-                Action::Next
-            }
-
-            // ── INC/DEC_LOCAL: $x = $x + 1 / $x - 1 ──
-            OP_INC_LOCAL => {
-                let l = &mut self.frames[top].locals;
-                let idx = i.a() as usize;
-                let v = unsafe { *l.get_unchecked(idx) };
-                if v.tag() == TAG_INT {
-                    let r = v.as_i48().checked_add(1).unwrap_or(v.as_i48());
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = Value::from_i48(r);
-                    }
-                } else {
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = v.add(Value::from_i48(1), &self.arena);
-                    }
-                }
-                Action::Next
-            }
-            OP_DEC_LOCAL => {
-                let l = &mut self.frames[top].locals;
-                let idx = i.a() as usize;
-                let v = unsafe { *l.get_unchecked(idx) };
-                if v.tag() == TAG_INT {
-                    let r = v.as_i48().checked_sub(1).unwrap_or(v.as_i48());
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = Value::from_i48(r);
-                    }
-                } else {
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = v.sub_(Value::from_i48(1));
-                    }
-                }
-                Action::Next
-            }
-            // ── Local-local binary ops: push(a op b) where a and b are locals ──
-            OP_ADD_LOCAL_LOCAL => {
-                let l = &self.frames[top].locals;
-                let a = unsafe { *l.get_unchecked(i.a() as usize) };
-                let b = unsafe { *l.get_unchecked(i.b() as usize) };
-                self.push(a.add(b, &self.arena));
-                Action::Next
-            }
-            OP_SUB_LOCAL_LOCAL => {
-                let l = &self.frames[top].locals;
-                let a = unsafe { *l.get_unchecked(i.a() as usize) };
-                let b = unsafe { *l.get_unchecked(i.b() as usize) };
-                self.push(a.sub_(b));
-                Action::Next
-            }
-            OP_MUL_LOCAL_LOCAL => {
-                let l = &self.frames[top].locals;
-                let a = unsafe { *l.get_unchecked(i.a() as usize) };
-                let b = unsafe { *l.get_unchecked(i.b() as usize) };
-                self.push(a.mul(b, &self.arena));
-                Action::Next
-            }
-            OP_DIV_LOCAL_LOCAL => {
-                let l = &self.frames[top].locals;
-                let a = unsafe { *l.get_unchecked(i.a() as usize) };
-                let b = unsafe { *l.get_unchecked(i.b() as usize) };
-                self.push(a.div_(b));
-                Action::Next
-            }
-            OP_LT_LOCAL_LOCAL => {
-                let l = &self.frames[top].locals;
-                let a = unsafe { *l.get_unchecked(i.a() as usize) };
-                let b = unsafe { *l.get_unchecked(i.b() as usize) };
-                self.push(Value::bool(a.lt(b)));
-                Action::Next
-            }
-            // ── ADD_INT_STORE_LOCAL: $dest = $src + c (three operands) ──
-            OP_ADD_INT_STORE_LOCAL => {
-                let l = &mut self.frames[top].locals;
-                let dest = i.a() as usize;
-                let src = i.b() as usize;
-                let c = i.c() as i64;
-                let v = unsafe { *l.get_unchecked(src) };
-                if v.is_int() {
-                    let r = v.as_i48().checked_add(c).unwrap_or(v.as_i48());
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_i48(r);
-                    }
-                } else {
-                    let r = v.add(Value::from_i48(c), &self.arena);
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = r;
-                    }
-                }
-                Action::Next
-            }
-            // ── INC_LOCAL_INT: $x = $x + c ──
-            OP_INC_LOCAL_INT => {
-                let l = &mut self.frames[top].locals;
-                let idx = i.a() as usize;
-                let c = i.b() as i64;
-                let v = unsafe { *l.get_unchecked(idx) };
-                if v.is_int() {
-                    let r = v.as_i48().checked_add(c).unwrap_or(v.as_i48());
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = Value::from_i48(r);
-                    }
-                } else {
-                    let r = v.add(Value::from_i48(c), &self.arena);
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = r;
-                    }
-                }
-                Action::Next
-            }
-
-            // ── FOR_NUMBER_LOOP: single-opcode numeric for-loop (Luau FORNLOOP style) ──
-            // a = (var_slot << 16) | start_wide_idx, b = end_wide_idx
-            // The loop body follows this instruction, ending with OP_JUMP back here
-            OP_FOR_NUMBER_LOOP => {
-                let f = &mut self.frames[top];
-                let var_slot = (i.a() >> 16) as usize;
-                let start_wide_idx = (i.a() & 0xFFFF) as usize;
-                let end_wide_idx = i.b() as usize;
-
-                // Get start and end from wide operands (only on first iteration)
-                let start = f.code.wide_operands[start_wide_idx];
-                let end = f.code.wide_operands[end_wide_idx];
-
-                // Read current value from local slot
-                let cur = unsafe { *f.locals.get_unchecked(var_slot) };
-                let cur_val = if cur.is_int() { cur.as_i48() } else { start };
-
-                // Increment
-                let next_val = cur_val + 1;
-
-                // Compare and jump
-                if next_val < end {
-                    // Store incremented value back to local
-                    unsafe {
-                        *f.locals.get_unchecked_mut(var_slot) = Value::from_i48(next_val);
-                    }
-                    // Continue to loop body (next instruction)
-                    f.ip += 1;
-                    Action::Next
-                } else {
-                    // Loop done — jump past the body and the OP_JUMP at the end
-                    // We need to find the OP_JUMP at the end of the body and skip it
-                    // The OP_JUMP's target tells us where the loop started, so we skip to ip+1
-                    // Actually, we need to skip past the body. The body ends with OP_JUMP.
-                    // We need to find where the body ends. Since the body always ends with
-                    // OP_JUMP back to this instruction, we can scan forward to find it.
-                    let loop_ip = f.ip; // current instruction pointer (FOR_NUMBER_LOOP)
-                    f.ip += 1; // skip past FOR_NUMBER_LOOP to start of body
-                    // Scan forward to find the OP_JUMP that closes the loop
-                    let code = &f.code.instructions;
-                    let mut scan = f.ip as usize;
-                    while scan < code.len() {
-                        let instr = unsafe { *code.get_unchecked(scan) };
-                        if instr.op() == OP_JUMP && instr.a() == loop_ip {
-                            // Found the closing jump — skip past it
-                            f.ip = (scan + 1) as u32;
-                            return Action::Jump(f.ip);
-                        }
-                        scan += 1;
-                    }
-                    // Fallback: should not happen with valid bytecode
-                    Action::Next
-                }
-            }
-
-            // ── Int-constant local arithmetic: $x = $x op c ──
-            OP_ADD_INT_LOCAL => {
-                let l = &mut self.frames[top].locals;
-                let idx = i.a() as usize;
-                let c = i.b() as i64;
-                let v = unsafe { *l.get_unchecked(idx) };
-                if v.tag() == TAG_INT {
-                    let r = v.as_i48().checked_add(c).unwrap_or(v.as_i48());
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = Value::from_i48(r);
-                    }
-                } else {
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = v.add(Value::from_i48(c), &self.arena);
-                    }
-                }
-                Action::Next
-            }
-            OP_SUB_INT_LOCAL => {
-                let l = &mut self.frames[top].locals;
-                let idx = i.a() as usize;
-                let c = i.b() as i64;
-                let v = unsafe { *l.get_unchecked(idx) };
-                if v.tag() == TAG_INT {
-                    let r = v.as_i48().checked_sub(c).unwrap_or(v.as_i48());
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = Value::from_i48(r);
-                    }
-                } else {
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = v.sub_(Value::from_i48(c));
-                    }
-                }
-                Action::Next
-            }
-            OP_MUL_INT_LOCAL => {
-                let l = &mut self.frames[top].locals;
-                let idx = i.a() as usize;
-                let c = i.b() as i64;
-                let v = unsafe { *l.get_unchecked(idx) };
-                if v.tag() == TAG_INT {
-                    let r = v.as_i48().checked_mul(c).unwrap_or(v.as_i48());
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = Value::from_i48(r);
-                    }
-                } else {
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = v.mul(Value::from_i48(c), &self.arena);
-                    }
-                }
-                Action::Next
-            }
-
-            // ── Two-operand local store: dest = dest op src ──
-            OP_ADD_LOCAL_STORE => fused_local_store(
-                &mut self.frames[top].locals,
-                i,
-                checked_add_overflow,
-                |a, b| a + b,
-                |a, b, arena| a.add(b, arena),
-                &self.arena,
-            ),
-            OP_SUB_LOCAL_STORE => fused_local_store(
-                &mut self.frames[top].locals,
-                i,
-                checked_sub_overflow,
-                |a, b| a - b,
-                |a, b, _arena| a.sub_(b),
-                &self.arena,
-            ),
-            OP_MUL_LOCAL_STORE => fused_local_store(
-                &mut self.frames[top].locals,
-                i,
-                checked_mul_overflow,
-                |a, b| a * b,
-                |a, b, arena| a.mul(b, arena),
-                &self.arena,
-            ),
-            OP_DIV_LOCAL_STORE => fused_local_store(
-                &mut self.frames[top].locals,
-                i,
-                checked_div_overflow,
-                |a, b| a / b,
-                |a, b, _arena| a.div_(b),
-                &self.arena,
-            ),
-
-            // ── WHILE_LT_INT: while $a < b { body } (single-opcode while-loop) ──
-            // Operand a = local slot, b = int constant, c = exit_wide_idx
-            // If locals[a] < b, continue to body. Otherwise, jump to exit_ip from wide[c].
-            OP_WHILE_LT_INT => {
-                let f = &mut self.frames[top];
-                let slot = i.a() as usize;
-                let limit = i.b() as i32 as i64;
-                let exit_wide_idx = i.c() as usize;
-                let v = unsafe { *f.locals.get_unchecked(slot) };
-                let val = if v.tag() == TAG_INT {
-                    v.as_i48()
-                } else {
-                    v.as_int()
-                };
-                if val < limit {
-                    Action::Next
-                } else {
-                    let exit_ip = f.code.wide_operands[exit_wide_idx] as u32;
-                    f.ip = exit_ip;
-                    Action::Jump(exit_ip)
-                }
-            }
-
-            // ── Three-operand local store: dest = src1 op src2 ──
-            OP_ADD_LOCAL_LOCAL_STORE => {
-                let l = &mut self.frames[top].locals;
-                let dest = i.a() as usize;
-                let src1 = i.c() as usize;
-                let src2 = i.b() as usize;
-                let a = unsafe { *l.get_unchecked(src1) };
-                let b = unsafe { *l.get_unchecked(src2) };
-                if a.tag() == TAG_INT && b.tag() == TAG_INT {
-                    let r = checked_add_overflow(a.as_i48(), b.as_i48());
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_i48(r);
-                    }
-                } else if a.is_float() && b.is_float() {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() + b.as_f64());
-                    }
-                } else {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = a.add(b, &self.arena);
-                    }
-                }
-                Action::Next
-            }
-            OP_SUB_LOCAL_LOCAL_STORE => {
-                let l = &mut self.frames[top].locals;
-                let dest = i.a() as usize;
-                let src1 = i.c() as usize;
-                let src2 = i.b() as usize;
-                let a = unsafe { *l.get_unchecked(src1) };
-                let b = unsafe { *l.get_unchecked(src2) };
-                if a.tag() == TAG_INT && b.tag() == TAG_INT {
-                    let r = checked_sub_overflow(a.as_i48(), b.as_i48());
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_i48(r);
-                    }
-                } else if a.is_float() && b.is_float() {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() - b.as_f64());
-                    }
-                } else {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = a.sub_(b);
-                    }
-                }
-                Action::Next
-            }
-            OP_MUL_LOCAL_LOCAL_STORE => {
-                let l = &mut self.frames[top].locals;
-                let dest = i.a() as usize;
-                let src1 = i.c() as usize;
-                let src2 = i.b() as usize;
-                let a = unsafe { *l.get_unchecked(src1) };
-                let b = unsafe { *l.get_unchecked(src2) };
-                if a.tag() == TAG_INT && b.tag() == TAG_INT {
-                    let r = checked_mul_overflow(a.as_i48(), b.as_i48());
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_i48(r);
-                    }
-                } else if a.is_float() && b.is_float() {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() * b.as_f64());
-                    }
-                } else {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = a.mul(b, &self.arena);
-                    }
-                }
-                Action::Next
-            }
-            OP_DIV_LOCAL_LOCAL_STORE => {
-                let l = &mut self.frames[top].locals;
-                let dest = i.a() as usize;
-                let src1 = i.c() as usize;
-                let src2 = i.b() as usize;
-                let a = unsafe { *l.get_unchecked(src1) };
-                let b = unsafe { *l.get_unchecked(src2) };
-                if a.tag() == TAG_INT && b.tag() == TAG_INT {
-                    let r = checked_div_overflow(a.as_i48(), b.as_i48());
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_i48(r);
-                    }
-                } else if a.is_float() && b.is_float() {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() / b.as_f64());
-                    }
-                } else {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = a.div_(b);
-                    }
-                }
-                Action::Next
-            }
-
-            // ── WHILE_LT_LOCAL: while $a < $b { ... } (both locals) ──
-            // Operand a = left slot, b = right slot, c = exit_wide_idx
-            OP_WHILE_LT_LOCAL => {
-                let f = &mut self.frames[top];
-                let l = &f.locals;
-                let left = i.a() as usize;
-                let right = i.b() as usize;
-                let exit_wide_idx = i.c() as usize;
-                let a = unsafe { *l.get_unchecked(left) };
-                let b = unsafe { *l.get_unchecked(right) };
-                let cond = if a.is_int() && b.is_int() {
-                    a.as_i48() < b.as_i48()
-                } else if a.is_float() && b.is_float() {
-                    a.as_f64() < b.as_f64()
-                } else {
-                    false
-                };
-                if cond {
-                    Action::Next
-                } else {
-                    let exit_ip = f.code.wide_operands[exit_wide_idx] as u32;
-                    f.ip = exit_ip;
-                    Action::Jump(exit_ip)
-                }
-            }
-
-            // ── LOAD_CONST_LOCAL: load constant directly to local slot ──
-            // Operand a = local slot, b = value/index, c = kind:
-            //   0 = inline int (value in b, 16-bit unsigned)
-            //   1 = float from wide_operands[b]
-            //   2 = string from string_table[b]
-            //   3 = nil
-            //   4 = true
-            //   5 = false
-            //   6 = wide int from wide_operands[b]
-            OP_LOAD_CONST_LOCAL => {
-                let slot = i.a() as usize;
-                let b = i.b();
-                let kind = i.c();
-                let val = match kind {
-                    0 => Value::from_i48(b as i64),
-                    1 => {
-                        let bits = self.frames[top].code.wide_operands[b as usize];
-                        Value::from_f64(bits as f64)
-                    }
-                    2 => {
-                        let s = self.frames[top].code.string_table[b as usize].to_string();
-                        Value::from_str(s, &self.arena)
-                    }
-                    3 => Value::nil(),
-                    4 => Value::bool(true),
-                    5 => Value::bool(false),
-                    6 => {
-                        let v = self.frames[top].code.wide_operands[b as usize];
-                        Value::from_i48(v)
-                    }
-                    _ => Value::nil(),
-                };
-                let l = &mut self.frames[top].locals;
-                unsafe {
-                    *l.get_unchecked_mut(slot) = val;
-                }
-                Action::Next
-            }
-
-            // ── GET_INDEX_LOCAL_LOCAL_STORE: locals[a] = locals[c][locals[b]] ──
-            OP_GET_INDEX_LOCAL_LOCAL_STORE => {
-                let l = &mut self.frames[top].locals;
-                let dest = i.a() as usize;
-                let idx_slot = i.b() as usize;
-                let arr_slot = i.c() as usize;
-                let target = unsafe { *l.get_unchecked(arr_slot) };
-                let idx = unsafe { *l.get_unchecked(idx_slot) };
-                let result = if let Some(arr) = target.as_array() {
-                    let i = idx.as_int();
-                    let i = if i < 0 { arr.len() as i64 + i } else { i };
-                    arr.get(i as usize).copied().unwrap_or(Value::nil())
-                } else if let Some(m) = target.as_map() {
-                    idx.as_str()
-                        .and_then(|k| m.get(k).copied())
-                        .unwrap_or(Value::nil())
-                } else {
-                    Value::nil()
-                };
-                unsafe {
-                    *l.get_unchecked_mut(dest) = result;
-                }
-                Action::Next
-            }
-
-            // ── GET_FIELD_LOCAL_STORE: locals[a] = locals[c].(string_table[b]) ──
-            OP_GET_FIELD_LOCAL_STORE => {
-                let dest = i.a() as usize;
-                let str_idx = i.b() as usize;
-                let obj_slot = i.c() as usize;
-                let frame = &mut self.frames[top];
-                let field_name: &str = &frame.code.string_table[str_idx];
-                let obj = unsafe { *frame.locals.get_unchecked(obj_slot) };
-                let result = if let Some(map_obj) = obj.as_map_mut_ref() {
-                    // Fast path: use indexed arrays with pre-computed hashes
-                    let field_hash = fast_hash(field_name.as_bytes());
-                    let mut found = Value::nil();
-                    for (idx, (hash, key)) in map_obj.key_hashes.iter().enumerate() {
-                        if *hash == field_hash && key == field_name {
-                            found = map_obj.key_values[idx];
-                            break;
-                        }
-                    }
-                    found
-                } else if let Some(map) = obj.as_map() {
-                    map.get(field_name).copied().unwrap_or(Value::nil())
-                } else {
-                    Value::nil()
-                };
-                unsafe {
-                    *frame.locals.get_unchecked_mut(dest) = result;
-                }
-                Action::Next
-            }
-
-            // ── MOD_LOCAL_LOCAL_STORE: locals[a] = locals[c] % locals[b] ──
-            OP_MOD_LOCAL_LOCAL_STORE => {
-                let l = &mut self.frames[top].locals;
-                let dest = i.a() as usize;
-                let src2 = i.b() as usize;
-                let src1 = i.c() as usize;
-                let a = unsafe { *l.get_unchecked(src1) };
-                let b = unsafe { *l.get_unchecked(src2) };
-                if a.tag() == TAG_INT && b.tag() == TAG_INT {
-                    let bi = b.as_i48();
-                    let r = if bi != 0 { a.as_i48() % bi } else { 0 };
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_i48(r);
-                    }
-                } else if a.is_float() && b.is_float() {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() % b.as_f64());
-                    }
-                } else {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = a.mod_(b);
-                    }
-                }
-                Action::Next
-            }
-
-            // ── ARRAY_PUSH_LOCAL: append locals[b] to array in locals[a] ──
-            OP_ARRAY_PUSH_LOCAL => {
-                let l = &mut self.frames[top].locals;
-                let arr_slot = i.a() as usize;
-                let val_slot = i.b() as usize;
-                let val = unsafe { *l.get_unchecked(val_slot) };
-                let arr = unsafe { *l.get_unchecked(arr_slot) };
-                if let Some(arr_mut) = arr.as_array_mut() {
-                    arr_mut.push(val);
-                }
-                unsafe {
-                    *l.get_unchecked_mut(arr_slot) = arr;
-                }
-                Action::Next
-            }
-
-            // ── Float constant local arithmetic: $x = $x op float_const ──
-            OP_ADD_FLOAT_LOCAL => {
-                let frame = &self.frames[top];
-                let f = f64::from_bits(frame.code.wide_operands[i.b() as usize] as u64);
-                let l = &mut self.frames[top].locals;
-                let idx = i.a() as usize;
-                let v = unsafe { *l.get_unchecked(idx) };
-                if v.is_float() {
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = Value::from_f64(v.as_f64() + f);
-                    }
-                } else if v.tag() == TAG_INT {
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = Value::from_f64(v.as_i48() as f64 + f);
-                    }
-                } else {
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = v.add(Value::from_f64(f), &self.arena);
-                    }
-                }
-                Action::Next
-            }
-            OP_SUB_FLOAT_LOCAL => {
-                let frame = &self.frames[top];
-                let f = f64::from_bits(frame.code.wide_operands[i.b() as usize] as u64);
-                let l = &mut self.frames[top].locals;
-                let idx = i.a() as usize;
-                let v = unsafe { *l.get_unchecked(idx) };
-                if v.is_float() {
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = Value::from_f64(v.as_f64() - f);
-                    }
-                } else if v.tag() == TAG_INT {
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = Value::from_f64(v.as_i48() as f64 - f);
-                    }
-                } else {
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = v.sub_(Value::from_f64(f));
-                    }
-                }
-                Action::Next
-            }
-            OP_MUL_FLOAT_LOCAL => {
-                let frame = &self.frames[top];
-                let f = f64::from_bits(frame.code.wide_operands[i.b() as usize] as u64);
-                let l = &mut self.frames[top].locals;
-                let idx = i.a() as usize;
-                let v = unsafe { *l.get_unchecked(idx) };
-                if v.is_float() {
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = Value::from_f64(v.as_f64() * f);
-                    }
-                } else if v.tag() == TAG_INT {
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = Value::from_f64(v.as_i48() as f64 * f);
-                    }
-                } else {
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = v.mul(Value::from_f64(f), &self.arena);
-                    }
-                }
-                Action::Next
-            }
-            OP_DIV_FLOAT_LOCAL => {
-                let frame = &self.frames[top];
-                let f = f64::from_bits(frame.code.wide_operands[i.b() as usize] as u64);
-                let l = &mut self.frames[top].locals;
-                let idx = i.a() as usize;
-                let v = unsafe { *l.get_unchecked(idx) };
-                if v.is_float() {
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = Value::from_f64(v.as_f64() / f);
-                    }
-                } else if v.tag() == TAG_INT {
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = Value::from_f64(v.as_i48() as f64 / f);
-                    }
-                } else {
-                    unsafe {
-                        *l.get_unchecked_mut(idx) = v.div_(Value::from_f64(f));
-                    }
-                }
-                Action::Next
-            }
-
-            // ── MOD_EQ_INT: locals[a] % b == c ──
-            OP_MOD_EQ_INT => {
-                let l = &mut self.frames[top].locals;
-                let idx = i.a() as usize;
-                let divisor = i.b() as i64;
-                let eq_val = i.c() as i64;
-                let v = unsafe { *l.get_unchecked(idx) };
-                let result = if v.tag() == TAG_INT && divisor != 0 {
-                    let val = v.as_i48();
-                    let mod_result = val % divisor;
-                    Value::bool(mod_result == eq_val)
-                } else {
-                    let mod_val = v.mod_(Value::from_i48(divisor));
-                    Value::bool(mod_val.eq_(Value::from_i48(eq_val)))
-                };
-                self.push(result);
-                Action::Next
-            }
-
-            _ => {
-                // Extension opcode lookup
-                let op_code = i.op();
-                if let Some(handler) = self.opcode_table[op_code as usize] {
-                    match handler(self, top, i) {
-                        super::opcode::OpcodeResult::Next => Action::Next,
-                        super::opcode::OpcodeResult::Jump(addr) => Action::Jump(addr),
-                        super::opcode::OpcodeResult::Return => Action::Return,
-                        super::opcode::OpcodeResult::PushFrame => Action::PushFrame,
-                    }
-                } else {
-                    Action::Next
-                }
-            }
+        } else {
+            Action::Next
         }
     }
 }
@@ -1735,6 +644,10 @@ impl VM {
         }
 
         let base = self.stack.len() as u32;
+        let mut argv = SmallVec::<[Value; 4]>::with_capacity(args.len());
+        for v in &args {
+            argv.push(*v);
+        }
         self.pending = Some(Frame {
             code: Arc::clone(bc),
             locals,
@@ -1745,8 +658,22 @@ impl VM {
             range_end: 0,
             stack_base: base,
             defer_stack: SmallVec::new(),
+            argv,
         });
         Action::PushFrame
+    }
+
+    /// Same as `enter_call` but returns [`OpcodeResult`] for use from opcode handlers.
+    fn enter_call_from_op(
+        &mut self,
+        func: crate::runtime::value::FuncValue,
+        args: Vec<Value>,
+    ) -> crate::runtime::opcode::OpcodeResult {
+        match self.enter_call(func, args) {
+            Action::PushFrame => crate::runtime::opcode::OpcodeResult::PushFrame,
+            Action::Next => crate::runtime::opcode::OpcodeResult::Next,
+            _ => crate::runtime::opcode::OpcodeResult::Next,
+        }
     }
 
     /// Reentrantly invokes an XCL function or closure value with the given arguments.
@@ -1798,6 +725,7 @@ impl VM {
             range_end: 0,
             stack_base,
             defer_stack: SmallVec::new(),
+            argv: SmallVec::from_slice(args),
         });
 
         // Run the VM dispatch loop until the frame we just pushed returns
@@ -1940,91 +868,362 @@ impl VM {
 /// Returns a human-readable name for an opcode, or the hex value if unknown.
 #[cfg(feature = "opcode-stats")]
 fn opcode_name(op: u8) -> String {
-    opcode_names!(op,
-        OP_NOP => "OP_NOP",
-        OP_PUSH_NIL => "OP_PUSH_NIL",
-        OP_PUSH_TRUE => "OP_PUSH_TRUE",
-        OP_PUSH_FALSE => "OP_PUSH_FALSE",
-        OP_PUSH_INT => "OP_PUSH_INT",
-        OP_PUSH_INT_WIDE => "OP_PUSH_INT_WIDE",
-        OP_PUSH_FLOAT => "OP_PUSH_FLOAT",
-        OP_PUSH_STR => "OP_PUSH_STR",
-        OP_LOAD_LOCAL => "OP_LOAD_LOCAL",
-        OP_STORE_LOCAL => "OP_STORE_LOCAL",
-        OP_LOAD_GLOBAL => "OP_LOAD_GLOBAL",
-        OP_STORE_GLOBAL => "OP_STORE_GLOBAL",
-        OP_ADD => "OP_ADD",
-        OP_SUB => "OP_SUB",
-        OP_MUL => "OP_MUL",
-        OP_DIV => "OP_DIV",
-        OP_MOD => "OP_MOD",
-        OP_NEG => "OP_NEG",
-        OP_EQ => "OP_EQ",
-        OP_NEQ => "OP_NEQ",
-        OP_LT => "OP_LT",
-        OP_GT => "OP_GT",
-        OP_LE => "OP_LE",
-        OP_GE => "OP_GE",
-        OP_AND => "OP_AND",
-        OP_OR => "OP_OR",
-        OP_NOT => "OP_NOT",
-        OP_IN => "OP_IN",
-        OP_TYPE_TEST => "OP_TYPE_TEST",
-        OP_TYPE_CAST => "OP_TYPE_CAST",
-        OP_JUMP => "OP_JUMP",
-        OP_JUMP_IF_FALSE => "OP_JUMP_IF_FALSE",
-        OP_JUMP_IF_NIL => "OP_JUMP_IF_NIL",
-        OP_CALL => "OP_CALL",
-        OP_CALL_METHOD => "OP_CALL_METHOD",
-        OP_RETURN => "OP_RETURN",
-        OP_HALT => "OP_HALT",
-        OP_GET_INDEX => "OP_GET_INDEX",
-        OP_GET_FIELD => "OP_GET_FIELD",
-        OP_MAKE_ARRAY => "OP_MAKE_ARRAY",
-        OP_MAKE_DICT => "OP_MAKE_DICT",
-        OP_ARRAY_PUSH => "OP_ARRAY_PUSH",
-        OP_FOR_ITER_START => "OP_FOR_ITER_START",
-        OP_FOR_ITER_NEXT => "OP_FOR_ITER_NEXT",
-        OP_FOR_RANGE_START => "OP_FOR_RANGE_START",
-        OP_FOR_RANGE_NEXT => "OP_FOR_RANGE_NEXT",
-        OP_LOAD_LAMBDA => "OP_LOAD_LAMBDA",
-        OP_COALESCE => "OP_COALESCE",
-        OP_LOAD_LOCAL_LOAD_LOCAL => "OP_LL_LL",
-        OP_ADD_LOCAL_LOCAL => "OP_ADD_LL",
-        OP_SUB_LOCAL_LOCAL => "OP_SUB_LL",
-        OP_LT_LOCAL_LOCAL => "OP_LT_LL",
-        OP_LOAD_LOCAL_PUSH_INT => "OP_LL_PI",
-        OP_LOAD_LOCAL_STORE_LOCAL => "OP_LL_SL",
-        OP_FOR_NUMBER_LOOP => "OP_FOR_NUM_LP",
-        OP_ADD_INT_LOCAL => "OP_ADD_INT_L",
-        OP_ADD_LOCAL_STORE => "OP_ADD_L_ST",
-        OP_SUB_INT_LOCAL => "OP_SUB_INT_L",
-        OP_MUL_INT_LOCAL => "OP_MUL_INT_L",
-        OP_WHILE_LT_INT => "OP_WHILE_LT",
-        OP_MUL_LOCAL_STORE => "OP_MUL_L_ST",
-        OP_DIV_LOCAL_STORE => "OP_DIV_L_ST",
-        OP_SUB_LOCAL_STORE => "OP_SUB_L_ST",
-        OP_ADD_LOCAL_LOCAL_STORE => "OP_ADD_LL_ST",
-        OP_MUL_LOCAL_LOCAL_STORE => "OP_MUL_LL_ST",
-        OP_SUB_LOCAL_LOCAL_STORE => "OP_SUB_LL_ST",
-        OP_DIV_LOCAL_LOCAL_STORE => "OP_DIV_LL_ST",
-        OP_WHILE_LT_LOCAL => "OP_WHILE_LT_L",
-        OP_GET_INDEX_LOCAL_LOCAL_STORE => "OP_GET_IDX_LL_ST",
-        OP_GET_FIELD_LOCAL_STORE => "OP_GET_FLD_ST",
-        OP_MOD_LOCAL_LOCAL_STORE => "OP_MOD_LL_ST",
-        OP_LOAD_CONST_LOCAL => "OP_LOAD_CST_L",
-        OP_ARRAY_PUSH_LOCAL => "OP_ARR_PUSH_L",
-        OP_ADD_FLOAT_LOCAL => "OP_ADD_FLT_L",
-        OP_SUB_FLOAT_LOCAL => "OP_SUB_FLT_L",
-        OP_MUL_FLOAT_LOCAL => "OP_MUL_FLT_L",
-        OP_DIV_FLOAT_LOCAL => "OP_DIV_FLT_L",
-        OP_MOD_EQ_INT => "OP_MOD_EQ",
-        OP_SHL => "OP_SHL",
-        OP_SHR => "OP_SHR",
-        OP_BITAND => "OP_BITAND",
-        OP_INC_LOCAL => "OP_INC_L",
-        OP_DEC_LOCAL => "OP_DEC_L",
-        OP_ADD_INT_STORE_LOCAL => "OP_ADD_INT_ST",
-        OP_INC_LOCAL_INT => "OP_INC_L_INT",
-    )
+    crate::runtime::opcode::opcode_name(op)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("0x{:02X}", op))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::compile;
+    use crate::compiler::lexer::lex;
+    use crate::compiler::parser::parse;
+
+    fn eval_with_args(src: &str, name: &str, args: &[&str]) -> Value {
+        let tokens = lex(src, "<test>");
+        let ast = parse(&tokens, src);
+        let bc = compile(&ast);
+        let mut vm = VM::new();
+        vm.register_core();
+        let vals: Vec<Value> = args
+            .iter()
+            .map(|s| Value::from_str_boxed((*s).to_string()))
+            .collect();
+        vm.set_script_args(name, vals);
+        vm.run(&bc)
+    }
+
+    #[test]
+    fn test_arg_count() {
+        let result = eval_with_args("$#", "script.xcl", &["a", "b", "c"]);
+        assert_eq!(result.as_i48(), 3);
+    }
+
+    #[test]
+    fn test_positional_arg() {
+        let result = eval_with_args("$1", "script.xcl", &["a"]);
+        assert!(
+            result.is_ptr(),
+            "expected pointer, got tag={:016X}",
+            result.0
+        );
+        assert_eq!(result.as_str(), Some("a"));
+    }
+
+    #[test]
+    fn test_positional_arg_out_of_range() {
+        let result = eval_with_args("$10", "script.xcl", &["a"]);
+        assert!(result.is_nil());
+    }
+
+    #[test]
+    fn test_script_name() {
+        let result = eval_with_args("$0", "script.xcl", &[]);
+        assert_eq!(result.as_str(), Some("script.xcl"));
+    }
+
+    #[test]
+    fn test_args_array() {
+        // Keep the VM alive: `$@` allocates its array in the VM arena.
+        let src = "$@";
+        let tokens = lex(src, "<test>");
+        let ast = parse(&tokens, src);
+        let bc = compile(&ast);
+        let mut vm = VM::new();
+        vm.register_core();
+        let vals: Vec<Value> = ["a", "b"]
+            .iter()
+            .map(|s| Value::from_str_boxed((*s).to_string()))
+            .collect();
+        vm.set_script_args("script.xcl", vals);
+        let result = vm.run(&bc);
+        let arr = result.as_array().expect("$@ should return an array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0].as_str(), Some("a"));
+        assert_eq!(arr[1].as_str(), Some("b"));
+    }
+
+    #[test]
+    fn test_args_joined() {
+        let result = eval_with_args("$*", "script.xcl", &["a", "b", "c d"]);
+        assert_eq!(result.as_str(), Some("a b c d"));
+    }
+
+    #[test]
+    #[should_panic(expected = "not supported")]
+    fn test_unsupported_dollar_dollar() {
+        eval_with_args("$$", "script.xcl", &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "not supported")]
+    fn test_unsupported_dollar_question() {
+        eval_with_args("$?", "script.xcl", &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "not supported")]
+    fn test_unsupported_dollar_bang() {
+        eval_with_args("$!", "script.xcl", &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "not supported")]
+    fn test_unsupported_dollar_dash() {
+        eval_with_args("$-", "script.xcl", &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "read-only")]
+    fn test_assignment_read_only() {
+        eval_with_args("$1 = 5", "script.xcl", &[]);
+    }
+
+    #[test]
+    fn test_special_var_as_bare_call_arg() {
+        let src = r#"
+            id($x) { return $x }
+            id $1
+        "#;
+        let result = eval_with_args(src, "script.xcl", &["hello"]);
+        assert_eq!(result.as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn test_special_vars_in_function_scope() {
+        let src = r#"
+            f($a, $b) {
+                if $# == 3 { return $3 }
+                return "bad"
+            }
+            f("x", "y", "z")
+        "#;
+        let result = eval_with_args(src, "script.xcl", &[]);
+        assert_eq!(result.as_str(), Some("z"));
+    }
+
+    #[test]
+    fn test_script_name_inside_function() {
+        let src = r#"
+            f() { return $0 }
+            f()
+        "#;
+        let result = eval_with_args(src, "script.xcl", &[]);
+        assert_eq!(result.as_str(), Some("script.xcl"));
+    }
+
+    #[test]
+    fn test_bare_calls_do_not_merge_across_newlines() {
+        let src = "f \"a\"\nf \"b\"\n";
+        let tokens = crate::compiler::lexer::lex(src, "<test>");
+        let ast = crate::compiler::parser::parse(&tokens, src);
+        assert_eq!(ast.len(), 2, "expected two statements, got {:?}", ast);
+    }
+
+    #[test]
+    fn test_nested_call_argument_does_not_swallow_next_line() {
+        let src = r#"
+            f($x) { return $x }
+            g($x) { return $x }
+            h($x, $y) { return $y }
+            h(f("a"), g("b"))
+            f("c")
+        "#;
+        let tokens = crate::compiler::lexer::lex(src, "<test>");
+        let ast = crate::compiler::parser::parse(&tokens, src);
+        // 3 function definitions + 2 call statements
+        assert_eq!(ast.len(), 5, "unexpected statement count: {:?}", ast);
+    }
+
+    // ── Bitwise OR/XOR/NOT, exponentiation, ternary tests ──
+
+    #[test]
+    fn test_bitor() {
+        let result = eval_with_args("1 | 2", "script.xcl", &[]);
+        assert_eq!(result.as_i48(), 3);
+    }
+
+    #[test]
+    fn test_bitxor() {
+        let result = eval_with_args("6 ^ 3", "script.xcl", &[]);
+        assert_eq!(result.as_i48(), 5);
+    }
+
+    #[test]
+    fn test_bitnot() {
+        let result = eval_with_args("~0", "script.xcl", &[]);
+        assert_eq!(result.as_i48(), -1);
+    }
+
+    #[test]
+    fn test_pow_basic() {
+        let result = eval_with_args("2 ** 10", "script.xcl", &[]);
+        assert_eq!(result.as_i48(), 1024);
+    }
+
+    #[test]
+    fn test_pow_negative_exp() {
+        let result = eval_with_args("2 ** -1", "script.xcl", &[]);
+        assert!((result.as_f64() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_pow_right_associative() {
+        // 2 ** 3 ** 2 = 2 ** 9 = 512
+        let result = eval_with_args("2 ** 3 ** 2", "script.xcl", &[]);
+        assert_eq!(result.as_i48(), 512);
+    }
+
+    #[test]
+    fn test_pow_mixed_float_operands() {
+        let result = eval_with_args("2.0 ** 3", "script.xcl", &[]);
+        assert!(result.is_float());
+        assert!((result.as_f64() - 8.0).abs() < f64::EPSILON);
+
+        let result = eval_with_args("2 ** 3.0", "script.xcl", &[]);
+        assert!(result.is_float());
+        assert!((result.as_f64() - 8.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_pow_i48_boundary() {
+        // 2^40 fits in the 48-bit signed payload.
+        let result = eval_with_args("2 ** 40", "script.xcl", &[]);
+        assert_eq!(result.as_i48(), 1_099_511_627_776);
+
+        // 2^47 does not fit; it must fall back to float.
+        let result = eval_with_args("2 ** 47", "script.xcl", &[]);
+        assert!(result.is_float());
+        assert!((result.as_f64() - 140_737_488_355_328.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_precedence_bitor_bitand() {
+        // 1 | 2 & 3 → 1 | (2 & 3) → 1 | 2 → 3
+        let result = eval_with_args("1 | 2 & 3", "script.xcl", &[]);
+        assert_eq!(result.as_i48(), 3);
+    }
+
+    #[test]
+    fn test_precedence_bitxor_bitand() {
+        // 1 ^ 2 & 3 → 1 ^ (2 & 3) → 1 ^ 2 → 3
+        let result = eval_with_args("1 ^ 2 & 3", "script.xcl", &[]);
+        assert_eq!(result.as_i48(), 3);
+    }
+
+    #[test]
+    fn test_precedence_bitor_bitxor() {
+        // 1 | 2 ^ 3 → (1 | 2) ^ 3 → 3 ^ 3 → 0... wait, task says 1
+        // Actually: | binds looser than ^, so 1 | 2 ^ 3 → 1 | (2 ^ 3) → 1 | 1 → 1
+        let result = eval_with_args("1 | 2 ^ 3", "script.xcl", &[]);
+        assert_eq!(result.as_i48(), 1);
+    }
+
+    #[test]
+    fn test_compound_bitor() {
+        let result = eval_with_args("$x = 5; $x |= 3; $x", "script.xcl", &[]);
+        assert_eq!(result.as_i48(), 7);
+    }
+
+    #[test]
+    fn test_compound_bitxor() {
+        let result = eval_with_args("$x = 5; $x ^= 3; $x", "script.xcl", &[]);
+        assert_eq!(result.as_i48(), 6);
+    }
+
+    #[test]
+    fn test_compound_pow() {
+        let result = eval_with_args("$x = 3; $x **= 2; $x", "script.xcl", &[]);
+        assert_eq!(result.as_i48(), 9);
+    }
+
+    #[test]
+    fn test_conditional_true() {
+        let result = eval_with_args("1 if true else 2", "script.xcl", &[]);
+        assert_eq!(result.as_i48(), 1);
+    }
+
+    #[test]
+    fn test_conditional_false() {
+        let result = eval_with_args("1 if false else 2", "script.xcl", &[]);
+        assert_eq!(result.as_i48(), 2);
+    }
+
+    #[test]
+    fn test_conditional_right_associative() {
+        let result = eval_with_args("1 if false else 2 if true else 3", "script.xcl", &[]);
+        assert_eq!(result.as_i48(), 2);
+    }
+
+    #[test]
+    fn test_conditional_string_example() {
+        let result = eval_with_args(
+            r#"$num = 6; $label = "WEEKEND!" if $num > 5 else "Workday"; $label"#,
+            "script.xcl",
+            &[],
+        );
+        assert_eq!(result.as_str(), Some("WEEKEND!"));
+    }
+
+    #[test]
+    fn test_if_statement_not_swallowed_by_conditional() {
+        // The newline before `if` must keep it as a statement, not a ternary.
+        let src = "$x = 1\nif true { $x = 2 }\n$x";
+        let result = eval_with_args(src, "script.xcl", &[]);
+        assert_eq!(result.as_i48(), 2);
+    }
+
+    #[test]
+    fn test_lambda_body_bitor() {
+        // $f = |$x| $x | 1; $f 2 → 3
+        let result = eval_with_args("$f = |$x| $x | 1; $f 2", "script.xcl", &[]);
+        assert_eq!(result.as_i48(), 3);
+    }
+
+    #[test]
+    fn test_logical_or_still_works() {
+        let result = eval_with_args("false || true", "script.xcl", &[]);
+        assert!(result.as_bool());
+    }
+
+    #[test]
+    fn test_sum_type_parsing() {
+        // Shape = A | B should produce a TypeDef, not a binary expression
+        let src = "Shape = A | B";
+        let tokens = lex(src, "<test>");
+        let ast = parse(&tokens, src);
+        assert_eq!(ast.len(), 1);
+        match &ast[0] {
+            crate::compiler::ast::AstNode::TypeDef { name, .. } => {
+                assert_eq!(name, "Shape");
+            }
+            other => panic!("Expected TypeDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parenthesized_lambda_arg() {
+        // f (|$x| $x) should parse as a call with a lambda argument
+        let src = "f (|$x| $x)";
+        let tokens = lex(src, "<test>");
+        let ast = parse(&tokens, src);
+        assert_eq!(ast.len(), 1);
+        match &ast[0] {
+            crate::compiler::ast::AstNode::Call { callee, args, .. } => {
+                match callee.as_ref() {
+                    crate::compiler::ast::AstNode::Ident { name, .. } => {
+                        assert_eq!(name, "f");
+                    }
+                    other => panic!("Expected Ident callee, got {:?}", other),
+                }
+                assert_eq!(args.len(), 1);
+                match &args[0].value {
+                    crate::compiler::ast::AstNode::Lambda { .. } => {}
+                    other => panic!("Expected Lambda arg, got {:?}", other),
+                }
+            }
+            other => panic!("Expected Call, got {:?}", other),
+        }
+    }
 }

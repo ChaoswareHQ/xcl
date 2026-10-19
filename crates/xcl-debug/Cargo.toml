@@ -23,4 +23,5 @@ path = "src/bytecode_main.rs"
 
 [dependencies]
 xcl-vm.workspace = true
+xcl-plugins.workspace = true
 clap.workspace = true

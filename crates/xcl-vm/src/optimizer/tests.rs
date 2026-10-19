@@ -123,7 +123,7 @@ fn test_licm_with_real_compiled_bytecode() {
     "#;
 
     let mut vm = VM::new();
-    vm.register_all();
+    vm.register_core();
     let result = evaluate(source, &mut vm);
     assert!(result.is_int(), "result should be an integer");
     assert_eq!(result.as_int(), 100, "sum should be 100");

@@ -300,6 +300,30 @@ pub enum AstNode {
         /// Target type name to cast to.
         type_name: String,
     },
+    /// Read-only special argument variable.
+    SpecialVar {
+        /// Source location.
+        span: Span,
+        /// Which special variable this is.
+        kind: SpecialVarKind,
+        /// Positional index for `$1..$N`; `0` for all other kinds.
+        index: u32,
+    },
+}
+
+/// Kinds of read-only special variables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecialVarKind {
+    /// `$0` — current script name.
+    ScriptName,
+    /// `$1..$N` — positional argument.
+    Positional,
+    /// `$#` — argument count.
+    ArgCount,
+    /// `$@` — argument array.
+    ArgsArray,
+    /// `$*` — arguments joined by spaces.
+    ArgsJoined,
 }
 
 /// Classification of custom type definitions in XCL.
@@ -383,9 +407,9 @@ pub enum BinaryOperator {
     Le,
     /// Greater than or equal: `>=`.
     Ge,
-    /// Short-circuiting logical AND: `&&` or `and`.
+    /// Logical AND (eager in the current VM): `&&` or `and`.
     And,
-    /// Short-circuiting logical OR: `||` or `or`.
+    /// Logical OR (eager in the current VM): `||` or `or`.
     Or,
     /// Null coalescing operator: `??`.
     Coalesce,
@@ -397,6 +421,12 @@ pub enum BinaryOperator {
     Shr,
     /// Bitwise AND: `&`.
     BitAnd,
+    /// Bitwise OR: `|`.
+    BitOr,
+    /// Bitwise XOR: `^`.
+    BitXor,
+    /// Exponentiation: `**`.
+    Pow,
 }
 
 /// Unary operators supported by XCL expressions.
@@ -404,8 +434,10 @@ pub enum BinaryOperator {
 pub enum UnaryOperator {
     /// Arithmetic negation: `-x`.
     Neg,
-    /// Logical inversion: `!x` or `not x`.
+    /// Logical inversion: `not x`; `!` is reserved and currently a no-op.
     Not,
+    /// Bitwise NOT: `~`.
+    BitNot,
 }
 
 /// A single step in a pipeline expression.

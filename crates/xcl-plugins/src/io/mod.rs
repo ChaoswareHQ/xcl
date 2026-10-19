@@ -32,6 +32,7 @@
 
 use std::io::{Read, Write};
 use xcl_macros::{Xcl, xcl_impl};
+use xcl_vm::Value;
 
 /// I/O operations type.
 #[derive(Xcl)]
@@ -39,13 +40,15 @@ pub struct Io;
 
 #[xcl_impl(auto_import)]
 impl Io {
-    /// Print text to stdout without a trailing newline.
-    pub fn print(text: String) {
+    /// Print any value to stdout without a trailing newline.
+    pub fn print(value: Value) {
+        let text = value.as_string();
         let _ = std::io::stdout().write_all(text.as_bytes());
     }
 
-    /// Print text to stdout with a trailing newline.
-    pub fn println(text: String) {
+    /// Print any value to stdout with a trailing newline.
+    pub fn println(value: Value) {
+        let text = value.as_string();
         let _ = std::io::stdout().write_all(text.as_bytes());
         let _ = std::io::stdout().write_all(b"\n");
     }

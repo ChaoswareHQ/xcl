@@ -1629,20 +1629,18 @@ impl<'a> DomainCtx<'a> {
         self.vm.restore_globals(saved);
     }
 
-    /// Scan NATIVE_REGISTRY for entries matching the given impl type name,
+    /// Scan registered native entries for entries matching the given impl type name,
     /// and override globals with their implementations. Returns the saved state for later restoration.
     ///
     /// Each `#[xcl_fn]` declares `impl = "CloudflareProvider"` to link to its provider type.
-    /// The method looks up the impl descriptor in IMPL_REGISTRY, gets its method names,
+    /// The method looks up the impl descriptor in the VM's impl_index, gets its method names,
     /// and matches them against native entries with the same `impl_type`.
     pub fn override_by_trait(
         &mut self,
         impl_type_name: &str,
     ) -> Vec<(Box<str>, Option<u32>)> {
-        use crate::utils::native::{NATIVE_REGISTRY, IMPL_REGISTRY};
-
         // Find all impl descriptors for this type — collect trait names
-        let impl_descs = IMPL_REGISTRY.iter().filter(|desc| {
+        let impl_descs = self.vm.impl_index.iter().filter(|desc| {
             desc.type_name == impl_type_name
         }).collect::<Vec<_>>();
 
@@ -1657,7 +1655,8 @@ impl<'a> DomainCtx<'a> {
 
         // Collect (owned_name, BuiltinImpl) pairs for matching entries
         let mut pairs: Vec<(String, BuiltinImpl)> = Vec::new();
-        for entry in NATIVE_REGISTRY.iter() {
+        for entry in self.vm.native_entries.iter() {
+            let entry = *entry;
             if entry.impl_type == Some(impl_type_name) {
                 // Check if this entry's override_method or method matches any method in the impl
                 let method_match = method_names.contains(&entry.method)
@@ -1673,7 +1672,7 @@ impl<'a> DomainCtx<'a> {
                             BuiltinImpl::Ctx(f)
                         }
                     };
-                    // Use the full dotted name (domain.method) to match how register_all_natives
+                    // Use the full dotted name (domain.method) to match how register_natives
                     // registers functions in global_index, e.g., "bucket.list" not just "list"
                     let full_name = if let Some(domain) = entry.domain {
                         format!("{}.{}", domain, entry.method)
@@ -1727,8 +1726,7 @@ pub trait XclType: Sized {
 /// Universal trait available on all XCL values.
 ///
 /// Provides methods like `type` and `super` that work on any value in the XCL VM.
-/// This is implemented as a blanket trait — any type registered in TYPE_REGISTRY
-/// automatically inherits these methods via the universal NATIVE_REGISTRY entries.
+/// These are implemented as core axioms registered directly in the VM.
 pub trait XclObject {
     /// Returns the type name of the value as a string.
     fn xcl_type_name(&self) -> String;
@@ -1740,15 +1738,15 @@ pub trait XclObject {
 /// Blanket implementation: any type that implements `XclType` automatically gets `XclObject`.
 impl<T: XclType> XclObject for T {
     fn xcl_type_name(&self) -> String {
-        // The type name is inferred from the struct's TYPE_REGISTRY entry
-        // This is a fallback — the universal `type` method in NATIVE_REGISTRY
-        // provides the actual implementation that checks TYPE_REGISTRY
+        // The type name is inferred from the VM type entries
+        // This is a fallback — the universal `type` axiom provides the actual
+        // implementation that checks VM type entries
         "unknown".to_string()
     }
 
     fn xcl_super(&self) -> Option<Value> {
-        // The actual super resolution is handled by the universal `super` method
-        // in NATIVE_REGISTRY which checks TYPE_REGISTRY for parent_type
+        // The actual super resolution is handled by the universal `super` axiom
+        // which checks VM type entries for parent_type
         None
     }
 }

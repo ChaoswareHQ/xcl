@@ -26,11 +26,13 @@
 //! * **Comments**:
 //!   - Single-line comments begin with `#` and extend to end of line: `# this is a comment`.
 //! * **Pipelining and Operators**:
-//!   - Pipelines: `|>` (pipeline), `|` (lambda pipe).
-//!   - Arithmetic: `+`, `-`, `*`, `/`, `%`.
+//!   - Pipelines: `|>` (pipeline), `|` (lambda pipe / bitwise OR).
+//!   - Arithmetic: `+`, `-`, `*`, `/`, `%`, `**`.
 //!   - Comparisons: `==`, `!=`, `<`, `>`, `<=`, `>=`.
-//!   - Assignment & Compound: `=`, `+=`, `-=`, `*=`, `/=`, `??=`, `:=`.
+//!   - Bitwise: `&`, `|`, `^`, `~`, `<<`, `>>`.
+//!   - Assignment & Compound: `=`, `+=`, `-=`, `*=`, `/=`, `|=`, `^=`, `**=`, `??=`, `:=`.
 //!   - Null coalescing: `??`.
+//!   - Conditional expression: `a if cond else b`.
 //!   - Safe navigation: `?.`.
 //!
 //! # Examples
@@ -164,6 +166,12 @@ pub enum Token {
     /// Variable identifier prefixed with `$` (e.g. `$total`, `$x_1`).
     #[regex(r"\$[a-zA-Z_][a-zA-Z0-9_]*")]
     Ident,
+    /// Special read-only argument variable: `$0`, `$1`, `$#`, `$@`, `$*`.
+    #[regex(r"\$[0-9]+|\$[#@*]")]
+    SpecialVar,
+    /// Unsupported shell-style special variable: `$$`, `$?`, `$!`, `$-`.
+    #[regex(r"\$[!?$-]")]
+    UnsupportedSpecialVar,
     /// Plain identifier without `$` prefix (e.g. function or type name).
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
     IdentPlain,
@@ -197,7 +205,7 @@ pub enum Token {
     /// Logical OR operator `||`.
     #[token("||")]
     OrOp,
-    /// Single pipe `|` (used in lambda definitions or sum variants).
+    /// Single pipe `|` (bitwise OR, lambda definitions, or sum variants).
     #[token("|")]
     Pipe,
     /// Logical AND operator `&&`.
@@ -275,6 +283,24 @@ pub enum Token {
     /// Bitwise AND operator `&`.
     #[token("&")]
     BitAnd,
+    /// Bitwise OR assignment operator `|=`.
+    #[token("|=")]
+    BitOrAssign,
+    /// Bitwise XOR assignment operator `^=`.
+    #[token("^=")]
+    BitXorAssign,
+    /// Exponentiation assignment operator `**=`.
+    #[token("**=")]
+    PowAssign,
+    /// Exponentiation operator `**`.
+    #[token("**")]
+    Pow,
+    /// Bitwise XOR operator `^`.
+    #[token("^")]
+    BitXor,
+    /// Bitwise NOT operator `~`.
+    #[token("~")]
+    BitNot,
     /// Assignment operator `=`.
     #[token("=")]
     Assign,
@@ -318,9 +344,6 @@ pub enum Token {
     /// Optional chaining dot `?.`.
     #[token("?.")]
     OptionalDot,
-    /// Question mark `?` (error unwrapping or optional types).
-    #[token("?")]
-    Question,
 }
 
 /// A token enriched with its raw source text, location span, and byte offset.

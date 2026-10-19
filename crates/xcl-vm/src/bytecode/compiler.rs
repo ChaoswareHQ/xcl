@@ -22,10 +22,85 @@ use std::sync::Arc;
 use super::instr::Instr;
 use super::opcodes::*;
 use super::Bytecode;
-use crate::runtime::vm::ops::consts::*;
 use super::peephole::peephole_optimize_once;
-use crate::compiler::ast::{AstNode, BinaryOperator, TypeKind, UnaryOperator};
+use crate::compiler::ast::{AstNode, BinaryOperator, SpecialVarKind, TypeKind, UnaryOperator};
 use crate::runtime::value::{FuncValue, Value};
+
+/// Opcode for a general binary expression.
+#[inline(always)]
+fn binop_opcode(op: BinaryOperator) -> u8 {
+    match op {
+        BinaryOperator::Add => OP_ADD,
+        BinaryOperator::Sub => OP_SUB,
+        BinaryOperator::Mul => OP_MUL,
+        BinaryOperator::Div => OP_DIV,
+        BinaryOperator::Mod => OP_MOD,
+        BinaryOperator::Eq => OP_EQ,
+        BinaryOperator::NotEq => OP_NEQ,
+        BinaryOperator::Lt => OP_LT,
+        BinaryOperator::Gt => OP_GT,
+        BinaryOperator::Le => OP_LE,
+        BinaryOperator::Ge => OP_GE,
+        BinaryOperator::And => OP_AND,
+        BinaryOperator::Or => OP_OR,
+        BinaryOperator::Coalesce => OP_COALESCE,
+        BinaryOperator::In => OP_IN,
+        BinaryOperator::Shl => OP_SHL,
+        BinaryOperator::Shr => OP_SHR,
+        BinaryOperator::BitAnd => OP_BITAND,
+        BinaryOperator::BitOr => OP_BITOR,
+        BinaryOperator::BitXor => OP_BITXOR,
+        BinaryOperator::Pow => OP_POW,
+    }
+}
+
+/// Opcode for `LOAD_LOCAL_LOAD_LOCAL -> ADD/SUB/MUL/DIV_LOCAL_LOCAL` fusion.
+#[inline(always)]
+fn local_local_opcode(op: BinaryOperator) -> Option<u8> {
+    match op {
+        BinaryOperator::Add => Some(OP_ADD_LOCAL_LOCAL),
+        BinaryOperator::Sub => Some(OP_SUB_LOCAL_LOCAL),
+        BinaryOperator::Mul => Some(OP_MUL_LOCAL_LOCAL),
+        BinaryOperator::Div => Some(OP_DIV_LOCAL_LOCAL),
+        _ => None,
+    }
+}
+
+/// Opcode for `$dest = $dest op $rhs` (local-store form).
+#[inline(always)]
+fn local_store_opcode(op: BinaryOperator) -> Option<u8> {
+    match op {
+        BinaryOperator::Add => Some(OP_ADD_LOCAL_STORE),
+        BinaryOperator::Sub => Some(OP_SUB_LOCAL_STORE),
+        BinaryOperator::Mul => Some(OP_MUL_LOCAL_STORE),
+        BinaryOperator::Div => Some(OP_DIV_LOCAL_STORE),
+        _ => None,
+    }
+}
+
+/// Opcode for `$dest = $lhs op $rhs` (local-local-store form).
+#[inline(always)]
+fn local_local_store_opcode(op: BinaryOperator) -> Option<u8> {
+    match op {
+        BinaryOperator::Add => Some(OP_ADD_LOCAL_LOCAL_STORE),
+        BinaryOperator::Sub => Some(OP_SUB_LOCAL_LOCAL_STORE),
+        BinaryOperator::Mul => Some(OP_MUL_LOCAL_LOCAL_STORE),
+        BinaryOperator::Div => Some(OP_DIV_LOCAL_LOCAL_STORE),
+        BinaryOperator::Mod => Some(OP_MOD_LOCAL_LOCAL_STORE),
+        _ => None,
+    }
+}
+
+/// Opcode for `$dest = $dest op <integer constant>`.
+#[inline(always)]
+fn int_store_opcode(op: BinaryOperator) -> Option<u8> {
+    match op {
+        BinaryOperator::Add => Some(OP_ADD_INT_LOCAL),
+        BinaryOperator::Sub => Some(OP_SUB_INT_LOCAL),
+        BinaryOperator::Mul => Some(OP_MUL_INT_LOCAL),
+        _ => None,
+    }
+}
 
 struct Compiler {
     code: Vec<Instr>,
@@ -122,17 +197,11 @@ impl Compiler {
                 operand,
                 ..
             } => self.can_emit_to_slot(operand),
-            AstNode::BinaryOp {
-                left,
-                op:
-                    BinaryOperator::Add
-                    | BinaryOperator::Sub
-                    | BinaryOperator::Mul
-                    | BinaryOperator::Div
-                    | BinaryOperator::Mod,
-                right,
-                ..
-            } => self.can_emit_to_slot(left) && self.can_emit_to_slot(right),
+            AstNode::BinaryOp { left, op, right, .. }
+                if local_local_store_opcode(*op).is_some() =>
+            {
+                self.can_emit_to_slot(left) && self.can_emit_to_slot(right)
+            }
             AstNode::Index { target, index, .. } => {
                 self.can_emit_to_slot(target) && self.can_emit_to_slot(index)
             }
@@ -225,13 +294,8 @@ impl Compiler {
                 let l_slot = self.emit_expr_to_slot(left, temp_depth);
                 let r_slot = self.emit_expr_to_slot(right, temp_depth + 1);
                 let dst = self.temp_slot(temp_depth);
-                let opc = match op {
-                    BinaryOperator::Add => OP_ADD_LOCAL_LOCAL_STORE,
-                    BinaryOperator::Sub => OP_SUB_LOCAL_LOCAL_STORE,
-                    BinaryOperator::Mul => OP_MUL_LOCAL_LOCAL_STORE,
-                    BinaryOperator::Div => OP_DIV_LOCAL_LOCAL_STORE,
-                    BinaryOperator::Mod => OP_MOD_LOCAL_LOCAL_STORE,
-                    _ => unreachable!(),
+                let Some(opc) = local_local_store_opcode(*op) else {
+                    unreachable!()
                 };
                 self.emit(Instr::make(opc, dst, r_slot as u16, l_slot as u8));
                 dst
@@ -263,14 +327,7 @@ impl Compiler {
                 && !self.is_global(rn)
             {
                 let rslot = self.local(rn);
-                let opc = match op {
-                    BinaryOperator::Add => Some(OP_ADD_LOCAL_STORE),
-                    BinaryOperator::Sub => Some(OP_SUB_LOCAL_STORE),
-                    BinaryOperator::Mul => Some(OP_MUL_LOCAL_STORE),
-                    BinaryOperator::Div => Some(OP_DIV_LOCAL_STORE),
-                    _ => None,
-                };
-                if let Some(opc) = opc {
+                if let Some(opc) = local_store_opcode(*op) {
                     self.emit(Instr::a2(opc, dest_slot, rslot as u16));
                     return true;
                 }
@@ -285,13 +342,7 @@ impl Compiler {
                     return true;
                 }
                 if (0..=u16::MAX as i64).contains(value) {
-                    let opc = match op {
-                        BinaryOperator::Add => Some(OP_ADD_INT_LOCAL),
-                        BinaryOperator::Sub => Some(OP_SUB_INT_LOCAL),
-                        BinaryOperator::Mul => Some(OP_MUL_INT_LOCAL),
-                        _ => None,
-                    };
-                    if let Some(opc) = opc {
+                    if let Some(opc) = int_store_opcode(*op) {
                         self.emit(Instr::a2(opc, dest_slot, *value as u16));
                         return true;
                     }
@@ -310,15 +361,7 @@ impl Compiler {
             if lslot < 256 {
                 let c_src1 = (lslot & 0xFF) as u8;
                 let b_src2 = (rslot & 0xFFFF) as u16;
-                let opc = match op {
-                    BinaryOperator::Add => Some(OP_ADD_LOCAL_LOCAL_STORE),
-                    BinaryOperator::Sub => Some(OP_SUB_LOCAL_LOCAL_STORE),
-                    BinaryOperator::Mul => Some(OP_MUL_LOCAL_LOCAL_STORE),
-                    BinaryOperator::Div => Some(OP_DIV_LOCAL_LOCAL_STORE),
-                    BinaryOperator::Mod => Some(OP_MOD_LOCAL_LOCAL_STORE),
-                    _ => None,
-                };
-                if let Some(opc) = opc {
+                if let Some(opc) = local_local_store_opcode(*op) {
                     self.emit(Instr::make(opc, dest_slot, b_src2, c_src1));
                     return true;
                 }
@@ -326,34 +369,18 @@ impl Compiler {
         }
 
         // Case 3: Nested 3-address register compilation
-        if matches!(
-            op,
-            BinaryOperator::Add
-                | BinaryOperator::Sub
-                | BinaryOperator::Mul
-                | BinaryOperator::Div
-                | BinaryOperator::Mod
-        ) && self.locals.len() < 200
+        if local_local_store_opcode(*op).is_some()
+            && self.locals.len() < 200
             && self.can_emit_to_slot(node)
         {
             if let AstNode::Ident { name: ln, .. } = left.as_ref()
                 && !self.is_global(ln)
                 && self.local(ln) == dest_slot
-                && matches!(
-                    op,
-                    BinaryOperator::Add
-                        | BinaryOperator::Sub
-                        | BinaryOperator::Mul
-                        | BinaryOperator::Div
-                )
+                && local_store_opcode(*op).is_some()
             {
                 let r_slot = self.emit_expr_to_slot(right, 0);
-                let opc = match op {
-                    BinaryOperator::Add => OP_ADD_LOCAL_STORE,
-                    BinaryOperator::Sub => OP_SUB_LOCAL_STORE,
-                    BinaryOperator::Mul => OP_MUL_LOCAL_STORE,
-                    BinaryOperator::Div => OP_DIV_LOCAL_STORE,
-                    _ => unreachable!(),
+                let Some(opc) = local_store_opcode(*op) else {
+                    unreachable!()
                 };
                 self.emit(Instr::a2(opc, dest_slot, r_slot as u16));
                 return true;
@@ -362,13 +389,8 @@ impl Compiler {
             let l_slot = self.emit_expr_to_slot(left, 0);
             let r_slot = self.emit_expr_to_slot(right, 1);
             if l_slot < 256 {
-                let opc = match op {
-                    BinaryOperator::Add => OP_ADD_LOCAL_LOCAL_STORE,
-                    BinaryOperator::Sub => OP_SUB_LOCAL_LOCAL_STORE,
-                    BinaryOperator::Mul => OP_MUL_LOCAL_LOCAL_STORE,
-                    BinaryOperator::Div => OP_DIV_LOCAL_LOCAL_STORE,
-                    BinaryOperator::Mod => OP_MOD_LOCAL_LOCAL_STORE,
-                    _ => unreachable!(),
+                let Some(opc) = local_local_store_opcode(*op) else {
+                    unreachable!()
                 };
                 self.emit(Instr::make(opc, dest_slot, r_slot as u16, l_slot as u8));
                 return true;
@@ -385,31 +407,6 @@ impl Compiler {
             let a = prev.a();
             self.code.pop();
             self.emit(Instr::make(OP_LOAD_LOCAL_LOAD_LOCAL, a, second as u16, 0));
-            return true;
-        }
-        false
-    }
-
-    fn try_fuse_add_local_local(&mut self) -> bool {
-        // If the last instruction is already LL_LL, upgrade it to ADD_LOCAL_LOCAL
-        if let Some(prev) = self.code.last().copied() {
-            if prev.op() == OP_LOAD_LOCAL_LOAD_LOCAL {
-                self.code.pop();
-                self.emit(Instr::make(OP_ADD_LOCAL_LOCAL, prev.a(), prev.b(), 0));
-                return true;
-            }
-        }
-        // Fallback: two consecutive LOAD_LOCAL instructions
-        if self.code.len() < 2 {
-            return false;
-        }
-        let l2 = self.code[self.code.len() - 1].op();
-        let l1 = self.code[self.code.len() - 2].op();
-        if l1 == OP_LOAD_LOCAL && l2 == OP_LOAD_LOCAL {
-            let a = self.code[self.code.len() - 2].a();
-            let b_slot = self.code[self.code.len() - 1].a();
-            self.code.truncate(self.code.len() - 2);
-            self.emit(Instr::make(OP_ADD_LOCAL_LOCAL, a, b_slot as u16, 0));
             return true;
         }
         false
@@ -634,13 +631,7 @@ impl Compiler {
                         let rslot = self.local(rn);
                         let c_src1 = (lslot & 0xFF) as u8;
                         let b_src2 = (rslot & 0xFFFF) as u16;
-                        let opc = match op {
-                            BinaryOperator::Add => Some(OP_ADD_LOCAL_LOCAL_STORE),
-                            BinaryOperator::Sub => Some(OP_SUB_LOCAL_LOCAL_STORE),
-                            BinaryOperator::Mul => Some(OP_MUL_LOCAL_LOCAL_STORE),
-                            BinaryOperator::Div => Some(OP_DIV_LOCAL_LOCAL_STORE),
-                            _ => None,
-                        };
+                        let opc = local_local_store_opcode(*op);
                         if let Some(opc) = opc {
                             self.emit(Instr::make(opc, slot, b_src2, c_src1));
                             return;
@@ -865,7 +856,6 @@ impl Compiler {
                     closure_captures: Vec::new(),
                     closure_env: Vec::new(),
                 };
-                self.local(name);
                 self.functions.push((name.as_str().into(), f));
             }
 
@@ -995,49 +985,12 @@ impl Compiler {
                 self.node(left);
                 self.node(right);
                 // Try superinstructions AFTER emitting operands
-                match op {
-                    BinaryOperator::Add => {
-                        if self.try_fuse_add_local_local() {
-                            return;
-                        }
-                    }
-                    BinaryOperator::Sub => {
-                        if self.try_fuse_local_local(OP_SUB_LOCAL_LOCAL) {
-                            return;
-                        }
-                    }
-                    BinaryOperator::Mul => {
-                        if self.try_fuse_local_local(OP_MUL_LOCAL_LOCAL) {
-                            return;
-                        }
-                    }
-                    BinaryOperator::Div => {
-                        if self.try_fuse_local_local(OP_DIV_LOCAL_LOCAL) {
-                            return;
-                        }
-                    }
-                    _ => {}
+                if let Some(opc) = local_local_opcode(*op)
+                    && self.try_fuse_local_local(opc)
+                {
+                    return;
                 }
-                let opcode = match op {
-                    BinaryOperator::Add => OP_ADD,
-                    BinaryOperator::Sub => OP_SUB,
-                    BinaryOperator::Mul => OP_MUL,
-                    BinaryOperator::Div => OP_DIV,
-                    BinaryOperator::Mod => OP_MOD,
-                    BinaryOperator::Eq => OP_EQ,
-                    BinaryOperator::NotEq => OP_NEQ,
-                    BinaryOperator::Lt => OP_LT,
-                    BinaryOperator::Gt => OP_GT,
-                    BinaryOperator::Le => OP_LE,
-                    BinaryOperator::Ge => OP_GE,
-                    BinaryOperator::And => OP_AND,
-                    BinaryOperator::Or => OP_OR,
-                    BinaryOperator::Coalesce => OP_COALESCE,
-                    BinaryOperator::In => OP_IN,
-                    BinaryOperator::Shl => OP_SHL,
-                    BinaryOperator::Shr => OP_SHR,
-                    BinaryOperator::BitAnd => OP_BITAND,
-                };
+                let opcode = binop_opcode(*op);
                 self.emit(Instr::none(opcode));
             }
 
@@ -1046,6 +999,7 @@ impl Compiler {
                 let opcode = match op {
                     UnaryOperator::Neg => OP_NEG,
                     UnaryOperator::Not => OP_NOT,
+                    UnaryOperator::BitNot => OP_BITNOT,
                 };
                 self.emit(Instr::none(opcode));
             }
@@ -1200,6 +1154,19 @@ impl Compiler {
                 let type_idx = self.intern(type_name);
                 self.emit(Instr::a1(OP_PUSH_STR, type_idx));
                 self.emit(Instr::none(OP_TYPE_CAST));
+            }
+
+            AstNode::SpecialVar { kind, index, .. } => {
+                use crate::runtime::opcode::special_var_kind as sv;
+                let kind_code = match kind {
+                    SpecialVarKind::ScriptName => sv::SCRIPT_NAME,
+                    SpecialVarKind::Positional => sv::POSITIONAL,
+                    SpecialVarKind::ArgCount => sv::ARG_COUNT,
+                    SpecialVarKind::ArgsArray => sv::ARGS_ARRAY,
+                    SpecialVarKind::ArgsJoined => sv::ARGS_JOINED,
+                };
+                // a = positional index (32-bit), c = kind (8-bit)
+                self.emit(Instr::make(OP_SPECIAL_VAR, *index, 0, kind_code));
             }
         }
     }

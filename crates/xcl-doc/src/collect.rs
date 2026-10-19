@@ -2,7 +2,8 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use xcl_vm::{NATIVE_REGISTRY, TYPE_REGISTRY, TRAIT_REGISTRY, IMPL_REGISTRY, TypeKind};
+use xcl_plugins::{NATIVE_REGISTRY, TYPE_REGISTRY, TRAIT_REGISTRY, IMPL_REGISTRY};
+use xcl_vm::TypeKind;
 use crate::model::*;
 
 /// Parse an args string like "path: str; mode: str" into ParamDoc structs.

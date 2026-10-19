@@ -49,16 +49,12 @@
 //!   Bytecode instructions pack an 8-bit opcode, 32-bit primary operand `a`, 16-bit operand `b`,
 //!   and 8-bit operand `c` into a single 64-bit word for optimal CPU cache utilization.
 //!
-//! # Extensibility and Native Registries
+//! # Extensibility and Registration API
 //!
-//! Native Rust functions and custom types can be registered into compile-time distributed
-//! slices using [`linkme`]:
-//!
-//! * [`NATIVE_REGISTRY`] — Static slice of native functions and methods.
-//! * [`TYPE_REGISTRY`] — Static slice of custom type definitions.
-//! * [`IMPL_REGISTRY`] — Static slice of trait implementation blocks.
-//!
-//! Calling [`VM::register_all`](runtime::vm::VM::register_all) loads all registered extensions into the VM.
+//! The VM exposes `register_*` methods that accept static slices of native entries,
+//! type descriptors, trait descriptors, impl descriptors, and opcode entries.
+//! The `xcl-plugins` crate owns all registration data and calls these methods to
+//! populate a VM instance with standard library functions, types, and opcodes.
 //!
 //! # Examples
 //!
@@ -233,9 +229,6 @@ pub mod optimizer;
 pub mod compiler;
 /// VM execution engine: virtual machine, values, and error types.
 pub mod runtime;
-/// Supporting infrastructure: argument parsing, native registry, well-known types.
-pub mod utils;
-
 pub use bytecode::{Bytecode, Instr};
 pub use compiler::AstNode;
 pub use compiler::lexer;
@@ -244,12 +237,11 @@ pub use compiler::span::Span;
 pub use runtime::{
     BuiltinImpl, DomainCtx, DomainSlot, FuncValue, GlobalOverrideGuard, Group, HandleKind,
     ImplDescriptor, ImplMethod, IntoValue, NamedParam, NativeArg, NativeEntry, NativeKind,
-    OPCODE_REGISTRY, OpcodeEntry, OpcodeFn, OpcodeResult, RawPtr, SUBTYPE_ERROR, SUBTYPE_HANDLE,
+    OpcodeEntry, OpcodeFn, OpcodeResult, RawPtr, SUBTYPE_ERROR, SUBTYPE_HANDLE,
     SUBTYPE_NONE, SUBTYPE_RESULT, SUBTYPE_USER_BASE, TraitDescriptor, TraitMethod, TypeDescriptor,
     TypeField, TypeKind, TypeVariant, VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK, VM, Value,
-    XclObject, XclType, extract_arg, is_known_kind, opcode_name, registered_opcode_name,
+    XclObject, XclType, extract_arg, is_known_kind, opcode_name,
 };
-pub use utils::{IMPL_REGISTRY, NATIVE_REGISTRY, TRAIT_REGISTRY, TYPE_REGISTRY, split_named_args};
 
 /// Evaluates XCL source code using the provided virtual machine.
 ///

@@ -63,7 +63,8 @@ fn node_span(node: &AstNode) -> &Span {
         | AstNode::TypeDef { span, .. }
         | AstNode::ImplDef { span, .. }
         | AstNode::TypeTest { span, .. }
-        | AstNode::TypeCast { span, .. } => span,
+        | AstNode::TypeCast { span, .. }
+        | AstNode::SpecialVar { span, .. } => span,
     }
 }
 
@@ -235,6 +236,7 @@ fn node_name(node: &AstNode) -> &'static str {
         AstNode::ImplDef { .. } => "ImplDef",
         AstNode::TypeTest { .. } => "TypeTest",
         AstNode::TypeCast { .. } => "TypeCast",
+        AstNode::SpecialVar { .. } => "SpecialVar",
     }
 }
 

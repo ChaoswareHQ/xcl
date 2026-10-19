@@ -16,10 +16,24 @@ fs = []
 net = ["dep:ureq"]
 encoding = ["dep:serde_json"]
 math = []
+opcode-stats = []
 
 [dependencies]
 xcl-macros.workspace = true
 xcl-vm.workspace = true
 linkme.workspace = true
+hashbrown.workspace = true
 ureq = { workspace = true, default-features = false, features = ["_tls", "json"], optional = true }
 serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion.workspace = true
+mlua.workspace = true
+
+[[bench]]
+name = "dispatch"
+harness = false
+
+[[bench]]
+name = "luau_comparison"
+harness = false

@@ -12,12 +12,13 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Default, Debug)]
 struct CliOpts {
-    help:      bool,
-    version:   bool,
-    eval:      Option<String>,
-    quiet:     bool,
-    decompile: bool,
-    files:     Vec<String>,
+    help:        bool,
+    version:     bool,
+    eval:        Option<String>,
+    quiet:       bool,
+    decompile:   bool,
+    files:       Vec<String>,
+    script_args: Vec<String>,
 }
 
 fn parse_args<I>(iter: I) -> CliOpts
@@ -35,7 +36,7 @@ where
         }
 
         if arg == "--" {
-            opts.files.extend(args.by_ref());
+            opts.script_args.extend(args.by_ref());
             break;
         }
 
@@ -111,13 +112,13 @@ Options:
   -e, --eval <EXPR>   Evaluate the given expression
   -q, --quiet         Suppress result output
   -d, --decompile     Decompile source to bytecode and print (do not run)
-  --                  End of options
+  --                  All following arguments are script arguments ($1, $2, ...)
 
 When no FILE or -e is given, reads from stdin.
 
 Examples:
-  xcl script.xcl
-  xcl -e 'print \"hello\"'
+  xcl script.xcl -- a b \"c d\"
+  xcl -e 'print $1' -- hello
   echo 'print 42' | xcl
   xcl -q script.xcl
 "
@@ -128,15 +129,17 @@ fn print_version() {
     println!("xcl {}", VERSION);
 }
 
-fn run_source(source: &str, quiet: bool) -> xcl_vm::Value {
+fn run_source(source: &str, quiet: bool, script_name: &str, script_args: &[String]) -> xcl_vm::Value {
     let mut vm = xcl_plugins::new_vm();
-    let result = xcl_plugins::evaluate(source, &mut vm);
+    let args: Vec<xcl_vm::Value> = script_args
+        .iter()
+        .map(|s| xcl_vm::Value::from_str_boxed(s.clone()))
+        .collect();
+    vm.set_script_args(script_name, args);
 
-    if !quiet {
-        // Print the result value if it's not nil/unit
-        if !result.is_nil() {
-            print_value(result);
-        }
+    let result = xcl_plugins::evaluate(source, &mut vm);
+    if !quiet && !result.is_nil() {
+        print_value(result);
     }
     result
 }
@@ -195,7 +198,7 @@ fn main() {
             let output = xcl_debug::decompile::decompile_source(expr);
             print!("{}", output);
         } else {
-            let result = run_source(expr, opts.quiet);
+            let result = run_source(expr, opts.quiet, "<eval>", &opts.script_args);
             check_result_exit(result);
         }
         return;
@@ -223,7 +226,7 @@ fn main() {
         for file in &opts.files {
             match fs::read_to_string(file) {
                 Ok(source) => {
-                    let result = run_source(&source, opts.quiet);
+                    let result = run_source(&source, opts.quiet, file, &opts.script_args);
                     check_result_exit(result);
                 }
                 Err(e) => {
@@ -246,7 +249,7 @@ fn main() {
         return;
     }
 
-    let result = run_source(&input, opts.quiet);
+    let result = run_source(&input, opts.quiet, "<stdin>", &opts.script_args);
     check_result_exit(result);
 }
 

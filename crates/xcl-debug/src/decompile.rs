@@ -327,7 +327,7 @@ fn format_operand_c(op: u8, c: u8, bc: &Bytecode) -> String {
 fn opcode_name(op: u8) -> &'static str {
     xcl_vm::opcode_name(op)
         .or_else(|| superinstruction_name(op))
-        .or_else(|| xcl_vm::registered_opcode_name(op))
+        .or_else(|| xcl_plugins::registered_opcode_name(op))
         .unwrap_or("OP_UNKNOWN")
 }
 

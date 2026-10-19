@@ -6,10 +6,9 @@
 //!
 //! # Architecture
 //!
-//! - [`OPCODE_REGISTRY`] is a [`linkme::distributed_slice`] that collects
-//!   [`OpcodeEntry`] instances at link time.
+//! - The `xcl-plugins` crate owns the [`OpcodeEntry`] distributed slice.
 //! - Each entry has a code, name, and handler function.
-//! - The VM populates an [`opcode_table`] from the registry during [`VM::register_all`].
+//! - The VM populates an opcode table from the registry during registration.
 //! - Unhandled opcodes in the dispatch loop fall through to the registry lookup.
 //!
 //! # Example
@@ -54,24 +53,23 @@ pub struct OpcodeEntry {
     pub handler: OpcodeFn,
 }
 
-/// Distributed slice collecting all registered extension opcodes.
-#[linkme::distributed_slice]
-pub static OPCODE_REGISTRY: [OpcodeEntry] = [..];
-
-/// Looks up the registered name for an extension opcode.
+/// Returns the human-readable name for any core opcode.
 ///
-/// Returns `None` if the opcode is not registered.
-pub fn registered_opcode_name(op: u8) -> Option<&'static str> {
-    OPCODE_REGISTRY
-        .iter()
-        .find(|e| e.code == op)
-        .map(|e| e.name)
-}
-
-/// Returns the human-readable name for any opcode.
-///
-/// Checks macro-generated core opcodes first, then the extension registry.
+/// Extension opcode names are resolved via `xcl_plugins::registered_opcode_name`.
 pub fn opcode_name(op: u8) -> Option<&'static str> {
     crate::runtime::vm::ops::opcode_name_core(op)
-        .or_else(|| registered_opcode_name(op))
+}
+
+/// Operand values for the `c` field of `OP_SPECIAL_VAR`.
+pub mod special_var_kind {
+    /// `$0` — script name.
+    pub const SCRIPT_NAME: u8 = 0;
+    /// `$1..$N` — positional argument (`a` holds the index).
+    pub const POSITIONAL: u8 = 1;
+    /// `$#` — argument count.
+    pub const ARG_COUNT: u8 = 2;
+    /// `$@` — argument array.
+    pub const ARGS_ARRAY: u8 = 3;
+    /// `$*` — arguments joined by spaces.
+    pub const ARGS_JOINED: u8 = 4;
 }

@@ -76,7 +76,7 @@ enum Commands {
 fn get_opcode_name(op: u8) -> &'static str {
     xcl_vm::opcode_name(op)
         .or_else(|| superinstruction_name(op))
-        .or_else(|| xcl_vm::registered_opcode_name(op))
+        .or_else(|| xcl_plugins::registered_opcode_name(op))
         .unwrap_or("UNKNOWN")
 }
 

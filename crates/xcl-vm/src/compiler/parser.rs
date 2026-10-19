@@ -49,8 +49,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::compiler::ast::{
-    AstNode, BinaryOperator, CallArg, Param, PipelineStage, SumVariant, TypeField, TypeKind,
-    UnaryOperator,
+    AstNode, BinaryOperator, CallArg, Param, PipelineStage, SpecialVarKind, SumVariant, TypeField,
+    TypeKind, UnaryOperator,
 };
 use crate::compiler::lexer::{Token, TokenWithText, extract_string};
 use crate::compiler::span::Span;
@@ -156,6 +156,16 @@ impl<'a> Parser<'a> {
             Some(Token::IdentPlain) if self.lookahead_impl_def() => self.impl_def(),
             // `defer { ... }` — keyword-like syntax for deferred closures
             Some(Token::IdentPlain) if self.lookahead_defer() => self.defer_expr(),
+            Some(Token::SpecialVar) | Some(Token::UnsupportedSpecialVar)
+                if self.lookahead_assign() =>
+            {
+                panic!(
+                    "XCL {}:{}: special variable `{}` is read-only",
+                    self.span().file,
+                    self.span().line,
+                    self.current().map(|t| t.text.as_str()).unwrap_or("")
+                )
+            }
             _ => self.expr_stmt(),
         }
     }
@@ -420,6 +430,9 @@ impl<'a> Parser<'a> {
                 | Some(Token::SubAssign)
                 | Some(Token::MulAssign)
                 | Some(Token::DivAssign)
+                | Some(Token::BitOrAssign)
+                | Some(Token::BitXorAssign)
+                | Some(Token::PowAssign)
                 | Some(Token::CoalesceAssign)
                 | Some(Token::Colon)
         )
@@ -471,6 +484,9 @@ impl<'a> Parser<'a> {
             Some(Token::SubAssign) => Some(BinaryOperator::Sub),
             Some(Token::MulAssign) => Some(BinaryOperator::Mul),
             Some(Token::DivAssign) => Some(BinaryOperator::Div),
+            Some(Token::BitOrAssign) => Some(BinaryOperator::BitOr),
+            Some(Token::BitXorAssign) => Some(BinaryOperator::BitXor),
+            Some(Token::PowAssign) => Some(BinaryOperator::Pow),
             _ => None,
         };
 
@@ -789,10 +805,11 @@ impl<'a> Parser<'a> {
         // and next token starts a positional arg, treat it as a call
         if let AstNode::Ident { .. } = &e
             && self.starts_positional_arg()
+            && !self.has_newline_before_current()
         {
             let callee = e;
             let mut args = vec![self.call_arg()];
-            while self.starts_positional_arg() {
+            while self.starts_positional_arg() && !self.has_newline_before_current() {
                 args.push(self.call_arg());
             }
             if self.at(Token::Semi) {
@@ -906,6 +923,19 @@ impl<'a> Parser<'a> {
             self.consume();
             e = self.pipeline_stage(e);
         }
+        if self.at(Token::If) && !self.has_newline_before_current() {
+            let span = self.span();
+            self.consume(); // if
+            let condition = self.expr();
+            self.expect(Token::Else);
+            let else_expr = self.expr();
+            e = AstNode::If {
+                span,
+                condition: Box::new(condition),
+                then_branch: vec![e],
+                else_branch: Some(vec![else_expr]),
+            };
+        }
         e
     }
 
@@ -958,7 +988,7 @@ impl<'a> Parser<'a> {
     }
 
     fn equality(&mut self) -> AstNode {
-        let mut e = self.bitwise_and();
+        let mut e = self.bit_or();
         loop {
             let op = match self.current().map(|t| &t.token) {
                 Some(Token::Eq) => BinaryOperator::Eq,
@@ -967,11 +997,43 @@ impl<'a> Parser<'a> {
             };
             let span = self.span();
             self.consume();
-            let r = Box::new(self.bitwise_and());
+            let r = Box::new(self.bit_or());
             e = AstNode::BinaryOp {
                 span,
                 left: Box::new(e),
                 op,
+                right: r,
+            };
+        }
+        e
+    }
+
+    fn bit_or(&mut self) -> AstNode {
+        let mut e = self.bit_xor();
+        while self.at(Token::Pipe) {
+            let span = self.span();
+            self.consume();
+            let r = Box::new(self.bit_xor());
+            e = AstNode::BinaryOp {
+                span,
+                left: Box::new(e),
+                op: BinaryOperator::BitOr,
+                right: r,
+            };
+        }
+        e
+    }
+
+    fn bit_xor(&mut self) -> AstNode {
+        let mut e = self.bitwise_and();
+        while self.at(Token::BitXor) {
+            let span = self.span();
+            self.consume();
+            let r = Box::new(self.bitwise_and());
+            e = AstNode::BinaryOp {
+                span,
+                left: Box::new(e),
+                op: BinaryOperator::BitXor,
                 right: r,
             };
         }
@@ -1121,8 +1183,10 @@ impl<'a> Parser<'a> {
                 | Some(Token::Sub)
                 | Some(Token::Not)
                 | Some(Token::Bang)
+                | Some(Token::BitNot)
                 | Some(Token::LParen)
                 | Some(Token::LBracket)
+                | Some(Token::Pipe)
         )
     }
 
@@ -1169,7 +1233,7 @@ impl<'a> Parser<'a> {
     }
 
     fn multiplicative(&mut self) -> AstNode {
-        let mut e = self.unary();
+        let mut e = self.power();
         loop {
             let op = match self.current().map(|t| &t.token) {
                 Some(Token::Mul) => BinaryOperator::Mul,
@@ -1179,7 +1243,7 @@ impl<'a> Parser<'a> {
             };
             let span = self.span();
             self.consume();
-            let r = Box::new(self.unary());
+            let r = Box::new(self.power());
             e = AstNode::BinaryOp {
                 span,
                 left: Box::new(e),
@@ -1188,6 +1252,23 @@ impl<'a> Parser<'a> {
             };
         }
         e
+    }
+
+    fn power(&mut self) -> AstNode {
+        let e = self.unary();
+        if self.at(Token::Pow) {
+            let span = self.span();
+            self.consume();
+            let r = Box::new(self.power());
+            AstNode::BinaryOp {
+                span,
+                left: Box::new(e),
+                op: BinaryOperator::Pow,
+                right: r,
+            }
+        } else {
+            e
+        }
     }
 
     fn unary(&mut self) -> AstNode {
@@ -1205,6 +1286,15 @@ impl<'a> Parser<'a> {
             return AstNode::UnaryOp {
                 span,
                 op: UnaryOperator::Not,
+                operand: Box::new(self.unary()),
+            };
+        }
+        if self.at(Token::BitNot) {
+            let span = self.span();
+            self.consume();
+            return AstNode::UnaryOp {
+                span,
+                op: UnaryOperator::BitNot,
                 operand: Box::new(self.unary()),
             };
         }
@@ -1452,12 +1542,12 @@ impl<'a> Parser<'a> {
                 } else {
                     Box::new(e)
                 };
-                while self.starts_positional_arg() {
+                while self.starts_positional_arg() && !self.has_newline_before_current() {
                     args.push(self.call_arg());
                 }
                 while self.at(Token::Comma) {
                     self.consume();
-                    if self.starts_positional_arg() {
+                    if self.starts_positional_arg() && !self.has_newline_before_current() {
                         args.push(self.call_arg());
                     }
                 }
@@ -1541,6 +1631,34 @@ impl<'a> Parser<'a> {
                 let name = t.text.trim_start_matches('$').to_string();
                 AstNode::Ident { span, name }
             }
+
+            Token::SpecialVar => {
+                let (kind, index) = match t.text.as_str() {
+                    "$0" => (SpecialVarKind::ScriptName, 0),
+                    "$#" => (SpecialVarKind::ArgCount, 0),
+                    "$@" => (SpecialVarKind::ArgsArray, 0),
+                    "$*" => (SpecialVarKind::ArgsJoined, 0),
+                    text => {
+                        let index = text[1..].parse::<u32>().unwrap_or_else(|_| {
+                            panic!(
+                                "XCL {}:{}: invalid positional argument `{}`",
+                                t.span.file, t.span.line, text
+                            )
+                        });
+                        if index == 0 {
+                            (SpecialVarKind::ScriptName, 0)
+                        } else {
+                            (SpecialVarKind::Positional, index)
+                        }
+                    }
+                };
+                AstNode::SpecialVar { span, kind, index }
+            }
+
+            Token::UnsupportedSpecialVar => panic!(
+                "XCL {}:{}: shell special variable `{}` is not supported in XCL",
+                t.span.file, t.span.line, t.text
+            ),
 
             Token::IdentPlain => {
                 let name = t.text.clone();
@@ -1754,6 +1872,9 @@ impl<'a> Parser<'a> {
                         | Some(Token::SubAssign)
                         | Some(Token::MulAssign)
                         | Some(Token::DivAssign)
+                        | Some(Token::BitOrAssign)
+                        | Some(Token::BitXorAssign)
+                        | Some(Token::PowAssign)
                         | Some(Token::Dot)
                         | Some(Token::LBracket)
                 )
@@ -1790,7 +1911,8 @@ impl<'a> Parser<'a> {
                     | Token::None_
                     | Token::LBracket
                     | Token::LParen
-                    | Token::Pipe
+                    | Token::BitNot
+                    | Token::SpecialVar
             ),
         }
     }
@@ -1832,6 +1954,9 @@ impl<'a> Parser<'a> {
                     | Some(Token::SubAssign)
                     | Some(Token::MulAssign)
                     | Some(Token::DivAssign)
+                    | Some(Token::BitOrAssign)
+                    | Some(Token::BitXorAssign)
+                    | Some(Token::PowAssign)
             ),
             Some(Token::IdentPlain) => {
                 // IdentPlain can be a positional arg (e.g., `allow file.read "/data/"`)
@@ -1889,7 +2014,8 @@ impl<'a> Parser<'a> {
                     | Token::None_
                     | Token::LBracket
                     | Token::LParen
-                    | Token::Pipe
+                    | Token::BitNot
+                    | Token::SpecialVar
             ),
         }
     }
