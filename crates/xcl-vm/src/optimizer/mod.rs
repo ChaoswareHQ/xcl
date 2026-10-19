@@ -7,6 +7,14 @@
 //! transforms the bytecode in place. The [`optimize`] function runs all passes
 //! in the correct order.
 
+// `alloc` re-exports needed by `no_std` builds (std prelude provides them).
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    vec::Vec,
+};
+
+
 mod cse;
 mod constant_prop;
 mod dataflow;

@@ -218,7 +218,16 @@
 #![allow(clippy::branches_sharing_code)]
 #![cfg_attr(not(feature = "std"), no_std)]
 #[cfg(not(feature = "std"))]
+#[macro_use]
 extern crate alloc;
+
+// Collections that resolve to `std` or `hashbrown` depending on the feature set.
+// `no_std` builds use `hashbrown` (already a dependency, same API surface for
+// the operations used here).
+#[cfg(not(feature = "std"))]
+pub(crate) use hashbrown::{HashMap, HashSet};
+#[cfg(feature = "std")]
+pub(crate) use std::collections::{HashMap, HashSet};
 
 /// Bytecode compiler and instruction set for the XCL VM.
 pub mod bytecode;

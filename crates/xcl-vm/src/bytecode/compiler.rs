@@ -1,8 +1,15 @@
-//! AST-to-bytecode compiler: translates parsed XCL AST nodes into 64-bit packed instructions.
+﻿//! AST-to-bytecode compiler: translates parsed XCL AST nodes into 64-bit packed instructions.
 //!
 //! The [`Compiler`] struct accumulates instructions, wide operands, string interning,
 //! and local/global slot allocation. After compilation, the peephole optimizer and
 //! data flow analysis passes are applied before returning the final [`Bytecode`].
+
+// `alloc` re-exports needed by `no_std` builds (std prelude provides them).
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    string::String,
+};
 
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
@@ -15,11 +22,10 @@ use alloc::string::ToString;
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
-use alloc::vec;
-#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(feature = "std")]
 #[cfg(feature = "std")]
 use std::sync::Arc;
 
@@ -135,7 +141,7 @@ struct Compiler {
     strings: Vec<Box<str>>,
     locals: Vec<Box<str>>,
     globals: Vec<Box<str>>,
-    functions: Vec<(Box<str>, FuncValue)>,
+    functions: Vec<(Box<str>, Arc<FuncValue>)>,
     closures: Vec<FuncValue>,
     /// Whether the current function body references special variables ($1, $#, $@, $*).
     uses_special_vars: bool,
@@ -247,7 +253,11 @@ impl Compiler {
                 self.can_emit_to_slot(left) && self.can_emit_to_slot(right)
             }
             AstNode::Index { target, index, .. } => {
-                self.can_emit_to_slot(target) && self.can_emit_to_slot(index)
+                // A string-literal index is compiled as an interned field
+                // read, so it does not need to be stack-emittable.
+                self.can_emit_to_slot(target)
+                    && (matches!(index.as_ref(), AstNode::Str { .. })
+                        || self.can_emit_to_slot(index))
             }
             AstNode::FieldAccess { target, .. } => self.can_emit_to_slot(target),
             _ => false,
@@ -309,6 +319,21 @@ impl Compiler {
                 zero_slot
             }
             AstNode::Index { target, index, .. } => {
+                // `$obj["literal"]` is exactly a field read: intern the literal
+                // and use the field opcode instead of materializing the key on
+                // the operand stack first.
+                if let AstNode::Str { value, .. } = index.as_ref() {
+                    let t_slot = self.emit_expr_to_slot(target, temp_depth);
+                    let field_idx = self.intern(value);
+                    let dst = self.temp_slot(temp_depth);
+                    self.emit(Instr::make(
+                        OP_GET_FIELD_LOCAL_STORE,
+                        dst,
+                        field_idx as u16,
+                        t_slot as u8,
+                    ));
+                    return dst;
+                }
                 let t_slot = self.emit_expr_to_slot(target, temp_depth);
                 let i_slot = self.emit_expr_to_slot(index, temp_depth + 1);
                 let dst = self.temp_slot(temp_depth);
@@ -422,6 +447,44 @@ impl Compiler {
                 && self.local(ln) == dest_slot
                 && local_store_opcode(*op).is_some()
             {
+                // $dest = $dest + $obj.field  (or $obj["field"]) in one opcode.
+                if matches!(op, BinaryOperator::Add) {
+                    let field = match right.as_ref() {
+                        AstNode::FieldAccess { field, .. } => Some(field),
+                        AstNode::Index { index, .. } => match index.as_ref() {
+                            AstNode::Str { value, .. } => Some(value),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    let obj_name = match right.as_ref() {
+                        AstNode::FieldAccess { target, .. } => match target.as_ref() {
+                            AstNode::Ident { name, .. } => Some(name),
+                            _ => None,
+                        },
+                        AstNode::Index { target, .. } => match target.as_ref() {
+                            AstNode::Ident { name, .. } => Some(name),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let (Some(field), Some(obj_name)) = (field, obj_name)
+                        && !self.is_global(obj_name)
+                    {
+                        let obj_slot = self.local(obj_name);
+                        if obj_slot < 256 {
+                            let field_idx = self.intern(field);
+                            self.emit(Instr::make(
+                                OP_ADD_FIELD_LOCAL_STORE,
+                                dest_slot,
+                                field_idx as u16,
+                                obj_slot as u8,
+                            ));
+                            return true;
+                        }
+                    }
+                }
+
                 let r_slot = self.emit_expr_to_slot(right, 0);
                 let Some(opc) = local_store_opcode(*op) else {
                     unreachable!()
@@ -508,7 +571,7 @@ impl Compiler {
             string_values: string_values.into(),
             local_names: core::mem::take(&mut self.locals).into(),
             global_names: core::mem::take(&mut self.globals).into(),
-            user_functions: core::mem::take(&mut self.functions),
+            user_functions: core::mem::take(&mut self.functions).into(),
             closures: core::mem::take(&mut self.closures).into(),
         }
     }
@@ -552,6 +615,20 @@ impl Compiler {
                     match value.as_ref() {
                         AstNode::Index { target, index, .. } => {
                             let t_slot = self.emit_expr_to_slot(target, 0);
+                            if t_slot < 256 {
+                                // `$obj["literal"]` is a field read with an
+                                // interned key: no need to materialize the key.
+                                if let AstNode::Str { value, .. } = index.as_ref() {
+                                    let field_idx = self.intern(value);
+                                    self.emit(Instr::make(
+                                        OP_GET_FIELD_LOCAL_STORE,
+                                        slot,
+                                        field_idx as u16,
+                                        t_slot as u8,
+                                    ));
+                                    return;
+                                }
+                            }
                             let i_slot = self.emit_expr_to_slot(index, 1);
                             if t_slot < 256 {
                                 self.emit(Instr::make(
@@ -925,7 +1002,7 @@ impl Compiler {
                     closure_env: Vec::new(),
                     uses_special_vars: sub.uses_special_vars,
                 };
-                self.functions.push((name.as_str().into(), f));
+                self.functions.push((name.as_str().into(), Arc::new(f)));
             }
 
             AstNode::Call { callee, args, .. } => {

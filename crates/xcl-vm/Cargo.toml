@@ -16,7 +16,10 @@ opcode-stats = []
 
 [dependencies]
 logos.workspace = true
-bumpalo.workspace = true
+# `collections` provides `bumpalo::collections::String`, used to build
+# concatenation results directly in the arena (one write, no intermediate
+# allocation, reclaimed with the VM).
+bumpalo = { workspace = true, features = ["collections"] }
 smallvec.workspace = true
 hashbrown.workspace = true
 xcl-macros.workspace = true

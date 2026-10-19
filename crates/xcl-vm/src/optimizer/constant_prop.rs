@@ -2,11 +2,19 @@
 //!
 //! Stops propagation at function calls, global access, and loop back-edges.
 
+
+// `alloc` re-exports needed by `no_std` builds (std prelude provides them).
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    vec::Vec,
+};
+
 use crate::bytecode::{
     Instr, OP_ADD_FLOAT_LOCAL, OP_ADD_INT_LOCAL, OP_ADD_INT_STORE_LOCAL, OP_ADD_LOCAL_LOCAL_STORE,
     OP_ADD_LOCAL_STORE, OP_ARRAY_PUSH_LOCAL, OP_CALL, OP_CALL_METHOD, OP_DEC_LOCAL,
     OP_DIV_FLOAT_LOCAL, OP_DIV_LOCAL_LOCAL_STORE, OP_DIV_LOCAL_STORE, OP_FOR_ITER_NEXT,
-    OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_GET_FIELD_LOCAL_STORE,
+    OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_GET_FIELD_LOCAL_STORE, OP_ADD_FIELD_LOCAL_STORE,
     OP_GET_INDEX_LOCAL_LOCAL_STORE, OP_INC_LOCAL, OP_INC_LOCAL_INT, OP_LOAD_CONST_LOCAL,
     OP_LOAD_LOCAL_STORE_LOCAL, OP_MOD_EQ_INT, OP_MOD_LOCAL_LOCAL_STORE, OP_MUL_FLOAT_LOCAL,
     OP_MUL_INT_LOCAL, OP_MUL_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_STORE, OP_SUB_FLOAT_LOCAL,
@@ -165,6 +173,7 @@ pub fn constant_propagation(code: &mut Vec<Instr>, wide: &[i64]) {
             | OP_MOD_LOCAL_LOCAL_STORE
             | OP_GET_INDEX_LOCAL_LOCAL_STORE
             | OP_GET_FIELD_LOCAL_STORE
+            | OP_ADD_FIELD_LOCAL_STORE
             | OP_ADD_INT_STORE_LOCAL
             | OP_INC_LOCAL_INT => {
                 constants.remove(&instr.a());

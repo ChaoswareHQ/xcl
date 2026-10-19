@@ -3,6 +3,14 @@
 //! Runs after compilation to catch patterns that AST-level fusion misses.
 //! Uses fixed-point iteration so cascading patterns (e.g., identity → NOP → eliminate) are caught.
 
+
+// `alloc` re-exports needed by `no_std` builds (std prelude provides them).
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    vec::Vec,
+};
+
 use super::instr::Instr;
 use super::opcodes::*;
 
@@ -49,8 +57,8 @@ fn drain_and_patch(
 }
 
 /// Collect all instruction indices that are jump targets.
-fn collect_jump_targets(code: &[Instr]) -> std::collections::HashSet<usize> {
-    let mut targets = std::collections::HashSet::new();
+fn collect_jump_targets(code: &[Instr]) -> crate::HashSet<usize> {
+    let mut targets = crate::HashSet::new();
     for instr in code {
         let op = instr.op();
         if is_direct_jump(op) {
@@ -102,7 +110,7 @@ fn try_fuse_const_store(
     wide: &mut [i64],
     i: usize,
     instr: Instr,
-    jump_targets: &std::collections::HashSet<usize>,
+    jump_targets: &crate::HashSet<usize>,
 ) -> bool {
     let op = instr.op();
     if !matches!(
@@ -264,7 +272,7 @@ fn peephole_at(
     wide: &mut [i64],
     i: usize,
     instr: Instr,
-    jump_targets: &std::collections::HashSet<usize>,
+    jump_targets: &crate::HashSet<usize>,
 ) -> bool {
     let op = instr.op();
 

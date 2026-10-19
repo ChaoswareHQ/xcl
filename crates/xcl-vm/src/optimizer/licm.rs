@@ -3,6 +3,14 @@
 //! Identifies natural loops via back edges and hoists invariant instructions
 //! (like LOAD_GLOBAL) before loop entry.
 
+
+// `alloc` re-exports needed by `no_std` builds (std prelude provides them).
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    vec::Vec,
+};
+
 use crate::bytecode::{
     Instr, OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,
 };

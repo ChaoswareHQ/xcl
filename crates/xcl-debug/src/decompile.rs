@@ -21,8 +21,8 @@
 //!     string_values: Arc::new([]),
 //!     local_names: Arc::new([]),
 //!     global_names: Arc::new([]),
-//!     user_functions: Vec::new(),
-//!     closures: Vec::new(),
+//!     user_functions: Arc::new([]),
+//!     closures: Arc::new([]),
 //! };
 //! let output = xcl_debug::decompile::decompile(&bc);
 //! assert!(output.contains("OP_PUSH_INT"));
@@ -83,7 +83,7 @@ fn decompile_bytecode(out: &mut String, bc: &Bytecode, indent: usize) {
     }
 
     // User functions
-    for (name, func) in &bc.user_functions {
+    for (name, func) in bc.user_functions.iter() {
         out.push_str(&format!("{}\n{}--- Function: {} ---\n", pad, pad, name));
         if let Some(ref func_bc) = func.bytecode {
             decompile_bytecode(out, func_bc, indent + 1);

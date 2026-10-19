@@ -26,7 +26,7 @@ mod tests {
             string_values: Arc::new([]),
             local_names: Arc::new([]),
             global_names: Arc::new([]),
-            user_functions: Vec::new(),
+            user_functions: Vec::new().into(),
             closures: Vec::new().into(),
         };
 

@@ -47,7 +47,7 @@ use xcl_vm::{VM, Value};
 /// Create a new VM with all registered types and builtins.
 pub fn new_vm() -> VM {
     let mut vm = VM::new();
-    registry::register_all(&mut vm);
+    register_all(&mut vm);
     vm
 }
 

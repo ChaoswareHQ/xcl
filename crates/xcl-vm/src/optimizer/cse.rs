@@ -9,11 +9,20 @@
 //! - Does not cache in-place store-back ops (ADD_LOCAL_STORE, etc.) or
 //!   constant-in-place ops (ADD_INT_LOCAL, INC_LOCAL, etc.).
 
+
+// `alloc` re-exports needed by `no_std` builds (std prelude provides them).
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    vec::Vec,
+};
+
 use crate::bytecode::{
     Instr, OP_ADD_INT_LOCAL, OP_ADD_LOCAL_LOCAL, OP_ADD_LOCAL_LOCAL_STORE,
     OP_ADD_LOCAL_STORE, OP_ADD_FLOAT_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_DEC_LOCAL,
     OP_DIV_LOCAL_LOCAL, OP_DIV_LOCAL_LOCAL_STORE, OP_DIV_LOCAL_STORE, OP_DIV_FLOAT_LOCAL,
     OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_GET_FIELD_LOCAL_STORE,
+    OP_ADD_FIELD_LOCAL_STORE,
     OP_GET_INDEX_LOCAL_LOCAL_STORE, OP_INC_LOCAL, OP_INC_LOCAL_INT, OP_LOAD_CONST_LOCAL,
     OP_LOAD_LOCAL_STORE_LOCAL, OP_MOD_LOCAL_LOCAL_STORE, OP_MUL_INT_LOCAL, OP_MUL_LOCAL_LOCAL,
     OP_MUL_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_STORE, OP_MUL_FLOAT_LOCAL, OP_SUB_INT_LOCAL,
@@ -27,7 +36,7 @@ use crate::runtime::vm::ops::consts::{
 
 use super::dataflow::{build_basic_blocks, BasicBlock};
 
-use std::collections::HashMap;
+use crate::HashMap;
 
 /// Returns the set of local slots **defined** by an instruction.
 ///
@@ -57,6 +66,7 @@ fn defined_slots(instr: Instr) -> Vec<u32> {
         | OP_DIV_LOCAL_LOCAL_STORE
         | OP_GET_INDEX_LOCAL_LOCAL_STORE
         | OP_GET_FIELD_LOCAL_STORE
+        | OP_ADD_FIELD_LOCAL_STORE
         | OP_MOD_LOCAL_LOCAL_STORE => vec![instr.a()],
         OP_ARRAY_PUSH_LOCAL => vec![instr.a()],
         OP_FOR_NUMBER_LOOP => vec![instr.a() >> 16],
@@ -239,6 +249,7 @@ fn cse_in_block(code: &mut Vec<Instr>, wide: &mut [i64], block: &BasicBlock) {
             || op == OP_SUB_LOCAL_STORE
             || op == OP_MUL_LOCAL_STORE
             || op == OP_DIV_LOCAL_STORE
+            || op == OP_ADD_FIELD_LOCAL_STORE
         {
             // Still invalidate because they define slot a
             let defs = defined_slots(instr);

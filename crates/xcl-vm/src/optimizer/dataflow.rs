@@ -5,11 +5,20 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+
+// `alloc` re-exports needed by `no_std` builds (std prelude provides them).
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    vec::Vec,
+};
+
 use crate::bytecode::{
     Instr, OP_ADD_INT_STORE_LOCAL, OP_ADD_LOCAL_LOCAL, OP_ADD_LOCAL_LOCAL_STORE,
     OP_ADD_LOCAL_STORE, OP_ADD_INT_LOCAL, OP_ADD_FLOAT_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_DEC_LOCAL,
     OP_DIV_LOCAL_LOCAL, OP_DIV_LOCAL_LOCAL_STORE, OP_DIV_LOCAL_STORE, OP_DIV_FLOAT_LOCAL,
     OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_GET_FIELD_LOCAL_STORE,
+    OP_ADD_FIELD_LOCAL_STORE,
     OP_GET_INDEX_LOCAL_LOCAL_STORE, OP_INC_LOCAL, OP_INC_LOCAL_INT, OP_LOAD_CONST_LOCAL,
     OP_LOAD_LOCAL_LOAD_LOCAL, OP_LOAD_LOCAL_PUSH_INT, OP_LOAD_LOCAL_STORE_LOCAL, OP_LT_LOCAL_LOCAL,
     OP_MOD_EQ_INT, OP_MOD_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_LOCAL, OP_MUL_LOCAL_LOCAL_STORE,
@@ -22,7 +31,7 @@ use crate::runtime::vm::ops::consts::{
 };
 
 #[cfg(not(feature = "std"))]
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeSet;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
@@ -316,6 +325,13 @@ pub(crate) fn live_variables(code: &[Instr], blocks: &[BasicBlock]) -> Vec<BTree
                     use_set[bi].insert(instr.c() as u32);
                     def_set[bi].insert(instr.a());
                 }
+                // ADD_FIELD_LOCAL_STORE: reads slot a (accumulator) and slot c
+                // (object), writes slot a
+                OP_ADD_FIELD_LOCAL_STORE => {
+                    use_set[bi].insert(instr.a());
+                    use_set[bi].insert(instr.c() as u32);
+                    def_set[bi].insert(instr.a());
+                }
                 // ARRAY_PUSH_LOCAL: reads slot a (array) and slot b (value), writes slot a
                 OP_ARRAY_PUSH_LOCAL => {
                     use_set[bi].insert(instr.a());
@@ -465,6 +481,11 @@ pub(crate) fn live_variables(code: &[Instr], blocks: &[BasicBlock]) -> Vec<BTree
                     instr_def.insert(instr.a());
                 }
                 OP_GET_FIELD_LOCAL_STORE => {
+                    instr_use.insert(instr.c() as u32);
+                    instr_def.insert(instr.a());
+                }
+                OP_ADD_FIELD_LOCAL_STORE => {
+                    instr_use.insert(instr.a());
                     instr_use.insert(instr.c() as u32);
                     instr_def.insert(instr.a());
                 }

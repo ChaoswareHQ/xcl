@@ -3,6 +3,14 @@
 //! Detects tight loops (small body, no function calls, simple induction variable)
 //! and unrolls them 4x, adjusting the loop counter accordingly.
 
+
+// `alloc` re-exports needed by `no_std` builds (std prelude provides them).
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    vec::Vec,
+};
+
 use crate::bytecode::{
     Instr, OP_ADD_INT_LOCAL, OP_CALL, OP_CALL_METHOD, OP_DEC_LOCAL, OP_FOR_ITER_NEXT,
     OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_INC_LOCAL, OP_SUB_INT_LOCAL, OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,

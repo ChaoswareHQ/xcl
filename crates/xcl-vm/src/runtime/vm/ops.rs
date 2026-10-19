@@ -4,10 +4,28 @@
 //! - `OP_*` constants in the `consts` submodule
 //! - a `dispatch_core` function with a direct `match` dispatch
 
+
+// `alloc` re-exports needed by `no_std` builds (std prelude provides them).
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    string::String,
+    vec::Vec,
+};
+
 use xcl_macros::xcl_opcodes;
 
 #[xcl_opcodes(scope = core)]
 mod core_ops {
+    // `alloc` re-exports needed by `no_std` builds.
+    #[cfg(not(feature = "std"))]
+    #[allow(unused_imports)]
+    use alloc::{
+        boxed::Box,
+        string::String,
+        string::ToString,
+        vec::Vec,
+    };
     use crate::Instr;
     use crate::runtime::opcode::OpcodeResult;
     use crate::runtime::value::Value;
@@ -449,8 +467,9 @@ mod core_ops {
         let n = instr.a() as usize;
         if n <= crate::runtime::value::SMALL_MAP_MAX {
             // Small path: inline SmallVec with cached fingerprint, no String allocation
-            let mut entries: smallvec::SmallVec<[(Value, Value, u64); crate::runtime::value::SMALL_MAP_MAX]> =
-                smallvec::SmallVec::with_capacity(n);
+            let mut entries: smallvec::SmallVec<
+                [(Value, Value, u64); crate::runtime::value::SMALL_MAP_MAX],
+            > = smallvec::SmallVec::with_capacity(n);
             for _ in 0..n {
                 let v = vm.pop();
                 let k = vm.pop();
@@ -724,20 +743,30 @@ mod core_ops {
     #[xcl_op(code = 32, arity = 0, stack = "n+1 -> 1")]
     fn op_call(vm: &mut VM, _top: usize, instr: Instr) -> OpcodeResult {
         let n = instr.a() as usize;
-        let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(n);
-        for _ in 0..n {
-            args.push(vm.pop());
-        }
-        args.reverse();
-        let callee = vm.pop();
+        let stack_len = vm.stack.len();
+        // Stack layout is [callee, arg0 .. argN-1].
+        let base = stack_len - n - 1;
+        let callee = vm.stack[base];
 
-        // 4-entry direct-mapped callee cache
-        let slot = (callee.0 as usize) & 3;
-        if callee == vm.call_cache[slot].0 {
+        // Fast path: the callee is already a function value (local, parameter, closure).
+        // Enter the frame straight from the operand stack: no argument buffer, no lookup.
+        if let Some(f) = callee.as_func() {
+            return vm.enter_call_at(f, base, n);
+        }
+
+        // Name cache. Arena pointers are at least 16-byte aligned, so hash on the
+        // allocation index instead of the raw address (the low bits are always zero).
+        let slot = ((callee.0 >> 4) as usize) & 3;
+        if callee.0 == vm.call_cache[slot].0.0 {
             if let Some(f) = vm.call_cache[slot].1.as_func() {
-                return vm.enter_call_from_op(f, &args);
+                return vm.enter_call_at(f, base, n);
             }
         }
+
+        // Cold path: materialize the arguments and pop callee + args off the stack.
+        let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(n);
+        args.extend_from_slice(&vm.stack[base + 1..stack_len]);
+        vm.stack.truncate(base);
 
         if let Some(name) = callee.as_str() {
             // 1. Check global builtins first
@@ -823,9 +852,7 @@ mod core_ops {
                     let calls: Vec<(u32, Value)> = vm.domain_table[didx as usize]
                         .index
                         .iter()
-                        .filter_map(|(method_name, &midx)| {
-                            map.get(method_name).map(|v| (midx, *v))
-                        })
+                        .filter_map(|(method_name, &midx)| map.get(method_name).map(|v| (midx, *v)))
                         .collect();
                     let mut last_result = Value::nil();
                     for (midx, value) in calls {
@@ -850,8 +877,6 @@ mod core_ops {
                     return vm.enter_call_from_op(f, &args);
                 }
             }
-        } else if let Some(func) = callee.as_func() {
-            return vm.enter_call_from_op(func, &args);
         }
         vm.push(Value::nil());
         OpcodeResult::Next
@@ -1345,19 +1370,9 @@ mod core_ops {
             }
             OpcodeResult::Next
         } else {
-            let loop_ip = f.ip;
-            f.ip += 1;
-            let code = &f.code.instructions;
-            let mut scan = f.ip as usize;
-            while scan < code.len() {
-                let instr = unsafe { *code.get_unchecked(scan) };
-                if instr.op() == crate::runtime::vm::ops::consts::OP_JUMP && instr.a() == loop_ip {
-                    f.ip = (scan + 1) as u32;
-                    return OpcodeResult::Jump(f.ip);
-                }
-                scan += 1;
-            }
-            OpcodeResult::Next
+            // The compiler records the loop exit address in the wide operand
+            // when it emits the backward jump, so no scan is needed here.
+            OpcodeResult::Jump(f.code.wide_operands[instr.c() as usize] as u32)
         }
     }
 
@@ -1471,7 +1486,6 @@ mod core_ops {
             OpcodeResult::Next
         } else {
             let exit_ip = f.code.wide_operands[exit_wide_idx] as u32;
-            f.ip = exit_ip;
             OpcodeResult::Jump(exit_ip)
         }
     }
@@ -1706,7 +1720,6 @@ mod core_ops {
             OpcodeResult::Next
         } else {
             let exit_ip = f.code.wide_operands[exit_wide_idx] as u32;
-            f.ip = exit_ip;
             OpcodeResult::Jump(exit_ip)
         }
     }
@@ -1805,8 +1818,9 @@ mod core_ops {
                 Value::from_f64(f64::from_bits(bits as u64))
             }
             2 => {
-                let s = vm.frames[top].code.string_table[b as usize].to_string();
-                Value::from_str(s, &vm.arena)
+                // Interned string constant: reuse the pre-built value instead
+                // of re-allocating the bytes on every execution.
+                vm.frames[top].code.string_values[b as usize]
             }
             3 => Value::nil(),
             4 => Value::bool(true),
@@ -1820,6 +1834,48 @@ mod core_ops {
         let l = &mut vm.frames[top].locals;
         unsafe {
             *l.get_unchecked_mut(slot) = val;
+        }
+        OpcodeResult::Next
+    }
+
+    /// Store local[a] = local[a] + local[c].field[b]. Operand `a` = dest, `b` = string idx, `c` = object slot.
+    ///
+    /// Fuses `$s = $s + $obj.field` (and `$s = $s + $obj["field"]`, which the
+    /// compiler lowers to the same shape) into a single dispatch.
+    #[xcl_op(code = 124, arity = 0, stack = "0 -> 0")]
+    fn op_add_field_local_store(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+        use crate::runtime::value::TAG_INT;
+        let dest = instr.a() as usize;
+        let field_idx = instr.b() as usize;
+        let obj_slot = instr.c() as usize;
+
+        let frame = &vm.frames[top];
+        let obj = unsafe { *frame.locals.get_unchecked(obj_slot) };
+        let key = frame.code.string_values[field_idx];
+        let b = if let Some(map_obj) = obj.as_map() {
+            map_obj.get_fast_value(key).unwrap_or(Value::nil())
+        } else {
+            Value::nil()
+        };
+
+        let l = &mut vm.frames[top].locals;
+        let a = unsafe { *l.get_unchecked(dest) };
+        if a.tag() == TAG_INT && b.tag() == TAG_INT {
+            let r = a
+                .as_i48()
+                .checked_add(b.as_i48())
+                .unwrap_or_else(|| (a.as_i48() as f64 + b.as_i48() as f64) as i64);
+            unsafe {
+                *l.get_unchecked_mut(dest) = Value::from_i48(r);
+            }
+        } else if a.is_float() && b.is_float() {
+            unsafe {
+                *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() + b.as_f64());
+            }
+        } else {
+            unsafe {
+                *l.get_unchecked_mut(dest) = a.add(b, &vm.arena);
+            }
         }
         OpcodeResult::Next
     }
@@ -1983,7 +2039,7 @@ mod core_ops {
                     .unwrap_or(Value::nil())
             }
             sv::ARG_COUNT => Value::from_i48(vm.frames[top].argv.len() as i64),
-            sv::ARGS_ARRAY => Value::from_array(vm.frames[top].argv.to_vec(), &vm.arena),
+            sv::ARGS_ARRAY => Value::from_array(vm.frames[top].argv.clone(), &vm.arena),
             sv::ARGS_JOINED => {
                 let mut joined = String::new();
                 for (i, arg) in vm.frames[top].argv.iter().enumerate() {

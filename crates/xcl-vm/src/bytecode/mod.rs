@@ -49,6 +49,19 @@
 //! assert!(!code.instructions.is_empty());
 //! ```
 
+// `alloc` re-exports needed by `no_std` builds (std prelude provides them).
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    boxed::Box,
+    string::String,
+    sync::Arc,
+    vec::Vec,
+};
+#[cfg(feature = "std")]
+use std::sync::Arc;
+
+
 mod compiler;
 mod instr;
 mod peephole;
@@ -69,19 +82,22 @@ pub use compiler::compile;
 #[derive(Debug, Clone)]
 pub struct Bytecode {
     /// Linear sequence of compiled 64-bit bytecode instructions.
-    pub instructions: std::sync::Arc<[Instr]>,
+    pub instructions: Arc<[Instr]>,
     /// Table of 64-bit wide numeric operands (large integers and IEEE-754 floats).
-    pub wide_operands: std::sync::Arc<[i64]>,
+    pub wide_operands: Arc<[i64]>,
     /// Interned string literals and member/method names.
-    pub string_table: std::sync::Arc<[std::boxed::Box<str>]>,
+    pub string_table: Arc<[Box<str>]>,
     /// Pre-allocated string [`Value`](crate::runtime::value::Value) constants corresponding to `string_table`.
-    pub string_values: std::sync::Arc<[crate::runtime::value::Value]>,
+    pub string_values: Arc<[crate::runtime::value::Value]>,
     /// Local variable names mapped to slot indices.
-    pub local_names: std::sync::Arc<[std::boxed::Box<str>]>,
+    pub local_names: Arc<[Box<str>]>,
     /// Global variable names mapped to slot indices.
-    pub global_names: std::sync::Arc<[std::boxed::Box<str>]>,
+    pub global_names: Arc<[Box<str>]>,
     /// User-defined top-level function declarations.
-    pub user_functions: std::vec::Vec<(std::boxed::Box<str>, crate::runtime::value::FuncValue)>,
+    ///
+    /// `Arc` so cloning a `Bytecode` (done once per `run`) is a refcount bump
+    /// instead of a deep copy of every function's name and parameters.
+    pub user_functions: Arc<[(Box<str>, Arc<crate::runtime::value::FuncValue>)]>,
     /// Compiled nested closures and lambda bodies.
-    pub closures: std::sync::Arc<[crate::runtime::value::FuncValue]>,
+    pub closures: Arc<[crate::runtime::value::FuncValue]>,
 }

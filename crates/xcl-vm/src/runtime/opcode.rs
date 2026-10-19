@@ -41,6 +41,13 @@ pub enum OpcodeResult {
     Return,
     /// Push the pending frame onto the frame stack.
     PushFrame,
+    /// The current frame now runs different bytecode (tail call).
+    ///
+    /// The dispatch loop must re-read the frame's code pointer and start at
+    /// instruction 0. A plain `Jump(0)` is not enough: the loop caches the
+    /// instruction slice, and a tail call can switch to a different
+    /// [`crate::Bytecode`].
+    TailCall,
 }
 
 /// A registered opcode entry.

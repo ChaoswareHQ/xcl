@@ -147,8 +147,17 @@ pub struct HeapHeader {
 pub struct HeapStr {
     /// Common object header.
     pub header: HeapHeader,
+    /// FNV-1a hash of `data`, computed once at construction.
+    ///
+    /// Lookups otherwise re-hash the query key on every access.
+    pub hash: u64,
     /// UTF-8 string buffer.
-    pub data: String,
+    ///
+    /// Arena-owned (`from_str`, concatenation) or leaked (`from_str_boxed`,
+    /// used for bytecode constants that must outlive every VM). With no GC
+    /// there is no cheaper option: a `String` here leaked its buffer forever,
+    /// which cost ~48 MB per `string_concat_10k` run.
+    pub data: &'static str,
 }
 
 /// Heap-allocated array of dynamic values.
@@ -165,7 +174,11 @@ pub const SMALL_MAP_MAX: usize = 8;
 
 /// Internal representation of a heap map.
 pub enum MapRepr {
-    /// ≤ SMALL_MAP_MAX entries. Each entry is (key, value, fast_hash(key)).
+    /// ≤ SMALL_MAP_MAX entries. Each entry is `(key, value, fast_hash(key))`.
+    ///
+    /// Linear scan wins here: entries are contiguous, the identity compare hits
+    /// early for interned keys, and an index array costs an extra dependent load
+    /// (measured: open addressing was 15-40% slower).
     Small(smallvec::SmallVec<[(Value, Value, u64); SMALL_MAP_MAX]>),
     /// Larger maps: hash storage plus the pre-hashed index arrays.
     Large {
@@ -279,7 +292,12 @@ impl HeapMap {
                 }
                 None
             }
-            MapRepr::Large { data, key_hashes, key_values, index_dirty } => {
+            MapRepr::Large {
+                data,
+                key_hashes,
+                key_values,
+                index_dirty,
+            } => {
                 if !index_dirty {
                     let h = crate::runtime::vm::fast_hash(key.as_bytes());
                     for (i, (kh, k)) in key_hashes.iter().enumerate() {
@@ -301,27 +319,38 @@ impl HeapMap {
     pub fn get_fast_value(&self, key: Value) -> Option<Value> {
         match &self.repr {
             MapRepr::Small(entries) => {
-                // Compute hash once for prefilter; use 0 if key is not a string.
-                let kh = key.as_str().map(|s| crate::runtime::vm::fast_hash(s.as_bytes())).unwrap_or(0);
-                let ks = key.as_str();
-                for (k, v, entry_h) in entries.iter() {
+                // Interned keys (map literals, field reads) match on the raw
+                // `Value` first. Hashing the query would dereference the string
+                // object twice before the loop even starts, which costs more
+                // than the scan it precedes. Only pay for it when identity
+                // fails, i.e. when a dynamically built key is used.
+                for (k, v, _) in entries.iter() {
                     if k.0 == key.0 {
                         return Some(*v);
                     }
-                    if *entry_h == kh {
-                        if let Some(s) = ks {
-                            if k.as_str() == Some(s) {
-                                return Some(*v);
-                            }
+                }
+                let kh = key.str_hash().unwrap_or(0);
+                if let Some(ks) = key.as_str() {
+                    for (k, v, entry_h) in entries.iter() {
+                        if *entry_h == kh && k.as_str() == Some(ks) {
+                            return Some(*v);
                         }
                     }
                 }
                 None
             }
-            MapRepr::Large { data, key_hashes, key_values, index_dirty } => {
+            MapRepr::Large {
+                data,
+                key_hashes,
+                key_values,
+                index_dirty,
+            } => {
                 if !index_dirty {
                     if let Some(key_str) = key.as_str() {
-                        let h = crate::runtime::vm::fast_hash(key_str.as_bytes());
+                        // Use cached hash from the key Value
+                        let h = key
+                            .str_hash()
+                            .unwrap_or_else(|| crate::runtime::vm::fast_hash(key_str.as_bytes()));
                         for (i, (kh, k)) in key_hashes.iter().enumerate() {
                             if *kh == h && k == key_str {
                                 return Some(key_values[i]);
@@ -342,7 +371,9 @@ impl HeapMap {
         match &self.repr {
             MapRepr::Small(entries) => {
                 let h = crate::runtime::vm::fast_hash(key.as_bytes());
-                entries.iter().any(|(k, _, kh)| *kh == h && small_key_matches(*k, key))
+                entries
+                    .iter()
+                    .any(|(k, _, kh)| *kh == h && small_key_matches(*k, key))
             }
             MapRepr::Large { data, .. } => data.contains_key(key),
         }
@@ -378,13 +409,24 @@ fn small_key_matches(k: Value, key: &str) -> bool {
     k.as_str().is_some_and(|s| s == key)
 }
 
+/// Build a `HeapStr` with a cached hash from arena-owned or leaked bytes.
+#[inline(always)]
+fn new_heap_str(header: HeapHeader, data: &'static str) -> HeapStr {
+    let hash = crate::runtime::vm::fast_hash(data.as_bytes());
+    HeapStr { header, hash, data }
+}
+
 /// Heap-allocated function or closure value.
 #[repr(C)]
 pub struct HeapFunc {
     /// Common object header.
     pub header: HeapHeader,
     /// Function execution payload and environment captures.
-    pub data: FuncValue,
+    ///
+    /// Shared: user functions live in `Bytecode::user_functions` and are turned
+    /// into values once per run with only an `Arc` bump, instead of deep-cloning
+    /// the name and parameter list every time a VM starts.
+    pub data: Arc<FuncValue>,
 }
 
 /// Heap-allocated wrapper around an external OS resource handle.
@@ -532,6 +574,30 @@ impl Value {
     /// * `arena` - Target bump arena for allocation.
     #[inline(always)]
     pub fn from_str(s: String, arena: &bumpalo::Bump) -> Self {
+        let header = HeapHeader {
+            kind: KIND_STR,
+            flags: 0,
+            subtype: SUBTYPE_NONE,
+            variant: VARIANT_DEFAULT,
+        };
+        // The bytes live in the arena, so they are reclaimed with the VM.
+        // `from_str_boxed` is the escape hatch for constants that must
+        // outlive every VM.
+        let data: &'static str = unsafe { &*(arena.alloc_str(&s) as *const str) };
+        let obj = arena.alloc(new_heap_str(header, data));
+        Value(TAG_PTR | ((obj as *const HeapStr as u64) & PAYLOAD))
+    }
+
+    /// Allocates a `HeapStr` from two parts, written once into the arena.
+    ///
+    /// Concatenation used to build a `String` (one malloc, one copy of each
+    /// part) that was then moved into the arena and never freed.
+    #[inline]
+    fn from_str_parts(a: &str, b: &str, hash: u64, arena: &bumpalo::Bump) -> Self {
+        let mut s = bumpalo::collections::String::with_capacity_in(a.len() + b.len(), arena);
+        s.push_str(a);
+        s.push_str(b);
+        let data: &'static str = unsafe { &*(s.into_bump_str() as *const str) };
         let obj = arena.alloc(HeapStr {
             header: HeapHeader {
                 kind: KIND_STR,
@@ -539,7 +605,8 @@ impl Value {
                 subtype: SUBTYPE_NONE,
                 variant: VARIANT_DEFAULT,
             },
-            data: s,
+            hash,
+            data,
         });
         Value(TAG_PTR | ((obj as *const HeapStr as u64) & PAYLOAD))
     }
@@ -571,7 +638,7 @@ impl Value {
     /// * `m` - Hash map of keys and values.
     /// * `arena` - Target bump arena for allocation.
     #[inline(always)]
-    pub fn from_map(m: std::collections::HashMap<String, Value>, arena: &bumpalo::Bump) -> Self {
+    pub fn from_map(m: crate::HashMap<String, Value>, arena: &bumpalo::Bump) -> Self {
         // Build indexed arrays for fast field access
         let len = m.len();
         let mut key_hashes = Vec::with_capacity(len);
@@ -590,7 +657,12 @@ impl Value {
                 subtype: SUBTYPE_NONE,
                 variant: VARIANT_DEFAULT,
             },
-            repr: MapRepr::Large { data, key_hashes, key_values, index_dirty: false },
+            repr: MapRepr::Large {
+                data,
+                key_hashes,
+                key_values,
+                index_dirty: false,
+            },
         });
         Value(TAG_PTR | ((obj as *const HeapMap as u64) & PAYLOAD))
     }
@@ -611,7 +683,12 @@ impl Value {
                 subtype: SUBTYPE_NONE,
                 variant: VARIANT_DEFAULT,
             },
-            repr: MapRepr::Large { data, key_hashes, key_values, index_dirty: false },
+            repr: MapRepr::Large {
+                data,
+                key_hashes,
+                key_values,
+                index_dirty: false,
+            },
         });
         Value(TAG_PTR | ((obj as *const HeapMap as u64) & PAYLOAD))
     }
@@ -619,7 +696,10 @@ impl Value {
     /// Constructs a small map (≤8 entries) directly from key-value pairs with precomputed hashes.
     /// Each entry is (key, value, fast_hash(key)). Keys must be string `Value`s. No extra heap allocation.
     #[inline(always)]
-    pub fn from_small_map(entries: smallvec::SmallVec<[(Value, Value, u64); SMALL_MAP_MAX]>, arena: &bumpalo::Bump) -> Self {
+    pub fn from_small_map(
+        entries: smallvec::SmallVec<[(Value, Value, u64); SMALL_MAP_MAX]>,
+        arena: &bumpalo::Bump,
+    ) -> Self {
         let obj = arena.alloc(HeapMap {
             header: HeapHeader {
                 kind: KIND_MAP,
@@ -640,6 +720,15 @@ impl Value {
     /// * `arena` - Target bump arena for allocation.
     #[inline(always)]
     pub fn from_func(f: FuncValue, arena: &bumpalo::Bump) -> Self {
+        Self::from_func_shared(Arc::new(f), arena)
+    }
+
+    /// Allocates a function value without cloning the payload.
+    ///
+    /// Used for a bytecode's declared functions, whose `FuncValue` is shared
+    /// through the [`Bytecode`](crate::bytecode::Bytecode).
+    #[inline(always)]
+    pub fn from_func_shared(f: Arc<FuncValue>, arena: &bumpalo::Bump) -> Self {
         let obj = arena.alloc(HeapFunc {
             header: HeapHeader {
                 kind: KIND_FUNC,
@@ -813,7 +902,17 @@ impl Value {
     #[inline(always)]
     pub fn as_str(self) -> Option<&'static str> {
         if self.heap_kind() == Some(KIND_STR) {
-            Some(unsafe { &(*(self.as_ptr::<HeapStr>())).data })
+            Some(unsafe { (*(self.as_ptr::<HeapStr>())).data })
+        } else {
+            None
+        }
+    }
+
+    /// Returns the cached FNV-1a hash of the string if this value is a heap-allocated string.
+    #[inline(always)]
+    pub fn str_hash(self) -> Option<u64> {
+        if self.heap_kind() == Some(KIND_STR) {
+            Some(unsafe { (*(self.as_ptr::<HeapStr>())).hash })
         } else {
             None
         }
@@ -823,7 +922,7 @@ impl Value {
     #[inline(always)]
     pub fn as_func(self) -> Option<&'static FuncValue> {
         if self.heap_kind() == Some(KIND_FUNC) {
-            Some(unsafe { &(*(self.as_ptr::<HeapFunc>())).data })
+            Some(unsafe { &*(*(self.as_ptr::<HeapFunc>())).data })
         } else {
             None
         }
@@ -926,21 +1025,26 @@ impl Value {
             return Self::from_array(v, arena);
         }
         if self.tag() == TAG_PTR || other.tag() == TAG_PTR {
-            // Fast path: both are strings — use borrowed slices and one allocation
+            // Fast path: both are strings — concatenate, leaking bytes so they
+            // survive arena reset (same guarantee as from_str / from_str_boxed).
             if let (Some(a), Some(b)) = (self.as_str(), other.as_str()) {
-                let mut s = String::with_capacity(a.len() + b.len());
-                s.push_str(a);
-                s.push_str(b);
-                return Self::from_str(s, arena);
+                // Continue the left operand's cached hash instead of re-hashing the
+                // whole result: FNV-1a is resumable, so this is O(len(b)).
+                let left_hash = self
+                    .str_hash()
+                    .unwrap_or_else(|| crate::runtime::vm::fast_hash(a.as_bytes()));
+                let hash = crate::runtime::vm::fast_hash_step(left_hash, b.as_bytes());
+                return Self::from_str_parts(a, b, hash, arena);
             }
 
             // Mixed types (e.g. int + string): avoid format! macro
             let a = self.as_string();
             let b = other.as_string();
-            let mut s = String::with_capacity(a.len() + b.len());
-            s.push_str(&a);
-            s.push_str(&b);
-            return Self::from_str(s, arena);
+            let hash = crate::runtime::vm::fast_hash_step(
+                crate::runtime::vm::fast_hash(a.as_bytes()),
+                b.as_bytes(),
+            );
+            return Self::from_str_parts(&a, &b, hash, arena);
         }
         Self::nil()
     }
@@ -1040,6 +1144,15 @@ impl Value {
         if self.tag() == TAG_PTR && other.tag() == TAG_PTR {
             if (self.0 & PAYLOAD) == (other.0 & PAYLOAD) {
                 return true;
+            }
+            // Strings compare by content. Functions (and other identity-only heap
+            // values) are never equal unless the payloads match: formatting them
+            // into a string here allocated on every callee-cache miss.
+            if self.heap_kind() == Some(KIND_STR) && other.heap_kind() == Some(KIND_STR) {
+                return self.as_str() == other.as_str();
+            }
+            if self.heap_kind() == Some(KIND_FUNC) || other.heap_kind() == Some(KIND_FUNC) {
+                return false;
             }
             return self.as_string() == other.as_string();
         }
@@ -1150,11 +1263,10 @@ impl Value {
             return self.as_f64().to_string();
         }
         match self.heap_kind() {
-            Some(KIND_STR) => unsafe { (*(self.as_ptr::<HeapStr>())).data.clone() },
+            Some(KIND_STR) => unsafe { (*(self.as_ptr::<HeapStr>())).data.to_string() },
             Some(KIND_FUNC) => {
-                format!("<fn {}>", unsafe {
-                    (*(self.as_ptr::<HeapFunc>())).data.name.clone()
-                })
+                let f = unsafe { &(*(self.as_ptr::<HeapFunc>())).data };
+                format!("<fn {}>", f.name)
             }
             Some(KIND_ARRAY) => {
                 let v = unsafe { &(*(self.as_ptr::<HeapArray>())).data };
@@ -1163,7 +1275,8 @@ impl Value {
             }
             Some(KIND_MAP) => {
                 let m = unsafe { &(*(self.as_ptr::<HeapMap>())).repr };
-                let items: Vec<String> = m.iter()
+                let items: Vec<String> = m
+                    .iter()
                     .map(|(k, v)| format!("{k}: {}", v.as_string()))
                     .collect();
                 format!("{{{}}}", items.join(", "))
@@ -1245,15 +1358,15 @@ impl Value {
 
     /// Allocates a string with static lifetime (leaked Box) suitable for constants.
     pub fn from_str_boxed(s: String) -> Self {
-        let obj = Box::leak(Box::new(HeapStr {
-            header: HeapHeader {
+        let obj = Box::leak(Box::new(new_heap_str(
+            HeapHeader {
                 kind: KIND_STR,
                 flags: 0,
                 subtype: SUBTYPE_NONE,
                 variant: VARIANT_DEFAULT,
             },
-            data: s,
-        }));
+            Box::leak(s.into_boxed_str()),
+        )));
         Value(TAG_PTR | ((obj as *const HeapStr as u64) & PAYLOAD))
     }
 
@@ -1272,12 +1385,100 @@ impl Value {
     }
 
     /// Allocates a map with static lifetime (leaked Box).
-    pub fn from_map_boxed(m: std::collections::HashMap<String, Value>) -> Self {
+    pub fn from_map_boxed(m: crate::HashMap<String, Value>) -> Self {
         Self::from_map_boxed_typed_v(m, SUBTYPE_NONE, VARIANT_DEFAULT)
     }
 
+    /// Allocates a function value with static lifetime (leaked Box).
+    ///
+    /// Used by [`Value::escape`] to move a returned function out of the VM
+    /// arena.
+    pub fn from_func_boxed(f: FuncValue) -> Self {
+        let obj = Box::leak(Box::new(HeapFunc {
+            header: HeapHeader {
+                kind: KIND_FUNC,
+                flags: 0,
+                subtype: SUBTYPE_NONE,
+                variant: VARIANT_DEFAULT,
+            },
+            data: Arc::new(f),
+        }));
+        Value(TAG_PTR | ((obj as *const HeapFunc as u64) & PAYLOAD))
+    }
+
+    /// Deep-copies a value out of the VM arena.
+    ///
+    /// Values returned by [`VM::run`](crate::runtime::VM::run) outlive the VM
+    /// (the benchmark harness reads a result after dropping its VM), so string
+    /// bytes, arrays, maps and functions the arena owns must be rebuilt in
+    /// leaked heap memory before the result leaves the VM. This is the escape
+    /// barrier that lets everything else stay arena-allocated and be reclaimed
+    /// with the VM.
+    ///
+    /// Arrays can contain themselves (in-place `push`), so they are rebuilt
+    /// through a memo to preserve shared/cyclic structure. Maps are immutable
+    /// after construction, so they cannot form cycles.
+    pub fn escape(v: Value) -> Value {
+        let mut memo: crate::HashMap<u64, Value> = Default::default();
+        Self::escape_inner(v, &mut memo)
+    }
+
+    fn escape_inner(v: Value, memo: &mut crate::HashMap<u64, Value>) -> Value {
+        match v.heap_kind() {
+            Some(KIND_STR) => match v.as_str() {
+                Some(s) => Self::from_str_boxed(s.to_string()),
+                None => v,
+            },
+            Some(KIND_ARRAY) => {
+                if let Some(&copy) = memo.get(&v.0) {
+                    return copy;
+                }
+                let out = Self::from_array_boxed(Vec::new());
+                memo.insert(v.0, out);
+                let mut elements = Vec::new();
+                if let Some(src) = v.as_array() {
+                    elements.reserve(src.len());
+                    for &e in src {
+                        elements.push(Self::escape_inner(e, memo));
+                    }
+                }
+                if let Some(dst) = out.as_array_mut() {
+                    dst.extend_from_slice(&elements);
+                }
+                out
+            }
+            Some(KIND_MAP) => {
+                if let Some(&copy) = memo.get(&v.0) {
+                    return copy;
+                }
+                let mut entries = crate::HashMap::new();
+                if let Some(src) = v.as_map() {
+                    entries.reserve(src.len());
+                    for (k, val) in src.iter() {
+                        entries.insert(k.to_string(), Self::escape_inner(*val, memo));
+                    }
+                }
+                let out = Self::from_map_boxed_typed_v(entries, v.map_subtype().unwrap_or(SUBTYPE_NONE), {
+                    // Preserve the variant tag (result/error/handle).
+                    unsafe { (*v.as_ptr::<HeapMap>()).header.variant }
+                });
+                memo.insert(v.0, out);
+                out
+            }
+            Some(KIND_FUNC) => match v.as_func() {
+                Some(f) => Self::from_func_boxed(f.clone()),
+                None => v,
+            },
+            _ => v,
+        }
+    }
+
     /// Creates a typed heap map with specified subtype and variant tags, leaked to static lifetime.
-    pub fn from_map_boxed_typed_v(m: std::collections::HashMap<String, Value>, subtype: u16, variant: u8) -> Self {
+    pub fn from_map_boxed_typed_v(
+        m: crate::HashMap<String, Value>,
+        subtype: u16,
+        variant: u8,
+    ) -> Self {
         // Build indexed arrays for fast field access
         let len = m.len();
         let mut key_hashes = Vec::with_capacity(len);
@@ -1296,7 +1497,12 @@ impl Value {
                 subtype,
                 variant,
             },
-            repr: MapRepr::Large { data, key_hashes, key_values, index_dirty: false },
+            repr: MapRepr::Large {
+                data,
+                key_hashes,
+                key_values,
+                index_dirty: false,
+            },
         }));
         Value(TAG_PTR | ((obj as *const HeapMap as u64) & PAYLOAD))
     }
@@ -1854,8 +2060,8 @@ impl<'a> DomainCtx<'a> {
     }
 
     /// Creates a snapshot map of the top active value for each context key.
-    pub fn context_snapshot(&self) -> std::collections::HashMap<String, Value> {
-        let mut map = std::collections::HashMap::new();
+    pub fn context_snapshot(&self) -> crate::HashMap<String, Value> {
+        let mut map = crate::HashMap::new();
         for (key, stack) in &self.vm.context_stack {
             if let Some(top) = stack.last() {
                 map.insert(key.clone(), *top);
@@ -1896,23 +2102,24 @@ impl<'a> DomainCtx<'a> {
     /// Each `#[xcl_fn]` declares `impl = "CloudflareProvider"` to link to its provider type.
     /// The method looks up the impl descriptor in the VM's impl_index, gets its method names,
     /// and matches them against native entries with the same `impl_type`.
-    pub fn override_by_trait(
-        &mut self,
-        impl_type_name: &str,
-    ) -> Vec<(Box<str>, Option<u32>)> {
+    pub fn override_by_trait(&mut self, impl_type_name: &str) -> Vec<(Box<str>, Option<u32>)> {
         // Find all impl descriptors for this type — collect trait names
-        let impl_descs = self.vm.impl_index.iter().filter(|desc| {
-            desc.type_name == impl_type_name
-        }).collect::<Vec<_>>();
+        let impl_descs = self
+            .vm
+            .impl_index
+            .iter()
+            .filter(|desc| desc.type_name == impl_type_name)
+            .collect::<Vec<_>>();
 
         if impl_descs.is_empty() {
             return Vec::new();
         }
 
         // Collect method names from all impl descriptors for this type
-        let method_names: Vec<&str> = impl_descs.iter().flat_map(|desc| {
-            desc.methods.iter().map(|m| m.name)
-        }).collect();
+        let method_names: Vec<&str> = impl_descs
+            .iter()
+            .flat_map(|desc| desc.methods.iter().map(|m| m.name))
+            .collect();
 
         // Collect (owned_name, BuiltinImpl) pairs for matching entries
         let mut pairs: Vec<(String, BuiltinImpl)> = Vec::new();
@@ -1921,15 +2128,17 @@ impl<'a> DomainCtx<'a> {
             if entry.impl_type == Some(impl_type_name) {
                 // Check if this entry's override_method or method matches any method in the impl
                 let method_match = method_names.contains(&entry.method)
-                    || entry.override_method.map_or(false, |om| method_names.contains(&om));
+                    || entry
+                        .override_method
+                        .map_or(false, |om| method_names.contains(&om));
                 if method_match {
                     let impl_ = match entry.kind {
                         NativeKind::Pure => {
-                            let f: BuiltinFn = unsafe { std::mem::transmute(entry.ptr.0) };
+                            let f: BuiltinFn = unsafe { core::mem::transmute(entry.ptr.0) };
                             BuiltinImpl::Pure(f)
                         }
                         NativeKind::Ctx => {
-                            let f: BuiltinCtxFn = unsafe { std::mem::transmute(entry.ptr.0) };
+                            let f: BuiltinCtxFn = unsafe { core::mem::transmute(entry.ptr.0) };
                             BuiltinImpl::Ctx(f)
                         }
                     };

@@ -15,6 +15,37 @@ fn eval_i64(src: &str) -> i64 {
     eval(src).as_i48()
 }
 
+// ── Values returned by `run` must survive the VM (escape barrier) ──
+
+#[test]
+fn returned_values_survive_vm_drop() {
+    // The benchmark harness runs a program, drops the VM, then inspects the
+    // result. Anything the arena owns must be copied out before `run` returns.
+    fn run_and_drop(src: &str) -> xcl_vm::Value {
+        let tokens = xcl_vm::lexer::lex(src, "<test>");
+        let ast = xcl_vm::parser::parse(&tokens, src);
+        let bc = xcl_vm::bytecode::compile(&ast);
+        let mut vm = xcl_vm::VM::new();
+        vm.run(&bc)
+    }
+
+    // Concatenated string: its bytes used to live in the arena.
+    let s = run_and_drop("$s = \"\"\n$i = 0\nwhile $i < 64 { $s = $s + \"x\"\n $i = $i + 1 }\n$s");
+    assert_eq!(s.as_str().map(|s| s.len()), Some(64));
+
+    // Array of strings, including a nested array.
+    let arr = run_and_drop("[\"a\", [\"b\", \"c\"], \"d\"]");
+    let outer = arr.as_array().expect("array");
+    assert_eq!(outer[0].as_str(), Some("a"));
+    assert_eq!(outer[2].as_str(), Some("d"));
+    let inner = outer[1].as_array().expect("nested array");
+    assert_eq!(inner[1].as_str(), Some("c"));
+
+    // Map with a string value.
+    let m = run_and_drop("{ name: \"xcl\", n: 3 }");
+    assert_eq!(m.as_map().and_then(|m| m.get("name")).and_then(|v| v.as_str()), Some("xcl"));
+}
+
 fn eval_f64(src: &str) -> f64 {
     let v = eval(src);
     assert!(v.is_float(), "expected float, got {:?}", v);
@@ -492,6 +523,39 @@ fn tail_call_simple_recursion() {
 count 5000"
         ),
         0
+    );
+}
+
+#[test]
+fn tail_call_switches_bytecode() {
+    // A tail call may switch the current frame to a *different* function's
+    // bytecode. The dispatch loop caches the instruction slice, so it must
+    // re-read it on a tail call; otherwise it keeps executing the caller's
+    // code. The two bodies below have different shapes and different base
+    // cases, so stale code produces the wrong number rather than a panic.
+    assert_eq!(
+        eval_i64(
+            "ping($n) { if $n <= 0 { return 7 } return pong ($n - 1) }
+pong($n) {
+    if $n <= 0 { return 9 }
+    $m = { k: $n }
+    return ping ($m.k - 1)
+}
+pong 4"
+        ),
+        9
+    );
+    assert_eq!(
+        eval_i64(
+            "ping($n) { if $n <= 0 { return 7 } return pong ($n - 1) }
+pong($n) {
+    if $n <= 0 { return 9 }
+    $m = { k: $n }
+    return ping ($m.k - 1)
+}
+ping 4"
+        ),
+        7
     );
 }
 

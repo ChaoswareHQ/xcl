@@ -45,6 +45,15 @@ pub mod ops;
 
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
+
+// `alloc` re-exports needed by `no_std` builds (std prelude provides them).
+#[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
+use alloc::{
+    vec::Vec,
+};
+
+#[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
@@ -60,29 +69,41 @@ use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use alloc::vec;
+#[cfg(feature = "std")]
 use std::sync::Arc;
 
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
 #[cfg(feature = "std")]
-use std::collections::HashMap;
+use crate::HashMap;
 
 use crate::bytecode::*;
 use crate::runtime::value::{
     BuiltinImpl, ImplDescriptor, NativeEntry, TraitDescriptor, TypeDescriptor, Value,
 };
 use bumpalo::Bump;
-use smallvec::SmallVec;
 
-/// Fast string hash for field name lookups (FNV-1a).
+/// FNV-1a offset basis.
+pub const FNV_OFFSET: u64 = 0xCBF2_9CE4_8422_2325;
+
+/// Continues an FNV-1a hash state over `bytes`.
+///
+/// FNV-1a is resumable, so `fast_hash_step(fast_hash(a), b) == fast_hash(a ++ b)`.
+/// String concatenation uses this to avoid re-hashing the left operand, which
+/// would make `s = s + x` in a loop O(n²) on hashing alone.
 #[inline(always)]
-pub fn fast_hash(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xCBF2_9CE4_8422_2325;
+pub fn fast_hash_step(mut h: u64, bytes: &[u8]) -> u64 {
     for &b in bytes {
         h ^= b as u64;
         h = h.wrapping_mul(0x0100_0000_01B3);
     }
     h
+}
+
+/// Fast string hash for field name lookups (FNV-1a).
+#[inline(always)]
+pub fn fast_hash(bytes: &[u8]) -> u64 {
+    fast_hash_step(FNV_OFFSET, bytes)
 }
 
 /// Tracks opcode dispatch frequency for profiling.
@@ -131,21 +152,45 @@ enum Action {
     Return,
     /// Push the pending frame onto the frame stack.
     PushFrame,
+    /// The current frame switched to different bytecode (tail call).
+    TailCall,
 }
 
 pub(crate) struct Frame {
     code: Arc<Bytecode>,
-    locals: SmallVec<[Value; 16]>,
+    /// Local slots.
+    ///
+    /// A plain `Vec` (not `SmallVec`) on purpose: every local read does
+    /// `get_unchecked`, and `SmallVec` must branch on inline-vs-heap for each
+    /// access. It also shrinks `Frame` by ~112 bytes, which is memcpy'd three
+    /// times per call (pool → frames → pool).
+    locals: Vec<Value>,
     ip: u32,
-    iter: SmallVec<[Value; 8]>,
+    /// Iteration buffer for `for x in array`.
+    ///
+    /// `Vec` rather than `SmallVec` on purpose: three inline `SmallVec`s made
+    /// `Frame` ~240 bytes, and every call reinitializes all three. At 24 bytes
+    /// each the frame shrinks to ~136 bytes, which matters because frames are
+    /// allocated per call depth and touched on every call/return.
+    iter: Vec<Value>,
     iter_idx: u32,
     range_cur: i64,
     range_end: i64,
     stack_base: u32,
     /// Deferred closures to run when this frame returns (LIFO order).
-    defer_stack: SmallVec<[Value; 4]>,
+    defer_stack: Vec<Value>,
     /// Positional arguments passed into this frame (`$1`, `$#`, `$@`, `$*`).
-    argv: SmallVec<[Value; 4]>,
+    argv: Vec<Value>,
+}
+
+/// Returns the raw instruction bounds of a frame's bytecode.
+///
+/// The dispatch loop keeps these in locals; a raw pointer avoids borrowing
+/// `VM` for the duration of the loop (handlers need `&mut VM`).
+#[inline(always)]
+fn frame_code_bounds(frame: &Frame) -> (*const Instr, usize) {
+    let code = &frame.code.instructions;
+    (code.as_ptr(), code.len())
 }
 
 /// A dispatch table slot containing all methods registered for a specific domain namespace.
@@ -191,7 +236,7 @@ pub struct VM {
     /// Fast bump allocator arena for temporary heap objects created during execution.
     pub arena: Bump,
     pub(crate) frames: Vec<Frame>,
-    closures: std::sync::Arc<[crate::runtime::value::FuncValue]>,
+    closures: Arc<[crate::runtime::value::FuncValue]>,
     /// Stack-based context for domain blocks (e.g., `browser "brave" { ... }`).
     /// Each key maps to a stack of values, enabling nested domain contexts.
     pub(crate) context_stack: HashMap<String, Vec<Value>>,
@@ -205,8 +250,15 @@ pub struct VM {
     script_args: Vec<Value>,
     /// Direct-mapped 4-entry callee cache for fast recursive call dispatch.
     call_cache: [(Value, Value); 4],
-    /// Pool of recycled frames to avoid per-call allocation.
-    frame_pool: Vec<Frame>,
+    /// Number of live call frames.
+    ///
+    /// `frames[..frame_depth]` are live; the rest are recycled slots kept
+    /// around for reuse. Frames are never moved out of the vector: entering a
+    /// call reinitializes the slot at `frame_depth` in place, returning
+    /// decrements it. The old design pushed/popped `Frame` by value through a
+    /// separate pool, which moved ~200 bytes three times per call (~20% of all
+    /// retired instructions on recursive workloads).
+    frame_depth: usize,
 }
 
 impl Default for VM {
@@ -241,7 +293,7 @@ impl VM {
             type_entries: Vec::new(),
             arena: Bump::new(),
             frames: Vec::with_capacity(16),
-            closures: std::sync::Arc::new([]),
+            closures: Arc::new([]),
             context_stack: HashMap::new(),
             opcode_table: [None; 256],
             #[cfg(feature = "opcode-stats")]
@@ -249,7 +301,7 @@ impl VM {
             script_name: "<input>".into(),
             script_args: Vec::new(),
             call_cache: [(Value::nil(), Value::nil()); 4],
-            frame_pool: Vec::with_capacity(16),
+            frame_depth: 0,
         }
     }
 
@@ -348,6 +400,25 @@ impl VM {
         }
     }
 
+    /// Runs the top frame's deferred closures in LIFO order.
+    ///
+    /// Returns immediately when there is nothing deferred, which is the common
+    /// case; every function return goes through here.
+    #[inline]
+    fn run_defers(&mut self) {
+        let Some(frame) = self.top_frame_mut() else {
+            return;
+        };
+        if frame.defer_stack.is_empty() {
+            return;
+        }
+        let mut stack = core::mem::take(&mut frame.defer_stack);
+        stack.reverse();
+        for closure in stack {
+            let _ = self.call_value(closure, &[]);
+        }
+    }
+
     /// Pops a value from the operand stack.
     pub fn pop_value(&mut self) -> Value {
         self.stack.pop().unwrap_or(Value::nil())
@@ -356,6 +427,68 @@ impl VM {
     /// Pushes a value onto the operand stack.
     pub fn push_value(&mut self, value: Value) {
         self.stack.push(value);
+    }
+
+    /// Number of live call frames.
+    #[inline(always)]
+    fn frame_count(&self) -> usize {
+        self.frame_depth
+    }
+
+    /// The live frame at the top of the call stack, if any.
+    #[inline(always)]
+    fn top_frame(&self) -> Option<&Frame> {
+        match self.frame_depth {
+            0 => None,
+            n => Some(unsafe { self.frames.get_unchecked(n - 1) }),
+        }
+    }
+
+    /// Mutable access to the live frame at the top of the call stack.
+    #[inline(always)]
+    fn top_frame_mut(&mut self) -> Option<&mut Frame> {
+        match self.frame_depth {
+            0 => None,
+            n => Some(unsafe { self.frames.get_unchecked_mut(n - 1) }),
+        }
+    }
+
+    /// Acquires the frame slot for a new call and returns its index.
+    ///
+    /// The slot is reset in place, so no `Frame` is ever moved. Callers then
+    /// fill in `stack_base`, `locals` and `argv` through `self.frames[idx]`.
+    #[inline]
+    fn acquire_frame(&mut self, bc: &Arc<Bytecode>) -> usize {
+        let idx = self.frame_depth;
+        if idx == self.frames.len() {
+            self.frames.push(Frame {
+                code: Arc::clone(bc),
+                locals: Vec::new(),
+                ip: 0,
+                iter: Vec::new(),
+                iter_idx: 0,
+                range_cur: 0,
+                range_end: 0,
+                stack_base: 0,
+                defer_stack: Vec::new(),
+                argv: Vec::new(),
+            });
+        }
+        self.frame_depth = idx + 1;
+
+        let frame = unsafe { self.frames.get_unchecked_mut(idx) };
+        if !Arc::ptr_eq(&frame.code, bc) {
+            frame.code = Arc::clone(bc);
+        }
+        frame.ip = 0;
+        frame.iter.clear();
+        frame.iter_idx = 0;
+        frame.range_cur = 0;
+        frame.range_end = 0;
+        frame.defer_stack.clear();
+        frame.argv.clear();
+        frame.locals.clear();
+        idx
     }
 
     /// Reads a local variable from the current frame.
@@ -481,9 +614,9 @@ impl VM {
     /// ```
     pub fn run(&mut self, bc: &Bytecode) -> Value {
         self.stack.clear();
-        self.frames.clear();
-        if self.frame_pool.len() > 4096 {
-            self.frame_pool.truncate(4096);
+        self.frame_depth = 0;
+        if self.frames.len() > 4096 {
+            self.frames.truncate(4096);
         }
         self.closures = Arc::clone(&bc.closures);
         self.call_cache = [(Value::nil(), Value::nil()); 4];
@@ -496,99 +629,96 @@ impl VM {
         // Register user-defined functions in globals so OP_CALL can find them
         // Use an offset so indices don't collide with global_table (builtins)
         let globals_offset = self.global_table.len() as u32;
-        for (name, func) in &bc.user_functions {
+        for (name, func) in bc.user_functions.iter() {
             let idx = globals_offset + self.globals.len() as u32;
             self.globals
-                .push(Value::from_func(func.clone(), &self.arena));
+                .push(Value::from_func_shared(Arc::clone(func), &self.arena));
             self.global_index.insert(name.as_ref().into(), idx);
         }
 
         let n = bc.local_names.len().max(16);
-        let mut locals = SmallVec::<[Value; 16]>::with_capacity(n);
-        locals.resize(n, Value::nil());
+        let root_code = Arc::new(bc.clone());
+        let root = self.acquire_frame(&root_code);
+        {
+            let frame = &mut self.frames[root];
+            frame.stack_base = 0;
+            frame.locals.resize(n, Value::nil());
+            frame.argv.extend_from_slice(&self.script_args);
+        }
 
-        self.frames.push(Frame {
-            code: Arc::new(bc.clone()),
-            locals,
-            ip: 0,
-            iter: SmallVec::new(),
-            iter_idx: 0,
-            range_cur: 0,
-            range_end: 0,
-            stack_base: 0,
-            defer_stack: SmallVec::new(),
-            argv: SmallVec::from_slice(&self.script_args),
-        });
+        // Dispatch state kept in locals instead of behind `frames[top]`.
+        //
+        // The instruction pointer and the current code slice are the two things
+        // every instruction needs. The previous loop reloaded `frames[top]`,
+        // `frame.ip` and `frame.code.instructions` (three dependent loads) and
+        // wrote `ip` back through the frame for every single instruction.
+        // Now `ip` lives in a register and is only written to the frame when a
+        // call is entered (the return address), which is the only time another
+        // frame needs it.
+        let mut top = self.frame_count() - 1;
+        let mut ip: usize = 0;
+        let (mut code_ptr, mut code_len) = frame_code_bounds(&self.frames[top]);
 
-        while let Some(top) = self.frames.len().checked_sub(1) {
-            let frame = &self.frames[top];
-            if frame.ip as usize >= frame.code.instructions.len() {
+        loop {
+            if ip >= code_len {
                 // Run deferred closures before returning
-                if let Some(frame) = self.frames.last_mut() {
-                    let mut stack = core::mem::take(&mut frame.defer_stack);
-                    stack.reverse();
-                    for closure in stack {
-                        let _ = self.call_value(closure, &[]);
-                    }
-                }
+                self.run_defers();
                 let r = self.stack.pop().unwrap_or(Value::nil());
-                let returning_base = self.frames.last().map(|f| f.stack_base);
-                let mut returned_frame = self.frames.pop().unwrap();
-                // Recycle the frame back to the pool
-                returned_frame.locals.clear();
-                returned_frame.iter.clear();
-                returned_frame.defer_stack.clear();
-                returned_frame.argv.clear();
-                self.frame_pool.push(returned_frame);
-                if let Some(c) = self.frames.last_mut() {
-                    c.ip += 1;
-                    self.stack
-                        .truncate(returning_base.unwrap_or(c.stack_base) as usize);
-                    self.stack.push(r);
-                } else {
-                    return r;
+                let returning_base = self.top_frame().map(|f| f.stack_base);
+                self.frame_depth -= 1;
+                debug_assert_eq!(self.frame_depth, top);
+                if self.frame_depth == 0 {
+                    return Value::escape(r);
                 }
+                top -= 1;
+                let caller = unsafe { self.frames.get_unchecked(top) };
+                let base = returning_base.unwrap_or(caller.stack_base);
+                ip = caller.ip as usize;
+                (code_ptr, code_len) = frame_code_bounds(caller);
+                self.stack.truncate(base as usize);
+                self.stack.push(r);
                 continue;
             }
 
-            let instr = unsafe { *frame.code.instructions.get_unchecked(frame.ip as usize) };
+            let instr = unsafe { *code_ptr.add(ip) };
             let action = self.dispatch(top, instr);
             match action {
-                Action::Next => self.frames[top].ip += 1,
-                Action::Jump(to) => self.frames[top].ip = to,
+                Action::Next => ip += 1,
+                Action::Jump(to) => ip = to as usize,
+                Action::TailCall => {
+                    // The frame rebound to another function's bytecode.
+                    ip = 0;
+                    (code_ptr, code_len) =
+                        frame_code_bounds(unsafe { self.frames.get_unchecked(top) });
+                }
                 Action::Return => {
                     // Run deferred closures before returning
-                    if let Some(frame) = self.frames.last_mut() {
-                        let mut stack = core::mem::take(&mut frame.defer_stack);
-                        stack.reverse();
-                        for closure in stack {
-                            let _ = self.call_value(closure, &[]);
-                        }
-                    }
+                    self.run_defers();
                     let r = self.stack.pop().unwrap_or(Value::nil());
-                    let returning_base = self.frames.last().map(|f| f.stack_base);
-                    let mut returned_frame = self.frames.pop().unwrap();
-                    // Recycle the frame back to the pool
-                    returned_frame.locals.clear();
-                    returned_frame.iter.clear();
-                    returned_frame.defer_stack.clear();
-                    returned_frame.argv.clear();
-                    self.frame_pool.push(returned_frame);
-                    if self.frames.is_empty() {
-                        return r;
+                    let returning_base = self.top_frame().map(|f| f.stack_base);
+                    self.frame_depth -= 1;
+                    if self.frame_depth == 0 {
+                        return Value::escape(r);
                     }
-                    let c = self.frames.last_mut().unwrap();
-                    c.ip += 1;
-                    self.stack
-                        .truncate(returning_base.unwrap_or(c.stack_base) as usize);
+                    top -= 1;
+                    let caller = unsafe { self.frames.get_unchecked(top) };
+                    let base = returning_base.unwrap_or(caller.stack_base);
+                    ip = caller.ip as usize;
+                    (code_ptr, code_len) = frame_code_bounds(caller);
+                    self.stack.truncate(base as usize);
                     self.stack.push(r);
                 }
                 Action::PushFrame => {
-                    // Frame already pushed by enter_call; just continue
+                    // The callee frame is already on the stack. Record where the
+                    // caller resumes; nothing else needs the caller's ip.
+                    unsafe { self.frames.get_unchecked_mut(top) }.ip = (ip + 1) as u32;
+                    top += 1;
+                    ip = 0;
+                    (code_ptr, code_len) =
+                        frame_code_bounds(unsafe { self.frames.get_unchecked(top) });
                 }
             }
         }
-        Value::nil()
     }
 
     #[inline(always)]
@@ -603,6 +733,7 @@ impl VM {
                 crate::runtime::opcode::OpcodeResult::Jump(addr) => Action::Jump(addr),
                 crate::runtime::opcode::OpcodeResult::Return => Action::Return,
                 crate::runtime::opcode::OpcodeResult::PushFrame => Action::PushFrame,
+                crate::runtime::opcode::OpcodeResult::TailCall => Action::TailCall,
             };
         }
 
@@ -614,6 +745,7 @@ impl VM {
                 super::opcode::OpcodeResult::Jump(addr) => Action::Jump(addr),
                 super::opcode::OpcodeResult::Return => Action::Return,
                 super::opcode::OpcodeResult::PushFrame => Action::PushFrame,
+                super::opcode::OpcodeResult::TailCall => Action::TailCall,
             }
         } else {
             Action::Next
@@ -631,46 +763,67 @@ impl VM {
         let n = bc.local_names.len().max(func.params.len());
         let base = self.stack.len() as u32;
 
-        // Reuse a frame from the pool if available
-        let mut frame = self.frame_pool.pop().unwrap_or_else(|| Frame {
-            code: Arc::clone(bc),
-            locals: SmallVec::new(),
-            ip: 0,
-            iter: SmallVec::new(),
-            iter_idx: 0,
-            range_cur: 0,
-            range_end: 0,
-            stack_base: 0,
-            defer_stack: SmallVec::new(),
-            argv: SmallVec::new(),
-        });
-
-        frame.code = Arc::clone(bc);
+        let idx = self.acquire_frame(bc);
+        let frame = &mut self.frames[idx];
         frame.ip = 0;
         frame.stack_base = base;
-        frame.iter.clear();
-        frame.iter_idx = 0;
-        frame.range_cur = 0;
-        frame.range_end = 0;
-        frame.defer_stack.clear();
 
         // Prepare locals (bulk copy + resize)
-        frame.locals.clear();
-        frame.locals.reserve(n);
         let copy = func.params.len().min(args.len());
         frame.locals.extend_from_slice(&args[..copy]);
         frame.locals.resize(n, Value::nil());
 
         // Prepare argv (only if function uses special vars)
-        frame.argv.clear();
         if func.uses_special_vars {
             frame.argv.extend_from_slice(args);
         }
 
-        // Push frame directly instead of using pending
-        self.frames.push(frame);
         // Return PushFrame so the dispatch loop doesn't advance ip
         Action::PushFrame
+    }
+
+    /// Enters a call whose callee and arguments are still on the operand stack.
+    ///
+    /// `arg_base` is the callee's slot; the arguments occupy
+    /// `arg_base + 1 .. arg_base + 1 + nargs`. The operand stack is truncated to
+    /// `arg_base` so the return value lands exactly where the callee was.
+    ///
+    /// This avoids materializing an intermediate argument buffer for the common
+    /// case of calling a script function.
+    fn enter_call_at(
+        &mut self,
+        func: &crate::runtime::value::FuncValue,
+        arg_base: usize,
+        nargs: usize,
+    ) -> crate::runtime::opcode::OpcodeResult {
+        let Some(bc) = &func.bytecode else {
+            self.stack.truncate(arg_base);
+            self.push(Value::nil());
+            return crate::runtime::opcode::OpcodeResult::Next;
+        };
+
+        let n = bc.local_names.len().max(func.params.len());
+        let arg_start = arg_base + 1;
+
+        let idx = self.acquire_frame(bc);
+        let frame = &mut self.frames[idx];
+        frame.ip = 0;
+        frame.stack_base = arg_base as u32;
+
+        let copy = func.params.len().min(nargs);
+        frame
+            .locals
+            .extend_from_slice(&self.stack[arg_start..arg_start + copy]);
+        frame.locals.resize(n, Value::nil());
+
+        if func.uses_special_vars {
+            frame
+                .argv
+                .extend_from_slice(&self.stack[arg_start..arg_start + nargs]);
+        }
+
+        self.stack.truncate(arg_base);
+        crate::runtime::opcode::OpcodeResult::PushFrame
     }
 
     /// Same as `enter_call` but returns [`OpcodeResult`] for use from opcode handlers.
@@ -693,7 +846,7 @@ impl VM {
         args: &[Value],
     ) -> crate::runtime::opcode::OpcodeResult {
         let Some(bc) = &func.bytecode else {
-            if let Some(frame) = self.frames.last() {
+            if let Some(frame) = self.top_frame() {
                 self.stack.truncate(frame.stack_base as usize);
             }
             self.push(Value::nil());
@@ -703,13 +856,15 @@ impl VM {
         let n = bc.local_names.len().max(func.params.len());
 
         // Reuse the current frame instead of pushing a new one
-        let top = match self.frames.len().checked_sub(1) {
+        let top = match self.frame_depth.checked_sub(1) {
             Some(i) => i,
             None => return crate::runtime::opcode::OpcodeResult::Next,
         };
         let frame = &mut self.frames[top];
 
-        frame.code = Arc::clone(bc);
+        if !Arc::ptr_eq(&frame.code, bc) {
+            frame.code = Arc::clone(bc);
+        }
         frame.ip = 0;
         frame.iter.clear();
         frame.iter_idx = 0;
@@ -734,7 +889,7 @@ impl VM {
         self.stack.truncate(frame.stack_base as usize);
 
         // Jump to ip=0 so the dispatch loop starts the new code from the beginning
-        crate::runtime::opcode::OpcodeResult::Jump(0)
+        crate::runtime::opcode::OpcodeResult::TailCall
     }
 
     /// Reentrantly invokes an XCL function or closure value with the given arguments.
@@ -765,79 +920,60 @@ impl VM {
 
         // Prepare locals: params first (matching how enter_call does it)
         let n = bc.local_names.len().max(func_ref.params.len());
-        let mut locals = SmallVec::<[Value; 16]>::with_capacity(n);
-        for (i, _) in func_ref.params.iter().enumerate() {
-            locals.push(args.get(i).copied().unwrap_or(Value::nil()));
-        }
-        while locals.len() < n {
-            locals.push(Value::nil());
-        }
 
-        let initial_depth = self.frames.len();
+        let initial_depth = self.frame_depth;
         let stack_base = self.stack.len() as u32;
 
-        self.frames.push(Frame {
-            code: Arc::clone(&bc),
-            locals,
-            ip: 0,
-            iter: SmallVec::new(),
-            iter_idx: 0,
-            range_cur: 0,
-            range_end: 0,
-            stack_base,
-            defer_stack: SmallVec::new(),
-            argv: SmallVec::from_slice(args),
-        });
+        let idx = self.acquire_frame(&bc);
+        {
+            let frame = &mut self.frames[idx];
+            frame.stack_base = stack_base;
+            for (i, _) in func_ref.params.iter().enumerate() {
+                frame
+                    .locals
+                    .push(args.get(i).copied().unwrap_or(Value::nil()));
+            }
+            frame.locals.resize(n, Value::nil());
+            frame.argv.extend_from_slice(args);
+        }
 
         // Run the VM dispatch loop until the frame we just pushed returns
         loop {
             // Recalculate top every iteration because PushFrame/Return change frame count
-            let top = match self.frames.len().checked_sub(1) {
+            let top = match self.frame_depth.checked_sub(1) {
                 Some(i) => i,
                 None => {
                     self.closures = saved_closures;
-                    self.frames.truncate(initial_depth);
+                    self.frame_depth = initial_depth;
                     return Value::nil();
                 }
             };
 
             // If we've returned to the caller depth, the closure is done
-            if self.frames.len() <= initial_depth {
+            if self.frame_depth <= initial_depth {
                 break;
             }
 
             let frame = &self.frames[top];
             if frame.ip as usize >= frame.code.instructions.len() {
                 // Run deferred closures before returning
-                if let Some(frame) = self.frames.last_mut() {
-                    let mut stack = core::mem::take(&mut frame.defer_stack);
-                    stack.reverse();
-                    for closure in stack {
-                        let _ = self.call_value(closure, &[]);
-                    }
-                }
+                self.run_defers();
                 // Frame ran off the end — treat top of stack as return value
                 let result = self.stack.pop().unwrap_or(Value::nil());
-                let returning_base = self.frames.last().map(|f| f.stack_base);
-                let mut returned_frame = self.frames.pop().unwrap();
-                returned_frame.locals.clear();
-                returned_frame.iter.clear();
-                returned_frame.defer_stack.clear();
-                returned_frame.argv.clear();
-                self.frame_pool.push(returned_frame);
-                if self.frames.len() <= initial_depth {
+                let returning_base = self.top_frame().map(|f| f.stack_base);
+                self.frame_depth -= 1;
+                if self.frame_depth <= initial_depth {
                     self.stack
                         .truncate(returning_base.unwrap_or(stack_base) as usize);
                     self.closures = saved_closures;
-                    return result;
+                    return Value::escape(result);
                 }
                 // Nested call returned; hand the value to the outer frame
-                if let Some(caller) = self.frames.last_mut() {
-                    caller.ip += 1;
-                    self.stack
-                        .truncate(returning_base.unwrap_or(caller.stack_base) as usize);
-                    self.stack.push(result);
-                }
+                let caller = &mut self.frames[self.frame_depth - 1];
+                caller.ip += 1;
+                let base = returning_base.unwrap_or(caller.stack_base);
+                self.stack.truncate(base as usize);
+                self.stack.push(result);
                 continue;
             }
 
@@ -845,42 +981,36 @@ impl VM {
             let action = self.dispatch(top, instr);
             match action {
                 Action::Next => {
-                    let top = self.frames.len().checked_sub(1).unwrap_or(top);
+                    let top = self.frame_depth.checked_sub(1).unwrap_or(top);
                     self.frames[top].ip += 1;
                 }
                 Action::Jump(to) => {
-                    let top = self.frames.len().checked_sub(1).unwrap_or(top);
+                    let top = self.frame_depth.checked_sub(1).unwrap_or(top);
                     self.frames[top].ip = to;
+                }
+                Action::TailCall => {
+                    let top = self.frame_depth.checked_sub(1).unwrap_or(top);
+                    self.frames[top].ip = 0;
                 }
                 Action::Return => {
                     // Run deferred closures before returning
-                    if let Some(frame) = self.frames.last_mut() {
-                        let mut stack = core::mem::take(&mut frame.defer_stack);
-                        stack.reverse();
-                        for closure in stack {
-                            let _ = self.call_value(closure, &[]);
-                        }
-                    }
+                    self.run_defers();
                     let result = self.stack.pop().unwrap_or(Value::nil());
-                    let returning_base = self.frames.last().map(|f| f.stack_base);
-                    let mut returned_frame = self.frames.pop().unwrap();
-                    returned_frame.locals.clear();
-                    returned_frame.iter.clear();
-                    returned_frame.defer_stack.clear();
-                    returned_frame.argv.clear();
-                    self.frame_pool.push(returned_frame);
-                    if self.frames.len() <= initial_depth {
+                    let returning_base = self.top_frame().map(|f| f.stack_base);
+                    self.frame_depth -= 1;
+                    if self.frame_depth <= initial_depth {
                         self.stack
                             .truncate(returning_base.unwrap_or(stack_base) as usize);
                         self.closures = saved_closures;
-                        return result;
+                        return Value::escape(result);
                     }
-                    if let Some(caller) = self.frames.last_mut() {
+                    if let Some(caller) = self.frames.get_mut(self.frame_depth - 1) {
                         caller.ip += 1;
-                        self.stack
-                            .truncate(returning_base.unwrap_or(caller.stack_base) as usize);
-                        self.stack.push(result);
                     }
+                    let caller_base = self.frames[self.frame_depth - 1].stack_base;
+                    self.stack
+                        .truncate(returning_base.unwrap_or(caller_base) as usize);
+                    self.stack.push(result);
                 }
                 Action::PushFrame => {
                     // Frame already pushed by enter_call; just continue
@@ -915,7 +1045,7 @@ impl VM {
     ///
     /// * `closure` - An XCL function or closure [`Value`] to run upon return.
     pub fn push_defer(&mut self, closure: Value) {
-        if let Some(frame) = self.frames.last_mut() {
+        if let Some(frame) = self.top_frame_mut() {
             frame.defer_stack.push(closure);
         }
     }
@@ -1408,5 +1538,76 @@ mod tests {
             &[],
         );
         assert_eq!(result.as_i48(), 6);
+    }
+
+    // ── String representation tests (arena bytes, cached hash) ──
+
+    #[test]
+    fn test_string_equality_across_constructions() {
+        // Strings built via from_str, from_str_boxed, and concatenation
+        // with the same bytes should compare equal.
+        let boxed = Value::from_str_boxed("hello".to_string());
+        let arena = bumpalo::Bump::new();
+        let arena_str = Value::from_str("hello".to_string(), &arena);
+        assert_eq!(boxed.as_str(), Some("hello"));
+        assert_eq!(arena_str.as_str(), Some("hello"));
+        // Equality via Value::eq_
+        assert!(Value::eq_(boxed, boxed));
+        assert!(Value::eq_(arena_str, arena_str));
+        // Cross-construction: same bytes, different pointers
+        assert_eq!(boxed.as_str(), arena_str.as_str());
+        core::mem::forget(arena);
+    }
+
+    #[test]
+    fn test_str_hash_consistency() {
+        let boxed = Value::from_str_boxed("test-key".to_string());
+        let arena = bumpalo::Bump::new();
+        let arena_str = Value::from_str("test-key".to_string(), &arena);
+
+        // Both should have the same cached hash
+        let h1 = boxed.str_hash().expect("boxed string should have hash");
+        let h2 = arena_str.str_hash().expect("arena string should have hash");
+        assert_eq!(h1, h2, "same bytes must produce same cached hash");
+
+        // Non-string values return None
+        assert!(Value::from_i48(42).str_hash().is_none());
+        assert!(Value::nil().str_hash().is_none());
+        assert!(Value::bool(true).str_hash().is_none());
+        core::mem::forget(arena);
+    }
+
+    #[test]
+    fn test_concatenation_produces_correct_value() {
+        let result = eval_with_args(r#""hello" + " world""#, "script.xcl", &[]);
+        assert_eq!(result.as_str(), Some("hello world"));
+    }
+
+    #[test]
+    fn test_concatenation_loop_correctness() {
+        // 3-part concatenation in a loop stays correct
+        let result = eval_with_args(
+            r#"$s = ""; for $i in 0..50 { $s = $s + "a" + "b" }; $s"#,
+            "script.xcl",
+            &[],
+        );
+        let s = result.as_str().expect("concat loop should return string");
+        assert_eq!(s.len(), 100);
+        for c in s.chars() {
+            assert!(c == 'a' || c == 'b');
+        }
+    }
+
+    #[test]
+    fn test_map_with_runtime_key() {
+        // A map keyed by a string built at runtime exercises the cached-hash
+        // path with a key that is not the compiler's interned constant.
+        // We build the key via concatenation, then use it for lookup.
+        let result = eval_with_args(
+            r#"$k = "x" + "y"; $m = {xy: 42}; $m[$k]"#,
+            "script.xcl",
+            &[],
+        );
+        assert_eq!(result.as_i48(), 42);
     }
 }
