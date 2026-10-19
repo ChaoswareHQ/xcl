@@ -1,7 +1,8 @@
 //! Unit tests for the optimizer module.
 
-use crate::bytecode::{
-    Instr, OP_ADD, OP_HALT, OP_JUMP_IF_FALSE, OP_LOAD_LOCAL, OP_LOAD_GLOBAL, OP_PUSH_INT,
+use crate::bytecode::Instr;
+use crate::runtime::vm::ops::consts::{
+    OP_ADD, OP_HALT, OP_JUMP_IF_FALSE, OP_LOAD_GLOBAL, OP_LOAD_LOCAL, OP_PUSH_INT,
     OP_STORE_LOCAL, OP_SUB,
 };
 use super::dataflow::build_basic_blocks;

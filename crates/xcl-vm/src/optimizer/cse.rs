@@ -4,12 +4,13 @@
 //! replacing duplicates with references to the first computation.
 
 use crate::bytecode::{
-    Instr, OP_ADD, OP_ADD_INT_LOCAL, OP_ADD_LOCAL_LOCAL, OP_ADD_LOCAL_LOCAL_STORE,
-    OP_ADD_LOCAL_STORE, OP_DIV, OP_DIV_LOCAL_LOCAL_STORE, OP_DIV_LOCAL_STORE, OP_LOAD_LOCAL,
-    OP_LOAD_LOCAL_STORE_LOCAL, OP_MUL, OP_MUL_INT_LOCAL, OP_MUL_LOCAL_LOCAL,
-    OP_MUL_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_STORE, OP_PUSH_INT, OP_STORE_LOCAL, OP_SUB,
+    Instr, OP_ADD_INT_LOCAL, OP_ADD_LOCAL_LOCAL, OP_ADD_LOCAL_LOCAL_STORE,
+    OP_ADD_LOCAL_STORE, OP_DIV_LOCAL_LOCAL_STORE, OP_DIV_LOCAL_STORE, OP_LOAD_LOCAL_STORE_LOCAL,
+    OP_MUL_INT_LOCAL, OP_MUL_LOCAL_LOCAL, OP_MUL_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_STORE,
     OP_SUB_INT_LOCAL, OP_SUB_LOCAL_LOCAL, OP_SUB_LOCAL_LOCAL_STORE, OP_SUB_LOCAL_STORE,
+    OP_FOR_ITER_NEXT, OP_FOR_RANGE_NEXT, OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL, OP_FOR_NUMBER_LOOP,
 };
+use crate::runtime::vm::ops::consts::{OP_ADD, OP_DIV, OP_HALT, OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_LOCAL, OP_MUL, OP_PUSH_INT, OP_RETURN, OP_STORE_LOCAL, OP_SUB};
 
 use super::dataflow::{build_basic_blocks, BasicBlock};
 
@@ -150,7 +151,7 @@ fn cse_in_block(code: &mut Vec<Instr>, wide: &mut [i64], block: &BasicBlock) {
                 let b = next.a();
                 let bin_op = next2.op();
                 if (bin_op == OP_ADD || bin_op == OP_SUB || bin_op == OP_MUL || bin_op == OP_DIV)
-                    && next3.op() == crate::bytecode::OP_STORE_LOCAL
+                    && next3.op() == OP_STORE_LOCAL
                 {
                     let dest = next3.a();
                     let key = (bin_op, a, b);
@@ -174,7 +175,7 @@ fn cse_in_block(code: &mut Vec<Instr>, wide: &mut [i64], block: &BasicBlock) {
         // Track PUSH_INT; STORE_LOCAL as a constant expression
         if op == OP_PUSH_INT && i < end {
             let next = code[i + 1];
-            if next.op() == crate::bytecode::OP_STORE_LOCAL {
+            if next.op() == OP_STORE_LOCAL {
                 let constant = instr.a();
                 let dest = next.a();
                 let key = (OP_PUSH_INT, 0, constant);
@@ -184,11 +185,11 @@ fn cse_in_block(code: &mut Vec<Instr>, wide: &mut [i64], block: &BasicBlock) {
 
         // Reset map on control flow boundaries
         match op {
-            crate::bytecode::OP_JUMP
-            | crate::bytecode::OP_JUMP_IF_FALSE
-            | crate::bytecode::OP_JUMP_IF_NIL
-            | crate::bytecode::OP_RETURN
-            | crate::bytecode::OP_HALT => {
+            OP_JUMP
+            | OP_JUMP_IF_FALSE
+            | OP_JUMP_IF_NIL
+            | OP_RETURN
+            | OP_HALT => {
                 expr_map.clear();
             }
             _ => {}
@@ -205,19 +206,19 @@ fn patch_jumps_after(code: &mut [Instr], wide: &mut [i64], after: usize, count: 
     for instr in code.iter_mut() {
         let op = instr.op();
         match op {
-            crate::bytecode::OP_JUMP
-            | crate::bytecode::OP_JUMP_IF_FALSE
-            | crate::bytecode::OP_JUMP_IF_NIL
-            | crate::bytecode::OP_FOR_ITER_NEXT
-            | crate::bytecode::OP_FOR_RANGE_NEXT => {
+            OP_JUMP
+            | OP_JUMP_IF_FALSE
+            | OP_JUMP_IF_NIL
+            | OP_FOR_ITER_NEXT
+            | OP_FOR_RANGE_NEXT => {
                 if instr.a() > after_u32 {
                     *instr =
                         Instr::make(op, instr.a() - count_u32, instr.b(), instr.c());
                 }
             }
-            crate::bytecode::OP_WHILE_LT_INT
-            | crate::bytecode::OP_WHILE_LT_LOCAL
-            | crate::bytecode::OP_FOR_NUMBER_LOOP => {
+            OP_WHILE_LT_INT
+            | OP_WHILE_LT_LOCAL
+            | OP_FOR_NUMBER_LOOP => {
                 let w_idx = instr.c() as usize;
                 if let Some(exit_ip) = wide.get_mut(w_idx)
                     && *exit_ip > after as i64

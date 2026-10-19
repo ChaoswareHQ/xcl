@@ -4,9 +4,9 @@
 //! (like LOAD_GLOBAL) before loop entry.
 
 use crate::bytecode::{
-    Instr, OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_JUMP,
-    OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_GLOBAL, OP_NOP, OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,
+    Instr, OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,
 };
+use crate::runtime::vm::ops::consts::{OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_GLOBAL, OP_NOP};
 
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;

@@ -20,7 +20,9 @@ use alloc::vec::Vec;
 use std::sync::Arc;
 
 use super::instr::Instr;
-use super::opcodes::{Bytecode, *};
+use super::opcodes::*;
+use super::Bytecode;
+use crate::runtime::vm::ops::consts::*;
 use super::peephole::peephole_optimize_once;
 use crate::compiler::ast::{AstNode, BinaryOperator, TypeKind, UnaryOperator};
 use crate::runtime::value::{FuncValue, Value};

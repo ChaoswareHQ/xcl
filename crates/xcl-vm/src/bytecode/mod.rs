@@ -40,7 +40,7 @@
 //! ```
 //! use xcl_vm::compiler::lexer::lex;
 //! use xcl_vm::compiler::parser::parse;
-//! use xcl_vm::bytecode::{compile, OP_ADD};
+//! use xcl_vm::bytecode::compile;
 //!
 //! let tokens = lex("20 + 30", "<eval>");
 //! let ast = parse(&tokens, "20 + 30");
@@ -55,5 +55,29 @@ mod opcodes;
 mod peephole;
 
 pub use instr::Instr;
-pub use opcodes::{Bytecode, *};
+pub use opcodes::*;
 pub use compiler::compile;
+
+/// Compiled XCL bytecode unit ready for execution by the VM runtime.
+///
+/// Stores immutable instruction sequences, constant tables, interned identifier strings,
+/// and function metadata.
+#[derive(Debug, Clone)]
+pub struct Bytecode {
+    /// Linear sequence of compiled 64-bit bytecode instructions.
+    pub instructions: std::sync::Arc<[Instr]>,
+    /// Table of 64-bit wide numeric operands (large integers and IEEE-754 floats).
+    pub wide_operands: std::sync::Arc<[i64]>,
+    /// Interned string literals and member/method names.
+    pub string_table: std::sync::Arc<[std::boxed::Box<str>]>,
+    /// Pre-allocated string [`Value`](crate::runtime::value::Value) constants corresponding to `string_table`.
+    pub string_values: std::sync::Arc<[crate::runtime::value::Value]>,
+    /// Local variable names mapped to slot indices.
+    pub local_names: std::sync::Arc<[std::boxed::Box<str>]>,
+    /// Global variable names mapped to slot indices.
+    pub global_names: std::sync::Arc<[std::boxed::Box<str>]>,
+    /// User-defined top-level function declarations.
+    pub user_functions: std::vec::Vec<(std::boxed::Box<str>, crate::runtime::value::FuncValue)>,
+    /// Compiled nested closures and lambda bodies.
+    pub closures: std::vec::Vec<crate::runtime::value::FuncValue>,
+}
