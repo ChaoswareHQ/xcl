@@ -1,0 +1,8 @@
+[alias]
+# Run the pure-VM benchmark suite:
+#   cargo bench-vm -- --save-baseline final
+bench-vm = "bench -p xcl-vm"
+bench-vm-core = "bench -p xcl-vm --bench vm_core"
+bench-vm-data = "bench -p xcl-vm --bench vm_data"
+bench-vm-algorithms = "bench -p xcl-vm --bench vm_algorithms"
+bench-vm-games = "bench -p xcl-vm --bench vm_games"
