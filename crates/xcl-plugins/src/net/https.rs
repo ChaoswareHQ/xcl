@@ -214,7 +214,7 @@ fn parse_options(opts: Value) -> RequestOptions {
 
     if let Some(map) = opts.as_map() {
         for (key, val) in map {
-            match key.as_str() {
+            match key {
                 "timeout" => {
                     let t = val.as_i48();
                     result.timeout_ms = t.max(0) as u64;
@@ -223,7 +223,7 @@ fn parse_options(opts: Value) -> RequestOptions {
                     if let Some(h_map) = val.as_map() {
                         for (hk, hv) in h_map {
                             if let Some(hv_str) = hv.as_str() {
-                                result.headers.insert(hk.clone(), hv_str.to_string());
+                                result.headers.insert(hk.to_string(), hv_str.to_string());
                             }
                         }
                     }
@@ -232,10 +232,10 @@ fn parse_options(opts: Value) -> RequestOptions {
                     if let Some(q_map) = val.as_map() {
                         for (qk, qv) in q_map {
                             if let Some(qv_str) = qv.as_str() {
-                                result.query.insert(qk.clone(), qv_str.to_string());
+                                result.query.insert(qk.to_string(), qv_str.to_string());
                             } else {
                                 let qv_int = qv.as_i48();
-                                result.query.insert(qk.clone(), qv_int.to_string());
+                                result.query.insert(qk.to_string(), qv_int.to_string());
                             }
                         }
                     }
@@ -400,7 +400,7 @@ impl Https {
         if let Some(map) = headers.as_map() {
             for (k, v) in map {
                 if let Some(val_str) = v.as_str() {
-                    options.headers.insert(k.clone(), val_str.to_string());
+                    options.headers.insert(k.to_string(), val_str.to_string());
                 }
             }
         }

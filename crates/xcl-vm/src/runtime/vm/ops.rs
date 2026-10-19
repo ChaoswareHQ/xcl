@@ -11,7 +11,7 @@ mod core_ops {
     use crate::Instr;
     use crate::runtime::opcode::OpcodeResult;
     use crate::runtime::value::Value;
-    use crate::runtime::vm::{fast_hash, VM};
+    use crate::runtime::vm::{VM, fast_hash};
 
     // ── Phase A + Tier 1: Stack/constants ──
 
@@ -447,21 +447,45 @@ mod core_ops {
     #[xcl_op(code = 36, arity = 0, stack = "2n -> 1")]
     fn op_make_dict(vm: &mut VM, _top: usize, instr: Instr) -> OpcodeResult {
         let n = instr.a() as usize;
-        // Build indexed arrays for fast field access using hashbrown directly
-        let mut key_hashes = Vec::with_capacity(n);
-        let mut key_values = Vec::with_capacity(n);
-        let mut data = crate::runtime::value::XclMap::with_capacity(n);
-        for _ in 0..n {
-            let v = vm.pop();
-            let k = vm.pop();
-            // Fast path: if key is a string, use as_str() to avoid as_string() formatting
-            let key_str = k.as_str().map(String::from).unwrap_or_else(|| k.as_string());
-            let hash = fast_hash(key_str.as_bytes());
-            key_hashes.push((hash, key_str.clone()));
-            key_values.push(v);
-            data.insert(key_str, v);
+        if n <= crate::runtime::value::SMALL_MAP_MAX {
+            // Small path: inline SmallVec with cached fingerprint, no String allocation
+            let mut entries: smallvec::SmallVec<[(Value, Value, u64); crate::runtime::value::SMALL_MAP_MAX]> =
+                smallvec::SmallVec::with_capacity(n);
+            for _ in 0..n {
+                let v = vm.pop();
+                let k = vm.pop();
+                // Keys are already interned string Values from the compiler;
+                // if not a string, convert via as_string() and wrap back
+                let key_val = if k.as_str().is_some() {
+                    k
+                } else {
+                    let s = k.as_string();
+                    Value::from_str(s, &vm.arena)
+                };
+                let hash = fast_hash(key_val.as_str().unwrap_or("").as_bytes());
+                entries.push((key_val, v, hash));
+            }
+            entries.reverse();
+            vm.push(Value::from_small_map(entries, &vm.arena));
+        } else {
+            // Large path: existing HashMap + key_hashes + key_values
+            let mut key_hashes = Vec::with_capacity(n);
+            let mut key_values = Vec::with_capacity(n);
+            let mut data = crate::runtime::value::XclMap::with_capacity(n);
+            for _ in 0..n {
+                let v = vm.pop();
+                let k = vm.pop();
+                let key_str = k
+                    .as_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| k.as_string());
+                let hash = fast_hash(key_str.as_bytes());
+                key_hashes.push((hash, key_str.clone()));
+                key_values.push(v);
+                data.insert(key_str, v);
+            }
+            vm.push(Value::from_map_xcl(data, key_hashes, key_values, &vm.arena));
         }
-        vm.push(Value::from_map_xcl(data, key_hashes, key_values, &vm.arena));
         OpcodeResult::Next
     }
 
@@ -471,13 +495,16 @@ mod core_ops {
         let idx = vm.pop();
         let target = vm.pop();
         let result = if let Some(arr) = target.as_array() {
+            // Array indexing — never cached
             let i = idx.as_int();
             let i = if i < 0 { arr.len() as i64 + i } else { i };
             arr.get(i as usize).copied().unwrap_or(Value::nil())
-        } else if let Some(map_obj) = target.as_map_mut_ref() {
-            idx.as_str()
-                .and_then(|k| Value::map_get_fast(map_obj, k))
-                .unwrap_or(Value::nil())
+        } else if let Some(map_obj) = target.as_map() {
+            if idx.as_str().is_some() {
+                map_obj.get_fast_value(idx).unwrap_or(Value::nil())
+            } else {
+                Value::nil()
+            }
         } else {
             Value::nil()
         };
@@ -797,7 +824,7 @@ mod core_ops {
                         .index
                         .iter()
                         .filter_map(|(method_name, &midx)| {
-                            map.get(&**method_name).map(|v| (midx, *v))
+                            map.get(method_name).map(|v| (midx, *v))
                         })
                         .collect();
                     let mut last_result = Value::nil();
@@ -929,10 +956,11 @@ mod core_ops {
         let field_idx = instr.a() as usize;
         let target = vm.pop();
         let field = &vm.frames[top].code.string_table[field_idx];
+        let field_val = vm.frames[top].code.string_values[field_idx];
 
-        // Fast path: use pre-computed key hashes
-        if let Some(map_obj) = target.as_map_mut_ref() {
-            if let Some(v) = Value::map_get_fast(map_obj, field) {
+        // Fast path: use HeapMap::get_fast_value with interned key identity
+        if let Some(map_obj) = target.as_map() {
+            if let Some(v) = map_obj.get_fast_value(field_val) {
                 vm.push(v);
                 return OpcodeResult::Next;
             }
@@ -1686,25 +1714,30 @@ mod core_ops {
     /// Store local[a] = local[c][local[b]]. Operand `a` = dest, `b` = idx_slot, `c` = arr_slot.
     #[xcl_op(code = 105, arity = 0, stack = "0 -> 0")]
     fn op_get_index_local_local_store(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
-        let l = &mut vm.frames[top].locals;
         let dest = instr.a() as usize;
         let idx_slot = instr.b() as usize;
         let arr_slot = instr.c() as usize;
-        let target = unsafe { *l.get_unchecked(arr_slot) };
-        let idx = unsafe { *l.get_unchecked(idx_slot) };
+
+        // Read locals first (no mutable borrow on vm yet)
+        let target = unsafe { *vm.frames[top].locals.get_unchecked(arr_slot) };
+        let idx = unsafe { *vm.frames[top].locals.get_unchecked(idx_slot) };
+
         let result = if let Some(arr) = target.as_array() {
+            // Array indexing — never cached
             let i = idx.as_int();
             let i = if i < 0 { arr.len() as i64 + i } else { i };
             arr.get(i as usize).copied().unwrap_or(Value::nil())
-        } else if let Some(map_obj) = target.as_map_mut_ref() {
-            idx.as_str()
-                .and_then(|k| Value::map_get_fast(map_obj, k))
-                .unwrap_or(Value::nil())
+        } else if let Some(map_obj) = target.as_map() {
+            if idx.as_str().is_some() {
+                map_obj.get_fast_value(idx).unwrap_or(Value::nil())
+            } else {
+                Value::nil()
+            }
         } else {
             Value::nil()
         };
         unsafe {
-            *l.get_unchecked_mut(dest) = result;
+            *vm.frames[top].locals.get_unchecked_mut(dest) = result;
         }
         OpcodeResult::Next
     }
@@ -1715,16 +1748,18 @@ mod core_ops {
         let dest = instr.a() as usize;
         let str_idx = instr.b() as usize;
         let obj_slot = instr.c() as usize;
-        let frame = &mut vm.frames[top];
-        let field_name: &str = &frame.code.string_table[str_idx];
-        let obj = unsafe { *frame.locals.get_unchecked(obj_slot) };
-        let result = if let Some(map_obj) = obj.as_map_mut_ref() {
-            Value::map_get_fast(map_obj, field_name).unwrap_or(Value::nil())
+
+        // Read the object and key before borrowing vm mutably
+        let obj = unsafe { *vm.frames[top].locals.get_unchecked(obj_slot) };
+        let field_val = vm.frames[top].code.string_values[str_idx];
+
+        let result = if let Some(map_obj) = obj.as_map() {
+            map_obj.get_fast_value(field_val).unwrap_or(Value::nil())
         } else {
             Value::nil()
         };
         unsafe {
-            *frame.locals.get_unchecked_mut(dest) = result;
+            *vm.frames[top].locals.get_unchecked_mut(dest) = result;
         }
         OpcodeResult::Next
     }

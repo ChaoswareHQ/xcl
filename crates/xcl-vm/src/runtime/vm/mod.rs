@@ -239,7 +239,7 @@ impl VM {
             impl_index: Vec::new(),
             native_entries: Vec::new(),
             type_entries: Vec::new(),
-            arena: Bump::with_capacity(64 * 1024),
+            arena: Bump::new(),
             frames: Vec::with_capacity(16),
             closures: std::sync::Arc::new([]),
             context_stack: HashMap::new(),

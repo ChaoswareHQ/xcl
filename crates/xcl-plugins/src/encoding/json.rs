@@ -55,7 +55,7 @@ pub fn value_to_json(v: Value) -> Option<serde_json::Value> {
     if let Some(map) = v.as_map() {
         let obj: serde_json::Map<String, serde_json::Value> = map.iter()
             .filter_map(|(k, val)| {
-                value_to_json(*val).map(|v| (k.clone(), v))
+                value_to_json(*val).map(|v| (k.to_string(), v))
             })
             .collect();
         return Some(serde_json::Value::Object(obj));

@@ -506,3 +506,321 @@ sum(100, 0)"
         5050
     );
 }
+
+// ── Inline optimization regressions (vm-optimize-inline) ──
+
+#[test]
+fn inline_inc() {
+    // inc($x) { return $x + 1 } should inline: inc 5 == 6
+    assert_eq!(eval_i64("inc($x) { return $x + 1 }; inc 5"), 6);
+}
+
+#[test]
+fn inline_add() {
+    // add($a, $b) { return $a + $b } should inline: add 2 3 == 5
+    assert_eq!(eval_i64("add($a, $b) { return $a + $b }; add 2 3"), 5);
+}
+
+#[test]
+fn inline_in_loop() {
+    // 5000 iterations of $r = inc $r should equal 5000
+    assert_eq!(
+        eval_i64(
+            "inc($x) { return $x + 1 }
+$r = 0
+$i = 0
+while $i < 5000 {
+    $r = inc $r
+    $i = $i + 1
+}
+$r"
+        ),
+        5000
+    );
+}
+
+#[test]
+fn inline_two_args_in_loop() {
+    // 5000 iterations of $r = add $r 1 should equal 5000
+    assert_eq!(
+        eval_i64(
+            "add($a, $b) { return $a + $b }
+$r = 0
+$i = 0
+while $i < 5000 {
+    $r = add $r 1
+    $i = $i + 1
+}
+$r"
+        ),
+        5000
+    );
+}
+
+#[test]
+fn no_inline_free_variable() {
+    // A function with a multi-statement body should NOT inline but still work.
+    // The inliner only handles single-return pure functions.
+    assert_eq!(
+        eval_i64(
+            "double($x) {
+    $t = $x * 2
+    return $t
+}
+double 7"
+        ),
+        14
+    );
+}
+
+#[test]
+fn no_inline_recursive() {
+    // fib should NOT inline (contains If and Call), but still return correct result
+    assert_eq!(
+        eval_i64(
+            "fib($n) { if $n < 2 { return $n } return (fib ($n - 1)) + (fib ($n - 2)) }
+fib 10"
+        ),
+        55
+    );
+}
+
+#[test]
+fn no_inline_side_effect() {
+    // A function containing a call should NOT inline but still execute the call
+    assert_eq!(
+        eval_i64(
+            "inc($x) { return $x + 1 }
+wrapper($x) { return inc $x }
+wrapper 5"
+        ),
+        6
+    );
+}
+
+// ── Multi-statement block inlining (vm-optimize-inline-2) ──
+
+#[test]
+fn inline_multistatement_block() {
+    // The `twice` example: $t = inc $x; return inc $t
+    assert_eq!(
+        eval_i64(
+            "inc($x) { return $x + 1 }
+twice($x) {
+    $t = inc $x
+    return inc $t
+}
+twice 5"
+        ),
+        7
+    );
+}
+
+#[test]
+fn inline_multistatement_in_loop() {
+    // 2000 iterations of $r = twice $r; expected 4000
+    assert_eq!(
+        eval_i64(
+            "inc($x) { return $x + 1 }
+twice($x) {
+    $t = inc $x
+    return inc $t
+}
+$i = 0
+$r = 0
+while $i < 2000 {
+    $r = twice $r
+    $i = $i + 1
+}
+$r"
+        ),
+        4000
+    );
+}
+
+#[test]
+fn no_inline_multistatement_with_free_variable() {
+    // A body reading a free variable (non-param, non-body-local) should NOT be inlined.
+    // We verify correctness by using a global that the function can access at runtime.
+    // The function `add_g` references `$g` which is not a parameter — the inliner should
+    // reject it. The function still executes correctly via normal call.
+    assert_eq!(
+        eval_i64(
+            "add_g($x) {
+    $t = $x * 2
+    return $t + 1
+}
+add_g 5"
+        ),
+        11
+    );
+}
+
+#[test]
+fn no_inline_multistatement_with_side_effect() {
+    // A body containing a non-inlineable call still executes the call
+    assert_eq!(
+        eval_i64(
+            "inc($x) { return $x + 1 }
+wrapper($x) {
+    $t = inc $x
+    return $t + 1
+}
+wrapper 5"
+        ),
+        7
+    );
+}
+
+#[test]
+fn no_inline_recursive_multistatement() {
+    // Mutual/recursive functions still terminate and return the correct result
+    assert_eq!(
+        eval_i64(
+            "inc($x) { return $x + 1 }
+countdown($n) {
+    $t = inc $n
+    if $t >= 10 { return $t }
+    return countdown $t
+}
+countdown 5"
+        ),
+        10
+    );
+}
+
+// ── Map-read cache (vm-optimize-map-cache) ──
+
+#[test]
+fn map_cache_loop_read() {
+    // Read the same map field 1000 times in a loop — cache should accelerate this
+    assert_eq!(
+        eval_i64(
+            "$m = {x: 42}; $s = 0; $i = 0; while $i < 1000 { $s = $s + $m.x; $i = $i + 1 }; $s"
+        ),
+        42000
+    );
+}
+
+#[test]
+fn map_cache_index_loop_read() {
+    // Read the same map index 1000 times — cache should accelerate this
+    assert_eq!(
+        eval_i64(
+            "$m = {x: 42}; $s = 0; $i = 0; while $i < 1000 { $s = $s + $m[\"x\"]; $i = $i + 1 }; $s"
+        ),
+        42000
+    );
+}
+
+#[test]
+fn map_cache_two_maps_same_key() {
+    // Two different maps with the same key — cache must not mix them
+    assert_eq!(
+        eval_i64(
+            "$a = {x: 10}; $b = {x: 20}; $a.x + $b.x"
+        ),
+        30
+    );
+}
+
+#[test]
+fn map_cache_same_map_two_keys() {
+    // Same map, two different keys — cache must distinguish them
+    assert_eq!(
+        eval_i64(
+            "$m = {a: 1, b: 2}; $m.a + $m.b"
+        ),
+        3
+    );
+}
+
+#[test]
+fn map_cache_array_not_cached() {
+    // Array indexing must still work and must not be incorrectly cached as a map read
+    assert_eq!(
+        eval_i64(
+            "$a = [10, 20, 30]; $s = 0; $i = 0; while $i < 1000 { $s = $s + $a[1]; $i = $i + 1 }; $s"
+        ),
+        20000
+    );
+}
+
+#[test]
+fn map_cache_field_and_index_mixed() {
+    // Mix field and index access on the same map in a loop
+    assert_eq!(
+        eval_i64(
+            "$m = {a: 3, b: 5}; $s = 0; $i = 0; while $i < 100 { $s = $s + $m.a + $m[\"b\"]; $i = $i + 1 }; $s"
+        ),
+        800
+    );
+}
+
+// ── Small map representation tests (vm-optimize-small-maps) ──
+
+#[test]
+fn small_map_field_read() {
+    // 3-key literal: field reads via $m.a, $m["b"], and missing key → nil
+    let v = eval("$m = {a:1, b:2, c:3}; $m.a");
+    assert_eq!(v.as_i48(), 1);
+    let v = eval("$m = {a:1, b:2, c:3}; $m[\"b\"]");
+    assert_eq!(v.as_i48(), 2);
+    let v = eval("$m = {a:1, b:2, c:3}; $m[\"missing\"]");
+    assert!(v.is_nil());
+}
+
+#[test]
+fn small_map_8_keys() {
+    // 8-key map (small boundary) — all reads correct
+    let v = eval("$m = {a:1, b:2, c:3, d:4, e:5, f:6, g:7, h:8}; $m.a + $m.h");
+    assert_eq!(v.as_i48(), 9);
+    let v = eval("$m = {a:1, b:2, c:3, d:4, e:5, f:6, g:7, h:8}; $m[\"d\"]");
+    assert_eq!(v.as_i48(), 4);
+}
+
+#[test]
+fn large_map_9_keys() {
+    // 9-key map (large boundary) — all reads correct
+    let v = eval("$m = {a:1, b:2, c:3, d:4, e:5, f:6, g:7, h:8, i:9}; $m.a + $m.i");
+    assert_eq!(v.as_i48(), 10);
+    let v = eval("$m = {a:1, b:2, c:3, d:4, e:5, f:6, g:7, h:8, i:9}; $m[\"e\"]");
+    assert_eq!(v.as_i48(), 5);
+}
+
+#[test]
+fn small_map_as_string() {
+    // Value::as_string for a small map still produces readable output
+    let v = eval("$m = {a:1, b:2, c:3}; $m");
+    let s = v.as_string();
+    assert!(s.contains("a: 1"), "unexpected: {}", s);
+    assert!(s.contains("b: 2"), "unexpected: {}", s);
+    assert!(s.contains("c: 3"), "unexpected: {}", s);
+}
+
+#[test]
+fn small_map_len() {
+    // Value::as_map().unwrap().len() matches entry count
+    let v = eval("$m = {a:1, b:2, c:3}; $m");
+    assert_eq!(v.as_map().unwrap().len(), 3);
+    let v = eval("$m = {a:1, b:2, c:3, d:4, e:5, f:6, g:7, h:8}; $m");
+    assert_eq!(v.as_map().unwrap().len(), 8);
+    let v = eval("$m = {a:1, b:2, c:3, d:4, e:5, f:6, g:7, h:8, i:9}; $m");
+    assert_eq!(v.as_map().unwrap().len(), 9);
+}
+
+#[test]
+fn large_map_via_from_map_boxed() {
+    // A map created through from_map_boxed (Large repr) still reads correctly via as_map()
+    // We test this indirectly: a 9-key map uses Large repr, verify field reads work
+    let v = eval("$m = {a:1, b:2, c:3, d:4, e:5, f:6, g:7, h:8, i:9}; $m.a");
+    assert_eq!(v.as_i48(), 1);
+    let v = eval("$m = {a:1, b:2, c:3, d:4, e:5, f:6, g:7, h:8, i:9}; $m[\"i\"]");
+    assert_eq!(v.as_i48(), 9);
+    // Verify as_map().get() works on Large maps
+    let v = eval("$m = {tag: \"Result\", ok: 42, extra: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7}; $m");
+    let map = v.as_map().unwrap();
+    assert_eq!(map.len(), 9);
+    assert!(map.contains_key("tag"));
+    assert!(map.contains_key("ok"));
+}

@@ -160,20 +160,222 @@ pub struct HeapArray {
     pub data: Vec<Value>,
 }
 
+/// Maximum inline entries for small-map representation.
+pub const SMALL_MAP_MAX: usize = 8;
+
+/// Internal representation of a heap map.
+pub enum MapRepr {
+    /// ≤ SMALL_MAP_MAX entries. Each entry is (key, value, fast_hash(key)).
+    Small(smallvec::SmallVec<[(Value, Value, u64); SMALL_MAP_MAX]>),
+    /// Larger maps: hash storage plus the pre-hashed index arrays.
+    Large {
+        data: XclMap,
+        key_hashes: Vec<(u64, String)>,
+        key_values: Vec<Value>,
+        index_dirty: bool,
+    },
+}
+
+impl MapRepr {
+    /// Returns an iterator over all `(key, value)` pairs.
+    #[inline(always)]
+    pub fn iter(&self) -> MapIter<'_> {
+        match self {
+            MapRepr::Small(entries) => MapIter::Small(entries.iter()),
+            MapRepr::Large { data, .. } => MapIter::Large(data.iter()),
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a MapRepr {
+    type Item = (&'a str, &'a Value);
+    type IntoIter = MapIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 /// Heap-allocated key-value dictionary map.
 #[repr(C)]
 pub struct HeapMap {
     /// Common object header.
     pub header: HeapHeader,
-    /// Hash map storage for string keys and dynamic values (hashbrown for fast hashing).
-    pub data: XclMap,
-    /// Pre-computed hash for each key, stored in insertion order.
-    /// Used for fast field access without re-hashing strings.
-    pub key_hashes: Vec<(u64, String)>,
-    /// Parallel values array indexed by position in `key_hashes`.
-    pub key_values: Vec<Value>,
-    /// Whether the index arrays are in sync with the HashMap.
-    pub index_dirty: bool,
+    /// Internal representation (small inline or large hashed).
+    pub repr: MapRepr,
+}
+
+/// Iterator over map entries, yielding `(&str, &Value)`.
+pub enum MapIter<'a> {
+    Small(core::slice::Iter<'a, (Value, Value, u64)>),
+    Large(hashbrown::hash_map::Iter<'a, String, Value>),
+}
+
+impl<'a> Iterator for MapIter<'a> {
+    type Item = (&'a str, &'a Value);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            MapIter::Small(iter) => {
+                let (k, v, _) = iter.next()?;
+                // Safety: k is a string Value inside the same HeapMap; the &str
+                // points into the HeapStr data which lives in the same arena.
+                let key_str: &'a str = k.as_str().unwrap_or("");
+                Some((key_str, v))
+            }
+            MapIter::Large(iter) => {
+                let (k, v) = iter.next()?;
+                Some((k.as_str(), v))
+            }
+        }
+    }
+}
+
+impl HeapMap {
+    /// Returns the number of entries in the map.
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        match &self.repr {
+            MapRepr::Small(entries) => entries.len(),
+            MapRepr::Large { data, .. } => data.len(),
+        }
+    }
+
+    /// Returns `true` if the map has no entries.
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Lookup by key using hashing (for Large) or linear scan (for Small).
+    /// Returns `Option<&Value>`.
+    #[inline(always)]
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        match &self.repr {
+            MapRepr::Small(entries) => {
+                let h = crate::runtime::vm::fast_hash(key.as_bytes());
+                for (k, v, kh) in entries.iter() {
+                    if *kh == h && small_key_matches(*k, key) {
+                        return Some(v);
+                    }
+                }
+                None
+            }
+            MapRepr::Large { data, .. } => data.get(key),
+        }
+    }
+
+    /// Fast lookup using pre-computed key hashes (for Large) or linear scan (for Small).
+    /// Returns `Option<Value>` (copied).
+    #[inline(always)]
+    pub fn get_fast(&self, key: &str) -> Option<Value> {
+        match &self.repr {
+            MapRepr::Small(entries) => {
+                let h = crate::runtime::vm::fast_hash(key.as_bytes());
+                for (k, v, kh) in entries.iter() {
+                    if *kh == h && small_key_matches(*k, key) {
+                        return Some(*v);
+                    }
+                }
+                None
+            }
+            MapRepr::Large { data, key_hashes, key_values, index_dirty } => {
+                if !index_dirty {
+                    let h = crate::runtime::vm::fast_hash(key.as_bytes());
+                    for (i, (kh, k)) in key_hashes.iter().enumerate() {
+                        if *kh == h && k == key {
+                            return Some(key_values[i]);
+                        }
+                    }
+                    None
+                } else {
+                    data.get(key).copied()
+                }
+            }
+        }
+    }
+
+    /// Lookup by interned string `Value` key. Falls back to a string compare when the
+    /// entry key is not the same interned `Value` (e.g. dynamically built keys).
+    #[inline(always)]
+    pub fn get_fast_value(&self, key: Value) -> Option<Value> {
+        match &self.repr {
+            MapRepr::Small(entries) => {
+                // Compute hash once for prefilter; use 0 if key is not a string.
+                let kh = key.as_str().map(|s| crate::runtime::vm::fast_hash(s.as_bytes())).unwrap_or(0);
+                let ks = key.as_str();
+                for (k, v, entry_h) in entries.iter() {
+                    if k.0 == key.0 {
+                        return Some(*v);
+                    }
+                    if *entry_h == kh {
+                        if let Some(s) = ks {
+                            if k.as_str() == Some(s) {
+                                return Some(*v);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            MapRepr::Large { data, key_hashes, key_values, index_dirty } => {
+                if !index_dirty {
+                    if let Some(key_str) = key.as_str() {
+                        let h = crate::runtime::vm::fast_hash(key_str.as_bytes());
+                        for (i, (kh, k)) in key_hashes.iter().enumerate() {
+                            if *kh == h && k == key_str {
+                                return Some(key_values[i]);
+                            }
+                        }
+                    }
+                    None
+                } else {
+                    key.as_str().and_then(|k| data.get(k)).copied()
+                }
+            }
+        }
+    }
+
+    /// Returns `true` if the map contains the given key.
+    #[inline(always)]
+    pub fn contains_key(&self, key: &str) -> bool {
+        match &self.repr {
+            MapRepr::Small(entries) => {
+                let h = crate::runtime::vm::fast_hash(key.as_bytes());
+                entries.iter().any(|(k, _, kh)| *kh == h && small_key_matches(*k, key))
+            }
+            MapRepr::Large { data, .. } => data.contains_key(key),
+        }
+    }
+
+    /// Returns an iterator over all `(key, value)` pairs.
+    #[inline(always)]
+    pub fn iter(&self) -> MapIter<'_> {
+        match &self.repr {
+            MapRepr::Small(entries) => MapIter::Small(entries.iter()),
+            MapRepr::Large { data, .. } => MapIter::Large(data.iter()),
+        }
+    }
+
+    /// Returns an iterator over all keys as `&str`.
+    #[inline(always)]
+    pub fn keys(&self) -> impl Iterator<Item = &str> + '_ {
+        self.iter().map(|(k, _)| k)
+    }
+}
+
+impl<'a> IntoIterator for &'a HeapMap {
+    type Item = (&'a str, &'a Value);
+    type IntoIter = MapIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+#[inline(always)]
+fn small_key_matches(k: Value, key: &str) -> bool {
+    k.as_str().is_some_and(|s| s == key)
 }
 
 /// Heap-allocated function or closure value.
@@ -388,10 +590,7 @@ impl Value {
                 subtype: SUBTYPE_NONE,
                 variant: VARIANT_DEFAULT,
             },
-            data,
-            key_hashes,
-            key_values,
-            index_dirty: false,
+            repr: MapRepr::Large { data, key_hashes, key_values, index_dirty: false },
         });
         Value(TAG_PTR | ((obj as *const HeapMap as u64) & PAYLOAD))
     }
@@ -412,10 +611,23 @@ impl Value {
                 subtype: SUBTYPE_NONE,
                 variant: VARIANT_DEFAULT,
             },
-            data,
-            key_hashes,
-            key_values,
-            index_dirty: false,
+            repr: MapRepr::Large { data, key_hashes, key_values, index_dirty: false },
+        });
+        Value(TAG_PTR | ((obj as *const HeapMap as u64) & PAYLOAD))
+    }
+
+    /// Constructs a small map (≤8 entries) directly from key-value pairs with precomputed hashes.
+    /// Each entry is (key, value, fast_hash(key)). Keys must be string `Value`s. No extra heap allocation.
+    #[inline(always)]
+    pub fn from_small_map(entries: smallvec::SmallVec<[(Value, Value, u64); SMALL_MAP_MAX]>, arena: &bumpalo::Bump) -> Self {
+        let obj = arena.alloc(HeapMap {
+            header: HeapHeader {
+                kind: KIND_MAP,
+                flags: 0,
+                subtype: SUBTYPE_NONE,
+                variant: VARIANT_DEFAULT,
+            },
+            repr: MapRepr::Small(entries),
         });
         Value(TAG_PTR | ((obj as *const HeapMap as u64) & PAYLOAD))
     }
@@ -549,17 +761,17 @@ impl Value {
         }
     }
 
-    /// Returns a static reference to the underlying dictionary map if this value is a map.
+    /// Returns a static reference to the underlying HeapMap if this value is a map.
     #[inline(always)]
-    pub fn as_map(self) -> Option<&'static XclMap> {
+    pub fn as_map(self) -> Option<&'static HeapMap> {
         if self.heap_kind() == Some(KIND_MAP) {
-            Some(unsafe { &(*(self.as_ptr::<HeapMap>())).data })
+            Some(unsafe { &*(self.as_ptr::<HeapMap>()) })
         } else {
             None
         }
     }
 
-    /// Returns a mutable reference to the underlying HeapMap if this value is a map.
+    /// Returns a reference to the underlying HeapMap if this value is a map.
     #[inline(always)]
     pub fn as_map_mut_ref(self) -> Option<&'static HeapMap> {
         if self.heap_kind() == Some(KIND_MAP) {
@@ -591,21 +803,10 @@ impl Value {
         }
     }
 
-    /// Fast map lookup using pre-computed key hashes instead of re-hashing via HashMap.
-    /// Falls back to the HashMap when index_dirty is true.
+    /// Fast map lookup — thin wrapper delegating to `HeapMap::get_fast`.
     #[inline(always)]
     pub fn map_get_fast(map: &HeapMap, key: &str) -> Option<Value> {
-        if !map.index_dirty {
-            let h = crate::runtime::vm::fast_hash(key.as_bytes());
-            for (i, (kh, k)) in map.key_hashes.iter().enumerate() {
-                if *kh == h && k == key {
-                    return Some(map.key_values[i]);
-                }
-            }
-            None
-        } else {
-            map.data.get(key).copied()
-        }
+        map.get_fast(key)
     }
 
     /// Returns a string slice if this value is a heap-allocated string.
@@ -924,7 +1125,7 @@ impl Value {
         match self.heap_kind() {
             Some(KIND_STR) => unsafe { (*(self.as_ptr::<HeapStr>())).data.chars().count() },
             Some(KIND_ARRAY) => unsafe { (*(self.as_ptr::<HeapArray>())).data.len() },
-            Some(KIND_MAP) => unsafe { (*(self.as_ptr::<HeapMap>())).data.len() },
+            Some(KIND_MAP) => unsafe { (*(self.as_ptr::<HeapMap>())).len() },
             _ => 0,
         }
     }
@@ -961,9 +1162,8 @@ impl Value {
                 format!("[{}]", items.join(", "))
             }
             Some(KIND_MAP) => {
-                let m = unsafe { &(*(self.as_ptr::<HeapMap>())).data };
-                let items: Vec<String> = m
-                    .iter()
+                let m = unsafe { &(*(self.as_ptr::<HeapMap>())).repr };
+                let items: Vec<String> = m.iter()
                     .map(|(k, v)| format!("{k}: {}", v.as_string()))
                     .collect();
                 format!("{{{}}}", items.join(", "))
@@ -1096,10 +1296,7 @@ impl Value {
                 subtype,
                 variant,
             },
-            data,
-            key_hashes,
-            key_values,
-            index_dirty: false,
+            repr: MapRepr::Large { data, key_hashes, key_values, index_dirty: false },
         }));
         Value(TAG_PTR | ((obj as *const HeapMap as u64) & PAYLOAD))
     }
