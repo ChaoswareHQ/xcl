@@ -32,16 +32,14 @@ use syn::{FnArg, ItemFn, ItemImpl, LitStr, Type, parse_macro_input};
 /// Extract the first line of `///` doc comments as a summary string.
 fn extract_doc_summary(attrs: &[syn::Attribute]) -> Option<String> {
     for attr in attrs {
-        if attr.path().is_ident("doc") {
-            if let syn::Meta::NameValue(nv) = &attr.meta {
-                if let syn::Expr::Lit(el) = &nv.value {
-                    if let syn::Lit::Str(lit) = &el.lit {
-                        let line = lit.value().trim().to_string();
-                        if !line.is_empty() {
-                            return Some(line);
-                        }
-                    }
-                }
+        if attr.path().is_ident("doc")
+            && let syn::Meta::NameValue(nv) = &attr.meta
+            && let syn::Expr::Lit(el) = &nv.value
+            && let syn::Lit::Str(lit) = &el.lit
+        {
+            let line = lit.value().trim().to_string();
+            if !line.is_empty() {
+                return Some(line);
             }
         }
     }
@@ -84,49 +82,56 @@ fn infer_domain_from_span(span: proc_macro2::Span) -> Option<String> {
 
 /// Parse helper attributes `#[xcl(domain = "...", kind = "...", summary = "...", super = "...")]`
 /// from a DeriveInput's attrs.
-fn parse_xcl_helper_attrs(input: &syn::DeriveInput) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+fn parse_xcl_helper_attrs(
+    input: &syn::DeriveInput,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
     let mut domain = None;
     let mut kind = None;
     let mut summary = None;
     let mut super_type = None;
 
     for attr in &input.attrs {
-        if attr.path().is_ident("xcl") {
-            if let syn::Meta::List(meta_list) = &attr.meta {
-                let parsed = meta_list.parse_args_with(|input: syn::parse::ParseStream<'_>| {
-                    let mut d = None;
-                    let mut k = None;
-                    let mut s = None;
-                    let mut sup = None;
-                    while !input.is_empty() {
-                        let lookahead = input.lookahead1();
-                        let ident: syn::Ident = if lookahead.peek(syn::Token![super]) {
-                            let _kw: syn::Token![super] = input.parse()?;
-                            syn::Ident::new("super", proc_macro2::Span::call_site())
-                        } else {
-                            input.parse()?
-                        };
-                        let _eq: syn::Token![=] = input.parse()?;
-                        let lit: LitStr = input.parse()?;
-                        match ident.to_string().as_str() {
-                            "domain" => d = Some(lit.value()),
-                            "kind" => k = Some(lit.value()),
-                            "summary" => s = Some(lit.value()),
-                            "super" => sup = Some(lit.value()),
-                            _ => {}
-                        }
-                        if input.peek(syn::Token![,]) {
-                            input.parse::<syn::Token![,]>()?;
-                        }
+        if attr.path().is_ident("xcl")
+            && let syn::Meta::List(meta_list) = &attr.meta
+        {
+            let parsed = meta_list.parse_args_with(|input: syn::parse::ParseStream<'_>| {
+                let mut d = None;
+                let mut k = None;
+                let mut s = None;
+                let mut sup = None;
+                while !input.is_empty() {
+                    let lookahead = input.lookahead1();
+                    let ident: syn::Ident = if lookahead.peek(syn::Token![super]) {
+                        let _kw: syn::Token![super] = input.parse()?;
+                        syn::Ident::new("super", proc_macro2::Span::call_site())
+                    } else {
+                        input.parse()?
+                    };
+                    let _eq: syn::Token![=] = input.parse()?;
+                    let lit: LitStr = input.parse()?;
+                    match ident.to_string().as_str() {
+                        "domain" => d = Some(lit.value()),
+                        "kind" => k = Some(lit.value()),
+                        "summary" => s = Some(lit.value()),
+                        "super" => sup = Some(lit.value()),
+                        _ => {}
                     }
-                    Ok((d, k, s, sup))
-                });
-                if let Ok((d, k, s, sup)) = parsed {
-                    domain = d.or(domain);
-                    kind = k.or(kind);
-                    summary = s.or(summary);
-                    super_type = sup.or(super_type);
+                    if input.peek(syn::Token![,]) {
+                        input.parse::<syn::Token![,]>()?;
+                    }
                 }
+                Ok((d, k, s, sup))
+            });
+            if let Ok((d, k, s, sup)) = parsed {
+                domain = d.or(domain);
+                kind = k.or(kind);
+                summary = s.or(summary);
+                super_type = sup.or(super_type);
             }
         }
     }
@@ -152,7 +157,8 @@ fn rust_type_to_xcl_type(ty: &Type) -> String {
                 let name = seg.ident.to_string();
                 match name.as_str() {
                     "String" => "str".to_string(),
-                    "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => "int".to_string(),
+                    "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32"
+                    | "u64" | "u128" | "usize" => "int".to_string(),
                     "f32" | "f64" => "float".to_string(),
                     "bool" => "bool".to_string(),
                     "Value" => "any".to_string(),
@@ -259,12 +265,8 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
                         (kind_expr, quote!(&[#(#fs_entries),*]))
                     }
                 }
-                syn::Fields::Unnamed(_) => {
-                    (quote!(::xcl_vm::TypeKind::Opaque), quote!(&[]))
-                }
-                syn::Fields::Unit => {
-                    (quote!(::xcl_vm::TypeKind::Opaque), quote!(&[]))
-                }
+                syn::Fields::Unnamed(_) => (quote!(::xcl_vm::TypeKind::Opaque), quote!(&[])),
+                syn::Fields::Unit => (quote!(::xcl_vm::TypeKind::Opaque), quote!(&[])),
             };
 
             let expanded = quote! {
@@ -371,25 +373,18 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
             expanded.into()
         }
         syn::Data::Union(_) => {
-            syn::Error::new_spanned(
-                name,
-                "#[derive(Xcl)] is not supported for unions yet",
-            )
-            .to_compile_error()
-            .into()
+            syn::Error::new_spanned(name, "#[derive(Xcl)] is not supported for unions yet")
+                .to_compile_error()
+                .into()
         }
     }
 }
 
-/// `xcl_universal_methods!()` — **Deprecated**: Universal methods are now auto-registered by the VM.
+/// `#[xcl_trait]` — Registers a trait in `TRAIT_REGISTRY`.
 ///
-/// Supports two modes:
+/// # Example
 ///
-/// 1. **Trait impl** (`impl Trait for Type`): Registers in `IMPL_REGISTRY` with method names.
-/// 2. **Inherent impl** (`impl Type`): Registers each method in `NATIVE_REGISTRY` as a native
-///    method bound to the type's domain.
-///
-/// # Example — Trait impl/// ```ignore
+/// ```ignore
 /// #[xcl_trait]
 /// pub trait CloudService {
 ///     fn bucket_create();
@@ -496,10 +491,13 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
     } else {
         parsed.method.clone()
     };
-    
+
     let domain = if !parsed.method.is_empty() {
         // Explicit name provided — extract domain from dotted name if present
-        parsed.domain.clone().or_else(|| domain_from_name(&method_name).map(|s| s.to_string()))
+        parsed
+            .domain
+            .clone()
+            .or_else(|| domain_from_name(&method_name).map(|s| s.to_string()))
     } else {
         // No explicit name — use auto-detected domain, but allow explicit override
         parsed.domain.clone().or(Some(auto_domain))
@@ -511,12 +509,12 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
     let ret_attr = parsed.ret.clone();
 
     // Auto-detect summary from doc comments if not explicitly provided
-    let summary = parsed.summary.clone().or_else(|| extract_doc_summary(&func.attrs));
+    let summary = parsed
+        .summary
+        .clone()
+        .or_else(|| extract_doc_summary(&func.attrs));
 
-    let statik = syn::Ident::new(
-        &format!("__XCL_FN_{}", fn_ident),
-        fn_ident.span(),
-    );
+    let statik = syn::Ident::new(&format!("__XCL_FN_{}", fn_ident), fn_ident.span());
 
     let domain_expr = if let Some(ref d) = domain {
         quote!(Some(#d))
@@ -554,9 +552,10 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
     let arg_desc_static = if parsed.arg_desc.is_empty() {
         quote!(&[])
     } else {
-        let entries = parsed.arg_desc.iter().map(|(name, desc)| {
-            quote!((#name, #desc))
-        });
+        let entries = parsed
+            .arg_desc
+            .iter()
+            .map(|(name, desc)| quote!((#name, #desc)));
         quote!(&[#(#entries),*])
     };
 
@@ -584,10 +583,8 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     if uses_typed_params {
         // Generate a wrapper that converts &[Value] to typed Rust args
-        let wrapper_ident = syn::Ident::new(
-            &format!("__xcl_fn_wrapper_{}", fn_ident),
-            fn_ident.span(),
-        );
+        let wrapper_ident =
+            syn::Ident::new(&format!("__xcl_fn_wrapper_{}", fn_ident), fn_ident.span());
 
         let (arg_conversions, arg_vars) = generate_arg_conversions(&func, &args_attr);
 
@@ -697,20 +694,20 @@ fn is_value_slice_type(ty: &Type) -> bool {
 }
 
 struct NativeAttr {
-    method:         String,
-    domain:         Option<String>,
-    impl_type:      Option<String>,
+    method: String,
+    domain: Option<String>,
+    impl_type: Option<String>,
     override_method: Option<String>,
-    args:           Option<String>,
-    ret:      Option<String>,
-    summary:  Option<String>,
+    args: Option<String>,
+    ret: Option<String>,
+    summary: Option<String>,
     arg_desc: Vec<(String, String)>,
-    named:    Vec<NamedParamSpec>,
+    named: Vec<NamedParamSpec>,
 }
 
 struct NamedParamSpec {
-    name:    String,
-    ty:      String,
+    name: String,
+    ty: String,
     default: String,
 }
 
@@ -727,11 +724,11 @@ impl syn::parse::Parse for NativeAttr {
                 domain,
                 impl_type: None,
                 override_method: None,
-                args:       None,
-                ret:      None,
-                summary:  None,
+                args: None,
+                ret: None,
+                summary: None,
                 arg_desc: Vec::new(),
-                named:    Vec::new(),
+                named: Vec::new(),
             });
         }
 
@@ -795,7 +792,11 @@ impl syn::parse::Parse for NativeAttr {
                         }
                     }
                     if let (Some(n), Some(t), Some(d)) = (name, ty, default) {
-                        named.push(NamedParamSpec { name: n, ty: t, default: d });
+                        named.push(NamedParamSpec {
+                            name: n,
+                            ty: t,
+                            default: d,
+                        });
                     }
                     if content.peek(syn::Token![,]) {
                         content.parse::<syn::Token![,]>()?;
@@ -837,7 +838,7 @@ impl syn::parse::Parse for NativeAttr {
         }
 
         Ok(NativeAttr {
-            method:         method.unwrap_or_default(),
+            method: method.unwrap_or_default(),
             domain,
             impl_type,
             override_method,
@@ -903,9 +904,9 @@ pub fn xcl_type(attr: TokenStream, item: TokenStream) -> TokenStream {
     let kind_expr = match kind_str.as_str() {
         "Opaque" => quote!(::xcl_vm::TypeKind::Opaque),
         "Record" => quote!(::xcl_vm::TypeKind::Record),
-        "Sum"    => quote!(::xcl_vm::TypeKind::Sum),
-        "Alias"  => quote!(::xcl_vm::TypeKind::Alias),
-        _        => quote!(::xcl_vm::TypeKind::Opaque),
+        "Sum" => quote!(::xcl_vm::TypeKind::Sum),
+        "Alias" => quote!(::xcl_vm::TypeKind::Alias),
+        _ => quote!(::xcl_vm::TypeKind::Opaque),
     };
 
     let domain_expr = if let Some(ref d) = domain {
@@ -1189,12 +1190,11 @@ fn is_ctx_type(ty: &Type) -> bool {
 pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse optional attributes: #[xcl_impl(auto_import)]
     let mut auto_import = false;
-    if !attr.is_empty() {
-        if let Ok(ident) = syn::parse2::<syn::Ident>(attr.into()) {
-            if ident == "auto_import" {
-                auto_import = true;
-            }
-        }
+    if !attr.is_empty()
+        && let Ok(ident) = syn::parse2::<syn::Ident>(attr.into())
+        && ident == "auto_import"
+    {
+        auto_import = true;
     }
 
     let impl_item = parse_macro_input!(item as ItemImpl);
@@ -1207,15 +1207,21 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 let type_path_copy = type_path.clone();
                 (name, type_path_copy)
             } else {
-                return syn::Error::new_spanned(&impl_item.self_ty, "Cannot extract type name from impl block")
-                    .to_compile_error()
-                    .into();
+                return syn::Error::new_spanned(
+                    &impl_item.self_ty,
+                    "Cannot extract type name from impl block",
+                )
+                .to_compile_error()
+                .into();
             }
         }
         _ => {
-            return syn::Error::new_spanned(&impl_item.self_ty, "Cannot extract type name from impl block")
-                .to_compile_error()
-                .into();
+            return syn::Error::new_spanned(
+                &impl_item.self_ty,
+                "Cannot extract type name from impl block",
+            )
+            .to_compile_error()
+            .into();
         }
     };
 
@@ -1254,7 +1260,11 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         };
 
         let statik = syn::Ident::new(
-            &format!("__XCL_IMPL_{}_{}", type_name.to_uppercase(), trait_name.to_uppercase()),
+            &format!(
+                "__XCL_IMPL_{}_{}",
+                type_name.to_uppercase(),
+                trait_name.to_uppercase()
+            ),
             proc_macro2::Span::call_site(),
         );
 
@@ -1296,7 +1306,11 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 };
 
                 let statik = syn::Ident::new(
-                    &format!("__XCL_NATIVE_{}_{}", type_name.to_uppercase(), method_name_str.to_uppercase()),
+                    &format!(
+                        "__XCL_NATIVE_{}_{}",
+                        type_name.to_uppercase(),
+                        method_name_str.to_uppercase()
+                    ),
                     proc_macro2::Span::call_site(),
                 );
 
@@ -1305,7 +1319,11 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 // Generate wrapper function that converts args from Value to Rust types,
                 // calls the inherent method, and converts the result back to Value
                 let wrapper_name = syn::Ident::new(
-                    &format!("__xcl_wrapper_{}_{}", type_name.to_lowercase(), method_name_str),
+                    &format!(
+                        "__xcl_wrapper_{}_{}",
+                        type_name.to_lowercase(),
+                        method_name_str
+                    ),
                     proc_macro2::Span::call_site(),
                 );
 
@@ -1343,10 +1361,17 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }).collect();
 
                 // Build the argument list for the method call
-                let call_args: Vec<proc_macro2::TokenStream> = iif.sig.inputs.iter().enumerate().map(|(i, _arg)| {
-                    let local_name = syn::Ident::new(&format!("arg_{}", i), proc_macro2::Span::call_site());
-                    quote!(#local_name)
-                }).collect();
+                let call_args: Vec<proc_macro2::TokenStream> = iif
+                    .sig
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _arg)| {
+                        let local_name =
+                            syn::Ident::new(&format!("arg_{}", i), proc_macro2::Span::call_site());
+                        quote!(#local_name)
+                    })
+                    .collect();
 
                 // Build the return conversion based on return type.
                 // Uses IntoValue trait: all types (String, i64, f64, bool, Value, Vec<T>,
@@ -1402,162 +1427,122 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// `xcl_universal_methods!()` — Registers universal methods available on all XCL types.
+/// `#[xcl_opcode(name = "OP_...", code = N)]` — Register an extension opcode handler.
 ///
-/// Universal methods include:
-/// - `type` — Returns the type name of the value as a string.
-/// - `super` — Returns the parent (base) struct of a composed type.
+/// Declares a function as an opcode handler and registers it in the VM's
+/// [`OPCODE_REGISTRY`](::xcl_vm::OPCODE_REGISTRY) distributed slice.
+///
+/// # Requirements
+///
+/// - `name` must be a valid Rust identifier starting with `OP_`.
+/// - `code` must be an integer in the range `128..=255`.
+/// - The function signature must be:
+///   `fn(&mut ::xcl_vm::VM, usize, ::xcl_vm::Instr) -> ::xcl_vm::OpcodeResult`
 ///
 /// # Example
 ///
 /// ```ignore
-/// // No longer needed — universal methods are auto-registered
-/// xcl_macros::xcl_universal_methods!();
+/// #[xcl_opcode(name = "OP_XCL_TEST", code = 200)]
+/// fn op_xcl_test(
+///     vm: &mut ::xcl_vm::VM,
+///     top: usize,
+///     instr: ::xcl_vm::Instr,
+/// ) -> ::xcl_vm::OpcodeResult {
+///     vm.push_value(::xcl_vm::Value::from_i48(42));
+///     ::xcl_vm::OpcodeResult::Next
+/// }
 /// ```
-#[proc_macro]
-#[deprecated(since = "0.2.0", note = "Universal methods are now auto-registered by VM::register_all()")]
-pub fn xcl_universal_methods(_item: TokenStream) -> TokenStream {
+#[proc_macro_attribute]
+pub fn xcl_opcode(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let func = parse_macro_input!(item as ItemFn);
+    let mut name: Option<String> = None;
+    let mut code: Option<u8> = None;
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("name") {
+            name = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+            Ok(())
+        } else if meta.path.is_ident("code") {
+            code = Some(meta.value()?.parse::<syn::LitInt>()?.base10_parse::<u8>()?);
+            Ok(())
+        } else {
+            Err(meta.error("unsupported xcl_opcode attribute"))
+        }
+    });
+    parse_macro_input!(attr with parser);
+
+    let name = match name {
+        Some(n) => n,
+        None => {
+            return syn::Error::new_spanned(
+                &func,
+                "#[xcl_opcode] requires `name = \"OP_...\"` attribute",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    if !name.starts_with("OP_") {
+        return syn::Error::new_spanned(
+            &func,
+            "Opcode name must start with `OP_`",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return syn::Error::new_spanned(
+            &func,
+            "Opcode name must be a valid Rust identifier",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let code = match code {
+        Some(c) => c,
+        None => {
+            return syn::Error::new_spanned(
+                &func,
+                "#[xcl_opcode] requires `code = <int>` attribute (must be 128..=255)",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    if !(128..=255).contains(&code) {
+        return syn::Error::new_spanned(
+            &func,
+            "Opcode code must be in range 128..=255",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let func_name = &func.sig.ident;
+    let func_name_str = func_name.to_string();
+
+    let const_ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
+
+    let static_ident = syn::Ident::new(
+        &format!("__XCL_OPCODE_{}", func_name_str.to_uppercase()),
+        proc_macro2::Span::call_site(),
+    );
+
     let expanded = quote! {
-        /// Universal `type` method — returns the type name of any value.
-        #[::linkme::distributed_slice(::xcl_vm::NATIVE_REGISTRY)]
+        #func
+
+        pub const #const_ident: u8 = #code;
+
+        #[::linkme::distributed_slice(::xcl_vm::OPCODE_REGISTRY)]
         #[allow(non_upper_case_globals)]
-        static __XCL_UNIVERSAL_TYPE: ::xcl_vm::NativeEntry = ::xcl_vm::NativeEntry {
-            domain: None,
-            impl_type: None,
-            override_method: None,
-            method: "type",
-            kind: ::xcl_vm::NativeKind::Pure,
-            ptr: ::xcl_vm::RawPtr(__xcl_universal_type as *const ()),
-            args: None,
-            ret: Some("str"),
-            named: &[],
-            summary: Some("Return the type name of any value."),
-            arg_desc: &[],
-            auto_import: false,
+        static #static_ident: ::xcl_vm::OpcodeEntry = ::xcl_vm::OpcodeEntry {
+            code: #code,
+            name: #name,
+            handler: #func_name,
         };
-
-        fn __xcl_universal_type(args: &[::xcl_vm::Value]) -> ::xcl_vm::Value {
-            let val = ::xcl_vm::extract_arg::<::xcl_vm::Value>(args, 0);
-            if let Some(subtype) = val.map_subtype() {
-                if subtype == ::xcl_vm::SUBTYPE_RESULT {
-                    return ::xcl_vm::Value::from_str_boxed("Result".to_string());
-                }
-                if subtype == ::xcl_vm::SUBTYPE_ERROR {
-                    return ::xcl_vm::Value::from_str_boxed("Error".to_string());
-                }
-                if subtype == ::xcl_vm::SUBTYPE_HANDLE {
-                    return ::xcl_vm::Value::from_str_boxed("Handle".to_string());
-                }
-            }
-            if val.as_map().is_some() {
-                for desc in ::xcl_vm::TYPE_REGISTRY.iter() {
-                    if desc.kind == ::xcl_vm::TypeKind::Record {
-                        if let Some(map) = val.as_map() {
-                            let mut matches = true;
-                            for field in desc.fields {
-                                if !map.contains_key(field.name) {
-                                    matches = false;
-                                    break;
-                                }
-                            }
-                            if matches && !desc.fields.is_empty() {
-                                return ::xcl_vm::Value::from_str_boxed(desc.name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            if val.is_int() {
-                return ::xcl_vm::Value::from_str_boxed("int".to_string());
-            }
-            if val.is_float() {
-                return ::xcl_vm::Value::from_str_boxed("float".to_string());
-            }
-            if val.is_bool() {
-                return ::xcl_vm::Value::from_str_boxed("bool".to_string());
-            }
-            if val.is_nil() {
-                return ::xcl_vm::Value::from_str_boxed("none".to_string());
-            }
-            if val.as_str().is_some() {
-                return ::xcl_vm::Value::from_str_boxed("str".to_string());
-            }
-            if val.as_array().is_some() {
-                return ::xcl_vm::Value::from_str_boxed("array".to_string());
-            }
-            if val.as_map().is_some() {
-                return ::xcl_vm::Value::from_str_boxed("map".to_string());
-            }
-            if val.as_func().is_some() {
-                return ::xcl_vm::Value::from_str_boxed("function".to_string());
-            }
-            ::xcl_vm::Value::from_str_boxed("unknown".to_string())
-        }
-
-        /// Universal `super` method — returns the parent (base) struct of a composed type.
-        #[::linkme::distributed_slice(::xcl_vm::NATIVE_REGISTRY)]
-        #[allow(non_upper_case_globals)]
-        static __XCL_UNIVERSAL_SUPER: ::xcl_vm::NativeEntry = ::xcl_vm::NativeEntry {
-            domain: None,
-            impl_type: None,
-            override_method: None,
-            method: "super",
-            kind: ::xcl_vm::NativeKind::Pure,
-            ptr: ::xcl_vm::RawPtr(__xcl_universal_super as *const ()),
-            args: None,
-            ret: Some("map"),
-            named: &[],
-            summary: Some("Return the parent (base) struct of a composed type via super."),
-            arg_desc: &[],
-            auto_import: false,
-        };
-
-        fn __xcl_universal_super(args: &[::xcl_vm::Value]) -> ::xcl_vm::Value {
-            let val = ::xcl_vm::extract_arg::<::xcl_vm::Value>(args, 0);
-            if let Some(map) = val.as_map() {
-                let mut best_match: Option<&::xcl_vm::TypeDescriptor> = None;
-                let mut best_field_count = 0usize;
-                for desc in ::xcl_vm::TYPE_REGISTRY.iter() {
-                    if desc.kind == ::xcl_vm::TypeKind::Record {
-                        let mut matches = true;
-                        for field in desc.fields {
-                            if !map.contains_key(field.name) {
-                                matches = false;
-                                break;
-                            }
-                        }
-                        if matches && !desc.fields.is_empty() {
-                            if desc.fields.len() > best_field_count {
-                                best_field_count = desc.fields.len();
-                                best_match = Some(desc);
-                            }
-                        }
-                    }
-                }
-                if let Some(desc) = best_match {
-                    if let Some(parent_name) = desc.parent_type {
-                        for parent_desc in ::xcl_vm::TYPE_REGISTRY.iter() {
-                            if parent_desc.name == parent_name {
-                                let mut parent_map = std::collections::HashMap::new();
-                                for field in parent_desc.fields {
-                                    if let Some(v) = map.get(field.name) {
-                                        parent_map.insert(field.name.to_string(), *v);
-                                    }
-                                }
-                                return ::xcl_vm::Value::from_map_boxed_typed_v(
-                                    parent_map,
-                                    ::xcl_vm::SUBTYPE_USER_BASE,
-                                    ::xcl_vm::VARIANT_DEFAULT,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            ::xcl_vm::Value::nil()
-        }
     };
 
     expanded.into()
 }
-

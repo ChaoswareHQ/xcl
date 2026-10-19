@@ -1169,7 +1169,7 @@ impl NativeArg for u64 {
 
 impl NativeArg for f64 {
     fn from_value(v: Value) -> Self {
-        v.as_f64()
+        v.as_float()
     }
 }
 

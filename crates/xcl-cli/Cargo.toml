@@ -18,4 +18,3 @@ mimalloc.workspace = true
 xcl-decompile.workspace = true
 xcl-plugins.workspace = true
 xcl-vm.workspace = true
-linkme.workspace = true

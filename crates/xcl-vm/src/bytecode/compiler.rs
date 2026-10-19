@@ -1,4 +1,4 @@
-﻿//! AST-to-bytecode compiler: translates parsed XCL AST nodes into 64-bit packed instructions.
+//! AST-to-bytecode compiler: translates parsed XCL AST nodes into 64-bit packed instructions.
 //!
 //! The [`Compiler`] struct accumulates instructions, wide operands, string interning,
 //! and local/global slot allocation. After compilation, the peephole optimizer and
@@ -19,11 +19,11 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::sync::Arc;
 
-use crate::compiler::ast::{AstNode, BinaryOperator, TypeKind, UnaryOperator};
-use crate::runtime::value::{FuncValue, Value};
 use super::instr::Instr;
 use super::opcodes::{Bytecode, *};
 use super::peephole::peephole_optimize_once;
+use crate::compiler::ast::{AstNode, BinaryOperator, TypeKind, UnaryOperator};
+use crate::runtime::value::{FuncValue, Value};
 
 struct Compiler {
     code: Vec<Instr>,
@@ -135,14 +135,6 @@ impl Compiler {
                 self.can_emit_to_slot(target) && self.can_emit_to_slot(index)
             }
             AstNode::FieldAccess { target, .. } => self.can_emit_to_slot(target),
-            AstNode::Call { callee, args, .. } => {
-                args.len() == 1
-                    && args[0].name.is_none()
-                    && collect_dotted_name(callee)
-                        .and_then(|n| math_unary_id(&n))
-                        .is_some()
-                    && self.can_emit_to_slot(&args[0].value)
-            }
             _ => false,
         }
     }
@@ -223,14 +215,6 @@ impl Compiler {
                     field_idx as u16,
                     t_slot as u8,
                 ));
-                dst
-            }
-            AstNode::Call { callee, args, .. } => {
-                let cname = collect_dotted_name(callee).unwrap_or_default();
-                let math_id = math_unary_id(&cname).unwrap_or(MATH_SQRT);
-                let src = self.emit_expr_to_slot(&args[0].value, temp_depth);
-                let dst = self.temp_slot(temp_depth);
-                self.emit(Instr::make(OP_MATH_UNARY, dst, src as u16, math_id));
                 dst
             }
             AstNode::BinaryOp {
@@ -520,17 +504,9 @@ impl Compiler {
                         return;
                     }
                 }
-                // Direct RHS fusion for unary math calls, array index, and field access
+                // Direct RHS fusion for array index and field access
                 if self.locals.len() < 200 && self.can_emit_to_slot(value.as_ref()) {
                     match value.as_ref() {
-                        AstNode::Call { callee, args, .. } => {
-                            let cname = collect_dotted_name(callee).unwrap_or_default();
-                            if let Some(math_id) = math_unary_id(&cname) {
-                                let src = self.emit_expr_to_slot(&args[0].value, 0);
-                                self.emit(Instr::make(OP_MATH_UNARY, slot, src as u16, math_id));
-                                return;
-                            }
-                        }
                         AstNode::Index { target, index, .. } => {
                             let t_slot = self.emit_expr_to_slot(target, 0);
                             let i_slot = self.emit_expr_to_slot(index, 1);
@@ -1122,11 +1098,7 @@ impl Compiler {
                 self.emit(Instr::a2(OP_CALL, 2, 0));
             }
 
-            AstNode::Lambda {
-                params,
-                body,
-                ..
-            } => {
+            AstNode::Lambda { params, body, .. } => {
                 let mut sub = Compiler::new();
                 for p in params {
                     sub.local(p);

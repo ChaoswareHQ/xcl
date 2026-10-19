@@ -20,6 +20,7 @@ bumpalo.workspace = true
 smallvec.workspace = true
 hashbrown.workspace = true
 linkme.workspace = true
+xcl-vm-macros.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

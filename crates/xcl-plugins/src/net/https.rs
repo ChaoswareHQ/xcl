@@ -156,7 +156,7 @@ impl IntoValue for HttpResponse {
         m.insert("status".to_string(), Value::from_i48(self.status));
         m.insert("body".to_string(), Value::from_str_boxed(self.body));
         m.insert("json".to_string(), self.json);
-        let bytes_values: Vec<Value> = self.bytes.into_iter().map(|b| Value::from_i48(b)).collect();
+        let bytes_values: Vec<Value> = self.bytes.into_iter().map(Value::from_i48).collect();
         m.insert("bytes".to_string(), Value::from_array_boxed(bytes_values));
         m.insert("headers".to_string(), self.headers);
         m.insert("ok".to_string(), Value::bool(self.ok));
@@ -242,15 +242,15 @@ fn parse_options(opts: Value) -> RequestOptions {
                 }
                 "auth" => {
                     if let Some(a_map) = val.as_map() {
-                        if let Some(user_val) = a_map.get("user") {
-                            if let Some(user_str) = user_val.as_str() {
-                                result.auth_user = Some(user_str.to_string());
-                            }
+                        if let Some(user_val) = a_map.get("user")
+                            && let Some(user_str) = user_val.as_str()
+                        {
+                            result.auth_user = Some(user_str.to_string());
                         }
-                        if let Some(pass_val) = a_map.get("pass") {
-                            if let Some(pass_str) = pass_val.as_str() {
-                                result.auth_pass = Some(pass_str.to_string());
-                            }
+                        if let Some(pass_val) = a_map.get("pass")
+                            && let Some(pass_str) = pass_val.as_str()
+                        {
+                            result.auth_pass = Some(pass_str.to_string());
                         }
                     }
                 }
@@ -634,10 +634,10 @@ fn https_request(
                 json: json_value,
                 bytes: bytes_arr,
                 headers: Value::from_map_boxed(hdr_map),
-                ok: status >= 200 && status < 300,
-                is_redirect: status >= 300 && status < 400,
-                is_client_error: status >= 400 && status < 500,
-                is_server_error: status >= 500 && status < 600,
+                ok: (200..300).contains(&status),
+                is_redirect: (300..400).contains(&status),
+                is_client_error: (400..500).contains(&status),
+                is_server_error: (500..600).contains(&status),
                 final_url,
                 content_type,
                 content_length,
@@ -663,8 +663,8 @@ fn https_request(
                 headers: Value::from_map_boxed(HashMap::new()),
                 ok: false,
                 is_redirect: false,
-                is_client_error: status >= 400 && status < 500,
-                is_server_error: status >= 500 && status < 600,
+                is_client_error: (400..500).contains(&status),
+                is_server_error: (500..600).contains(&status),
                 final_url: url.to_string(),
                 content_type: String::new(),
                 content_length: 0,
@@ -683,7 +683,7 @@ fn basic_auth_header(user: &str, pass: &str) -> String {
 /// Simple Base64 encoding (no external dependency).
 fn base64_encode(bytes: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut i = 0;
     while i < bytes.len() {
         let b0 = bytes[i];

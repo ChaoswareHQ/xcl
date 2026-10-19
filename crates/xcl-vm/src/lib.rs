@@ -237,21 +237,19 @@ pub mod runtime;
 pub mod utils;
 
 pub use bytecode::{Bytecode, Instr};
+pub use compiler::AstNode;
 pub use compiler::lexer;
 pub use compiler::parser;
-pub use compiler::AstNode;
+pub use compiler::span::Span;
 pub use runtime::{
     BuiltinImpl, DomainCtx, DomainSlot, FuncValue, GlobalOverrideGuard, Group, HandleKind,
-    ImplDescriptor, ImplMethod, IntoValue, NamedParam, NativeArg, NativeEntry, NativeKind, RawPtr,
-    SUBTYPE_ERROR, SUBTYPE_HANDLE, SUBTYPE_NONE, SUBTYPE_RESULT, SUBTYPE_USER_BASE,
-    TraitDescriptor, TraitMethod, TypeDescriptor, TypeField, TypeKind, TypeVariant,
-    VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK, Value, VM, extract_arg, is_known_kind, XclObject,
-    XclType,
+    ImplDescriptor, ImplMethod, IntoValue, NamedParam, NativeArg, NativeEntry, NativeKind,
+    OPCODE_REGISTRY, OpcodeEntry, OpcodeFn, OpcodeResult, RawPtr, SUBTYPE_ERROR, SUBTYPE_HANDLE,
+    SUBTYPE_NONE, SUBTYPE_RESULT, SUBTYPE_USER_BASE, TraitDescriptor, TraitMethod, TypeDescriptor,
+    TypeField, TypeKind, TypeVariant, VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK, VM, Value,
+    XclObject, XclType, extract_arg, is_known_kind, registered_opcode_name,
 };
-pub use compiler::span::Span;
-pub use utils::{
-    IMPL_REGISTRY, NATIVE_REGISTRY, TRAIT_REGISTRY, TYPE_REGISTRY, WellKnown, split_named_args,
-};
+pub use utils::{IMPL_REGISTRY, NATIVE_REGISTRY, TRAIT_REGISTRY, TYPE_REGISTRY, split_named_args};
 
 /// Evaluates XCL source code using the provided virtual machine.
 ///

@@ -11,15 +11,23 @@
 //! let result = xcl_plugins::evaluate("print \"hello\"", &mut vm);
 //! ```
 
-#[cfg(feature = "io")]
-mod io;
-#[cfg(feature = "fs")]
-mod fs;
-#[cfg(feature = "net")]
-mod net;
 #[cfg(feature = "encoding")]
 mod encoding;
+#[cfg(feature = "fs")]
+mod fs;
+#[cfg(feature = "io")]
+mod io;
+#[cfg(feature = "math")]
+mod math;
+#[cfg(feature = "net")]
+mod net;
 
+mod wellknown;
+
+#[cfg(test)]
+mod opcode_test;
+
+pub use wellknown::WellKnown;
 pub use xcl_vm;
 
 use xcl_vm::{VM, Value};

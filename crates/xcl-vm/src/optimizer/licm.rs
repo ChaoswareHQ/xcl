@@ -21,7 +21,6 @@ use std::collections::BTreeSet;
 use super::dataflow::{build_basic_blocks, BasicBlock};
 
 /// Returns a list of loops, where each loop is a list of instruction indices in the loop body.
-#[allow(dead_code)]
 fn detect_loops(code: &[Instr], blocks: &[BasicBlock]) -> Vec<Vec<usize>> {
     let len = code.len();
     if len == 0 {

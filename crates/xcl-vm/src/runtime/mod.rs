@@ -4,15 +4,17 @@
 //! executing compiled bytecode on a stack-based virtual machine with NaN-boxed values.
 
 pub mod errors;
+pub mod opcode;
 pub mod value;
 pub mod vm;
 
 pub use errors::{Group, is_known_kind};
+pub use opcode::{OPCODE_REGISTRY, OpcodeEntry, OpcodeFn, OpcodeResult, registered_opcode_name};
 pub use value::{
     BuiltinImpl, DomainCtx, FuncValue, GlobalOverrideGuard, HandleKind, ImplDescriptor, ImplMethod,
-    IntoValue, NamedParam, NativeArg, NativeEntry, NativeKind, RawPtr, SUBTYPE_ERROR, SUBTYPE_HANDLE,
-    SUBTYPE_NONE, SUBTYPE_RESULT, SUBTYPE_USER_BASE, TraitDescriptor, TraitMethod, TypeDescriptor,
-    TypeField, TypeKind, TypeVariant, VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK,
-    Value, extract_arg, XclType, XclObject,
+    IntoValue, NamedParam, NativeArg, NativeEntry, NativeKind, RawPtr, SUBTYPE_ERROR,
+    SUBTYPE_HANDLE, SUBTYPE_NONE, SUBTYPE_RESULT, SUBTYPE_USER_BASE, TraitDescriptor, TraitMethod,
+    TypeDescriptor, TypeField, TypeKind, TypeVariant, VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK,
+    Value, XclObject, XclType, extract_arg,
 };
 pub use vm::{DomainSlot, VM};

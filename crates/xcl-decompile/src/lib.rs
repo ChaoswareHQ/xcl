@@ -18,7 +18,9 @@
 //!     instructions: Arc::from(vec![Instr::a1(4, 42), Instr::none(17), Instr::none(34)]),
 //!     wide_operands: Arc::new([]),
 //!     string_table: Arc::new([]),
+//!     string_values: Arc::new([]),
 //!     local_names: Arc::new([]),
+//!     global_names: Arc::new([]),
 //!     user_functions: Vec::new(),
 //!     closures: Vec::new(),
 //! };
@@ -363,7 +365,6 @@ fn opcode_name(op: u8) -> &'static str {
         OP_GET_INDEX                 => "OP_GET_INDEX",
         OP_GET_FIELD                 => "OP_GET_FIELD",
         OP_ARRAY_PUSH                => "OP_ARRAY_PUSH",
-        OP_LEN                       => "OP_LEN",
         OP_FOR_ITER_START            => "OP_FOR_ITER_START",
         OP_FOR_ITER_NEXT             => "OP_FOR_ITER_NEXT",
         OP_FOR_RANGE_START           => "OP_FOR_RANGE_START",
@@ -379,13 +380,6 @@ fn opcode_name(op: u8) -> &'static str {
         OP_LOAD_LOCAL_PUSH_INT       => "OP_LOAD_LOCAL_PUSH_INT",
         OP_LOAD_LOCAL_STORE_LOCAL    => "OP_LOAD_LOCAL_STORE_LOCAL",
         OP_CALL_METHOD               => "OP_CALL_METHOD",
-        // Integer-specialized arithmetic
-        OP_ADD_INT                   => "OP_ADD_INT",
-        OP_SUB_INT                   => "OP_SUB_INT",
-        OP_MUL_INT                   => "OP_MUL_INT",
-        OP_LT_INT                    => "OP_LT_INT",
-        OP_GT_INT                    => "OP_GT_INT",
-        OP_EQ_INT                    => "OP_EQ_INT",
         // More superinstructions
         OP_INC_LOCAL                 => "OP_INC_LOCAL",
         OP_DEC_LOCAL                 => "OP_DEC_LOCAL",
@@ -408,13 +402,12 @@ fn opcode_name(op: u8) -> &'static str {
         OP_MUL_LOCAL_LOCAL_STORE     => "OP_MUL_LOCAL_LOCAL_STORE",
         OP_SUB_LOCAL_LOCAL_STORE     => "OP_SUB_LOCAL_LOCAL_STORE",
         OP_DIV_LOCAL_LOCAL_STORE     => "OP_DIV_LOCAL_LOCAL_STORE",
-        OP_MATH_UNARY                => "OP_MATH_UNARY",
         OP_GET_INDEX_LOCAL_LOCAL_STORE => "OP_GET_INDEX_LOCAL_LOCAL_STORE",
         OP_GET_FIELD_LOCAL_STORE     => "OP_GET_FIELD_LOCAL_STORE",
         OP_MOD_LOCAL_LOCAL_STORE     => "OP_MOD_LOCAL_LOCAL_STORE",
         OP_LOAD_CONST_LOCAL          => "OP_LOAD_CONST_LOCAL",
         OP_ARRAY_PUSH_LOCAL          => "OP_ARRAY_PUSH_LOCAL",
-        _                            => "OP_UNKNOWN",
+        _                            => xcl_vm::registered_opcode_name(op).unwrap_or("OP_UNKNOWN"),
     }
 }
 

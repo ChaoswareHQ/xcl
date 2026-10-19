@@ -94,9 +94,6 @@ pub const OP_GET_INDEX: u8 = 37;
 pub const OP_GET_FIELD: u8 = 38;
 /// Pushes an element onto an array.
 pub const OP_ARRAY_PUSH: u8 = 39;
-/// Computes the length of a string, array, or dictionary.
-pub const OP_LEN: u8 = 41;
-
 /// Initializes iteration over an iterable collection.
 pub const OP_FOR_ITER_START: u8 = 42;
 /// Advances to the next item in an iterator.
@@ -136,19 +133,6 @@ pub const OP_LOAD_LOCAL_STORE_LOCAL: u8 = 65;
 /// Stack layout: receiver, arg1, arg2, ... -> result.
 /// Operand `a` = method name string index in `string_table`, `b` = argument count.
 pub const OP_CALL_METHOD: u8 = 66;
-
-/// Specialized fast integer addition (bypasses type checking when types are proven integer).
-pub const OP_ADD_INT: u8 = 70;
-/// Specialized fast integer subtraction.
-pub const OP_SUB_INT: u8 = 71;
-/// Specialized fast integer multiplication.
-pub const OP_MUL_INT: u8 = 72;
-/// Specialized fast integer less-than comparison.
-pub const OP_LT_INT: u8 = 73;
-/// Specialized fast integer greater-than comparison.
-pub const OP_GT_INT: u8 = 74;
-/// Specialized fast integer equality comparison.
-pub const OP_EQ_INT: u8 = 75;
 
 /// Superinstruction: increments local variable in-place (`$x = $x + 1`).
 pub const OP_INC_LOCAL: u8 = 80;
@@ -195,8 +179,6 @@ pub const OP_SUB_LOCAL_LOCAL_STORE: u8 = 101;
 pub const OP_DIV_LOCAL_LOCAL_STORE: u8 = 102;
 /// Fused while-loop condition and conditional jump comparing two locals (`while $a < $b`).
 pub const OP_WHILE_LT_LOCAL: u8 = 103;
-/// Fused unary math intrinsic: `locals[a] = math_op(locals[b])` where `c` selects the function.
-pub const OP_MATH_UNARY: u8 = 104;
 /// Fused array/map index load into local: `locals[a] = locals[c][locals[b]]`.
 pub const OP_GET_INDEX_LOCAL_LOCAL_STORE: u8 = 105;
 /// Fused map field load into local: `locals[a] = locals[c].(string_table[b])`.
@@ -228,43 +210,6 @@ pub const OP_SHL: u8 = 115;
 pub const OP_SHR: u8 = 116;
 /// Bitwise AND: pop two values, push `a & b`.
 pub const OP_BITAND: u8 = 117;
-
-/// Math intrinsic IDs for [`OP_MATH_UNARY`].
-pub const MATH_SQRT: u8 = 0;
-pub const MATH_SIN: u8 = 1;
-pub const MATH_COS: u8 = 2;
-pub const MATH_TAN: u8 = 3;
-pub const MATH_EXP: u8 = 4;
-pub const MATH_LOG: u8 = 5;
-pub const MATH_ABS: u8 = 6;
-pub const MATH_FLOOR: u8 = 7;
-pub const MATH_CEIL: u8 = 8;
-pub const MATH_ROUND: u8 = 9;
-pub const MATH_TANH: u8 = 10;
-pub const MATH_LOG2: u8 = 11;
-pub const MATH_LOG10: u8 = 12;
-pub const MATH_CBRT: u8 = 13;
-
-#[inline]
-pub fn math_unary_id(name: &str) -> Option<u8> {
-    match name {
-        "math.sqrt" => Some(MATH_SQRT),
-        "math.sin" => Some(MATH_SIN),
-        "math.cos" => Some(MATH_COS),
-        "math.tan" => Some(MATH_TAN),
-        "math.exp" => Some(MATH_EXP),
-        "math.log" => Some(MATH_LOG),
-        "math.abs" => Some(MATH_ABS),
-        "math.floor" => Some(MATH_FLOOR),
-        "math.ceil" => Some(MATH_CEIL),
-        "math.round" => Some(MATH_ROUND),
-        "math.tanh" => Some(MATH_TANH),
-        "math.log2" => Some(MATH_LOG2),
-        "math.log10" => Some(MATH_LOG10),
-        "math.cbrt" => Some(MATH_CBRT),
-        _ => None,
-    }
-}
 
 /// Compiled XCL bytecode unit ready for execution by the VM runtime.
 ///

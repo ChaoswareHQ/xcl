@@ -27,7 +27,7 @@ use std::env;
 use std::fs;
 use std::process;
 
-use xcl_vm::ast::AstNode;
+use xcl_vm::AstNode;
 use xcl_vm::lexer::{self, TokenWithText};
 use xcl_vm::parser;
 use xcl_vm::Span;

@@ -705,7 +705,7 @@ fn collect_one(path: &Path, model: &mut DocModel) -> Result<()> {
     let mut pending_doc: Option<String> = None;
 
     for node in &ast {
-        if let xcl_vm::ast::AstNode::FunctionDef { name, params, return_type, .. } = node {
+        if let xcl_vm::AstNode::FunctionDef { name, params, return_type, .. } = node {
             let summary = pending_doc.take();
             let args_str = params.iter()
                 .map(|p| {

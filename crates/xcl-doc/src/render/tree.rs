@@ -26,7 +26,7 @@ pub fn build_tree(model: &DocModel) -> serde_json::Value {
         match &n.domain {
             Some(domain) => {
                 domain_functions.entry(domain.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(func);
             }
             None => {
@@ -52,7 +52,7 @@ pub fn build_tree(model: &DocModel) -> serde_json::Value {
         match &t.domain {
             Some(domain) => {
                 domain_types.entry(domain.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(ty);
             }
             None => {
@@ -66,25 +66,25 @@ pub fn build_tree(model: &DocModel) -> serde_json::Value {
         let mut domain_children: Vec<serde_json::Value> = Vec::new();
 
         // Add functions for this domain
-        if let Some(funcs) = domain_functions.get(&domain.name) {
-            if !funcs.is_empty() {
-                domain_children.push(json!({
-                    "name": "Functions",
-                    "type": "category",
-                    "children": funcs
-                }));
-            }
+        if let Some(funcs) = domain_functions.get(&domain.name)
+            && !funcs.is_empty()
+        {
+            domain_children.push(json!({
+                "name": "Functions",
+                "type": "category",
+                "children": funcs
+            }));
         }
 
         // Add types for this domain
-        if let Some(types) = domain_types.get(&domain.name) {
-            if !types.is_empty() {
-                domain_children.push(json!({
-                    "name": "Types",
-                    "type": "category",
-                    "children": types
-                }));
-            }
+        if let Some(types) = domain_types.get(&domain.name)
+            && !types.is_empty()
+        {
+            domain_children.push(json!({
+                "name": "Types",
+                "type": "category",
+                "children": types
+            }));
         }
 
         if !domain_children.is_empty() {

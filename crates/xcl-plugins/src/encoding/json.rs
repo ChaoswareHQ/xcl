@@ -281,9 +281,9 @@ mod tests {
 
     #[test]
     fn float_to_json() {
-        let v = Value::from_f64(3.14);
+        let v = Value::from_f64(std::f64::consts::PI);
         let j = value_to_json(v).unwrap();
-        assert_eq!(j.as_f64(), Some(3.14));
+        assert_eq!(j.as_f64(), Some(std::f64::consts::PI));
     }
 
     #[test]

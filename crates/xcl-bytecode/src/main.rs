@@ -25,10 +25,9 @@
 
 use clap::{Parser, Subcommand};
 use std::fs;
-use xcl_vm::bytecode::{compile, Bytecode};
+use xcl_vm::bytecode::{Bytecode, compile};
 use xcl_vm::lexer::lex;
 use xcl_vm::parser::parse;
-use xcl_vm::value::Value;
 
 /// XCL Bytecode Debugger — diagnose why XCL is slower than Luau
 #[derive(Parser)]
@@ -115,7 +114,6 @@ fn get_opcode_name(op: u8) -> &'static str {
         37 => "OP_GET_INDEX",
         38 => "OP_GET_FIELD",
         39 => "OP_ARRAY_PUSH",
-        41 => "OP_LEN",
         42 => "OP_FOR_ITER_START",
         43 => "OP_FOR_ITER_NEXT",
         44 => "OP_FOR_RANGE_START",
@@ -131,12 +129,6 @@ fn get_opcode_name(op: u8) -> &'static str {
         64 => "OP_LOAD_LOCAL_PUSH_INT",
         65 => "OP_LOAD_LOCAL_STORE_LOCAL",
         66 => "OP_CALL_METHOD",
-        70 => "OP_ADD_INT",
-        71 => "OP_SUB_INT",
-        72 => "OP_MUL_INT",
-        73 => "OP_LT_INT",
-        74 => "OP_GT_INT",
-        75 => "OP_EQ_INT",
         80 => "OP_INC_LOCAL",
         81 => "OP_DEC_LOCAL",
         82 => "OP_MUL_LOCAL_LOCAL",
@@ -157,42 +149,18 @@ fn get_opcode_name(op: u8) -> &'static str {
         101 => "OP_SUB_LOCAL_LOCAL_STORE",
         102 => "OP_DIV_LOCAL_LOCAL_STORE",
         103 => "OP_WHILE_LT_LOCAL",
-        104 => "OP_MATH_UNARY",
         105 => "OP_GET_INDEX_LOCAL_LOCAL_STORE",
         106 => "OP_GET_FIELD_LOCAL_STORE",
         107 => "OP_MOD_LOCAL_LOCAL_STORE",
         108 => "OP_LOAD_CONST_LOCAL",
         109 => "OP_ARRAY_PUSH_LOCAL",
-        _ => "UNKNOWN",
-    }
-}
-
-#[allow(dead_code)]
-fn format_value(v: Value) -> String {
-    if v.is_nil() {
-        "nil".to_string()
-    } else if v.is_bool() {
-        if v.as_bool() { "true" } else { "false" }.to_string()
-    } else if v.is_int() {
-        format!("{}", v.as_i48())
-    } else if v.is_float() {
-        format!("{}", v.as_f64())
-    } else if let Some(s) = v.as_str() {
-        format!("\"{}\"", s)
-    } else if let Some(arr) = v.as_array() {
-        format!("[array len={}] ", arr.len())
-    } else if let Some(map) = v.as_map() {
-        format!("[map len={}] ", map.len())
-    } else if v.as_func().is_some() {
-        "[func]".to_string()
-    } else {
-        "[ptr]".to_string()
+        _ => xcl_vm::registered_opcode_name(op).unwrap_or("UNKNOWN"),
     }
 }
 
 fn load_and_compile(path: &str) -> Bytecode {
-    let source = fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("Failed to read {}: {}", path, e));
+    let source =
+        fs::read_to_string(path).unwrap_or_else(|e| panic!("Failed to read {}: {}", path, e));
     let tokens = lex(&source, path);
     let ast = parse(&tokens, &source);
     compile(&ast)
@@ -237,50 +205,41 @@ fn cmd_disassemble(bc: &Bytecode, raw: bool) {
             0 | 1 | 2 | 3 | 17 | 26 | 33 | 34 => String::new(),
 
             // Single operand a
-            4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 28 | 29 | 30 | 35 | 36 | 37 | 38
-            | 41 | 46 | 52 | 53 | 80 | 81 => {
-                match op {
-                    7 => format!(" a={} \"{}\"", a, bc.string_table[a as usize]),
-                    8 => format!(" a={} ${}", a, bc.local_names[a as usize]),
-                    9 => format!(" a={} ${}", a, bc.local_names[a as usize]),
-                    10 => format!(" a={} @{}", a, bc.global_names[a as usize]),
-                    11 => format!(" a={} @{}", a, bc.global_names[a as usize]),
-                    5 | 6 => format!(" a={} (wide[{}]={})", a, a, bc.wide_operands[a as usize]),
-                    _ => format!(" a={}", a),
-                }
-            }
+            4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 28 | 29 | 30 | 35 | 36 | 37 | 38 | 46 | 52
+            | 53 | 80 | 81 => match op {
+                7 => format!(" a={} \"{}\"", a, bc.string_table[a as usize]),
+                8 => format!(" a={} ${}", a, bc.local_names[a as usize]),
+                9 => format!(" a={} ${}", a, bc.local_names[a as usize]),
+                10 => format!(" a={} @{}", a, bc.global_names[a as usize]),
+                11 => format!(" a={} @{}", a, bc.global_names[a as usize]),
+                5 | 6 => format!(" a={} (wide[{}]={})", a, a, bc.wide_operands[a as usize]),
+                _ => format!(" a={}", a),
+            },
 
             // Two operands a, b
-            32 | 60 | 61 | 62 | 63 | 64 | 65 | 66 | 82 | 83 | 92 | 96 | 97 | 98 | 99
-            | 100 | 101 | 102 | 103 | 105 | 106 | 107 | 109 => {
-                match op {
-                    60..=65 | 82 | 83 | 92 | 96..=103 | 105..=107 | 109 => {
-                        format!(" a=${} b=${}", bc.local_names[a as usize], bc.local_names[b as usize])
-                    }
-                    66 => format!(" a=\"{}\" b={}", bc.string_table[a as usize], b),
-                    _ => format!(" a={} b={}", a, b),
+            32 | 60 | 61 | 62 | 63 | 64 | 65 | 66 | 82 | 83 | 92 | 96 | 97 | 98 | 99 | 100
+            | 101 | 102 | 103 | 105 | 106 | 107 | 109 => match op {
+                60..=65 | 82 | 83 | 92 | 96..=103 | 105..=107 | 109 => {
+                    format!(
+                        " a=${} b=${}",
+                        bc.local_names[a as usize], bc.local_names[b as usize]
+                    )
                 }
-            }
+                66 => format!(" a=\"{}\" b={}", bc.string_table[a as usize], b),
+                _ => format!(" a={} b={}", a, b),
+            },
 
             // Three operands a, b, c
-            84 | 85 | 91 | 93 | 94 | 104 | 108 => {
-                match op {
-                    104 => {
-                        let math_op = match c {
-                            0 => "sqrt", 1 => "sin", 2 => "cos", 3 => "tan",
-                            4 => "exp", 5 => "log", 6 => "abs", 7 => "floor",
-                            8 => "ceil", 9 => "round", 10 => "tanh", 11 => "log2",
-                            12 => "log10", 13 => "cbrt", _ => "?",
-                        };
-                        format!(" a=${} b=${} c={}", bc.local_names[a as usize], bc.local_names[b as usize], math_op)
-                    }
-                    108 => {
-                        let kind = if c == 1 { "float" } else { "int" };
-                        format!(" a=${} b=wide[{}] c={}", bc.local_names[a as usize], b, kind)
-                    }
-                    _ => format!(" a={} b={} c={}", a, b, c),
+            84 | 85 | 91 | 93 | 94 | 108 => match op {
+                108 => {
+                    let kind = if c == 1 { "float" } else { "int" };
+                    format!(
+                        " a=${} b=wide[{}] c={}",
+                        bc.local_names[a as usize], b, kind
+                    )
                 }
-            }
+                _ => format!(" a={} b={} c={}", a, b, c),
+            },
 
             // For loop special
             90 => format!(" a=${} b=-{} c={}", bc.local_names[a as usize], b, c),
@@ -298,7 +257,11 @@ fn cmd_disassemble(bc: &Bytecode, raw: bool) {
 
 fn cmd_trace(bc: &Bytecode, max_steps: usize, stack_only: bool) {
     println!("=== XCL Bytecode Trace ===");
-    let steps_str = if max_steps == 0 { "unlimited" } else { &max_steps.to_string() };
+    let steps_str = if max_steps == 0 {
+        "unlimited"
+    } else {
+        &max_steps.to_string()
+    };
     println!("Max steps: {}", steps_str);
     println!();
 
@@ -321,8 +284,12 @@ fn cmd_trace(bc: &Bytecode, max_steps: usize, stack_only: bool) {
         let stack_before = stack.len();
         match op {
             1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 10 => stack.push(format!("[{}] ", name)),
-            9 | 11 => { if !stack.is_empty() { stack.pop(); } }
-            12..=17 | 18..=27 => {
+            9 | 11 => {
+                if !stack.is_empty() {
+                    stack.pop();
+                }
+            }
+            12..=27 => {
                 if stack.len() >= 2 {
                     stack.pop();
                     stack.pop();
@@ -335,36 +302,45 @@ fn cmd_trace(bc: &Bytecode, max_steps: usize, stack_only: bool) {
             32 => {
                 let a = instr.a() as usize;
                 if stack.len() >= a {
-                    for _ in 0..a { stack.pop(); }
+                    for _ in 0..a {
+                        stack.pop();
+                    }
                     stack.push("[call]".to_string());
                 }
             }
             33 => {
-                if !stack.is_empty() { stack.pop(); }
+                if !stack.is_empty() {
+                    stack.pop();
+                }
             }
             35 => {
                 let a = instr.a() as usize;
                 if stack.len() >= a {
-                    for _ in 0..a { stack.pop(); }
+                    for _ in 0..a {
+                        stack.pop();
+                    }
                     stack.push("[array]".to_string());
                 }
             }
             36 => {
                 let a = instr.a() as usize;
                 if stack.len() >= a * 2 {
-                    for _ in 0..a * 2 { stack.pop(); }
+                    for _ in 0..a * 2 {
+                        stack.pop();
+                    }
                     stack.push("[dict]".to_string());
                 }
             }
-            37 | 38 | 41 => {
+            37 | 38 => {
                 if !stack.is_empty() {
                     stack.pop();
                     stack.push(format!("[{}] ", name));
                 }
             }
-            39 => {
-                if !stack.is_empty() { stack.pop(); }
+            39 if !stack.is_empty() => {
+                stack.pop();
             }
+            39 => {}
             _ => {}
         }
 
@@ -400,7 +376,11 @@ fn cmd_trace(bc: &Bytecode, max_steps: usize, stack_only: bool) {
                 // For loop — jump back
                 let jump_back = instr.b() as usize;
                 if jump_back > 0 {
-                    ip = if ip >= jump_back { ip - jump_back } else { ip + 1 };
+                    ip = if ip >= jump_back {
+                        ip - jump_back
+                    } else {
+                        ip + 1
+                    };
                 } else {
                     ip += 1;
                 }
@@ -430,7 +410,8 @@ fn cmd_profile(bc: &Bytecode, runs: usize) {
     }
 
     // Categorize opcodes
-    let mut categories: std::collections::HashMap<&'static str, usize> = std::collections::HashMap::new();
+    let mut categories: std::collections::HashMap<&'static str, usize> =
+        std::collections::HashMap::new();
     for (&op, &count) in &opcode_counts {
         let category = match op {
             1..=7 => "Constants",
@@ -493,7 +474,9 @@ fn cmd_profile(bc: &Bytecode, runs: usize) {
         println!("    Fusion rate: {:.1}%", fused_pct);
 
         if generic_arith > fast_int {
-            println!("  ⚠️  Generic arithmetic > fast integer — peephole optimizer not fully utilized");
+            println!(
+                "  ⚠️  Generic arithmetic > fast integer — peephole optimizer not fully utilized"
+            );
         }
     }
 
@@ -540,9 +523,21 @@ fn cmd_stats(bc: &Bytecode) {
     let wide_bytes = bc.wide_operands.len() * 8;
     let string_bytes: usize = bc.string_table.iter().map(|s| s.len()).sum();
     let total = instr_bytes + wide_bytes + string_bytes;
-    println!("  Instructions:     {:4} ({} bytes)", bc.instructions.len(), instr_bytes);
-    println!("  Wide operands:    {:4} ({} bytes)", bc.wide_operands.len(), wide_bytes);
-    println!("  String table:     {:4} ({} bytes)", bc.string_table.len(), string_bytes);
+    println!(
+        "  Instructions:     {:4} ({} bytes)",
+        bc.instructions.len(),
+        instr_bytes
+    );
+    println!(
+        "  Wide operands:    {:4} ({} bytes)",
+        bc.wide_operands.len(),
+        wide_bytes
+    );
+    println!(
+        "  String table:     {:4} ({} bytes)",
+        bc.string_table.len(),
+        string_bytes
+    );
     println!("  Local names:      {:4}", bc.local_names.len());
     println!("  Global names:     {:4}", bc.global_names.len());
     println!("  Closures:         {:4}", bc.closures.len());
@@ -584,7 +579,11 @@ fn main() {
             let bc = load_and_compile(&file);
             cmd_disassemble(&bc, raw);
         }
-        Commands::Trace { file, steps, stack_only } => {
+        Commands::Trace {
+            file,
+            steps,
+            stack_only,
+        } => {
             let bc = load_and_compile(&file);
             cmd_trace(&bc, steps, stack_only);
         }

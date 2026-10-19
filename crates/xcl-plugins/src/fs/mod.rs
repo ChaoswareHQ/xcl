@@ -93,11 +93,9 @@ impl Fs {
         match std::fs::read_dir(&path) {
             Ok(entries) => {
                 let mut names = Vec::new();
-                for entry in entries {
-                    if let Ok(e) = entry {
-                        let name = e.file_name().to_string_lossy().to_string();
-                        names.push(Value::from_str_boxed(name));
-                    }
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    names.push(Value::from_str_boxed(name));
                 }
                 names
             }
@@ -122,15 +120,15 @@ impl Fs {
                 map.insert("size".to_string(), Value::from_i48(meta.len() as i64));
                 map.insert("is_file".to_string(), Value::bool(meta.is_file()));
                 map.insert("is_dir".to_string(), Value::bool(meta.is_dir()));
-                if let Ok(modified) = meta.modified() {
-                    if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
-                        map.insert("modified".to_string(), Value::from_i48(duration.as_secs() as i64));
-                    }
+                if let Ok(modified) = meta.modified()
+                    && let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH)
+                {
+                    map.insert("modified".to_string(), Value::from_i48(duration.as_secs() as i64));
                 }
-                if let Ok(created) = meta.created() {
-                    if let Ok(duration) = created.duration_since(std::time::UNIX_EPOCH) {
-                        map.insert("created".to_string(), Value::from_i48(duration.as_secs() as i64));
-                    }
+                if let Ok(created) = meta.created()
+                    && let Ok(duration) = created.duration_since(std::time::UNIX_EPOCH)
+                {
+                    map.insert("created".to_string(), Value::from_i48(duration.as_secs() as i64));
                 }
                 Value::from_map_boxed(map)
             }

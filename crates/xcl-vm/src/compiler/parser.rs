@@ -411,29 +411,6 @@ impl<'a> Parser<'a> {
         false // reached EOF without `}` → block-lambda
     }
 
-    #[allow(dead_code)]
-    #[inline]
-    fn lookahead_dict_literal_at(&self, brace_pos: usize) -> bool {
-        // brace_pos points AT the `{` token. Start scanning from brace_pos + 1.
-        // Find the first meaningful token. If it's followed by `:`, it's a dict literal.
-        // Otherwise, it's a block-lambda.
-        let mut i = brace_pos + 1;
-        while i < self.tokens.len() {
-            match self.tokens[i].token {
-                Token::RBrace => return false, // empty `{ }` → block-lambda
-                Token::Semi | Token::Comma => {
-                    i += 1;
-                    continue;
-                }
-                _ => {
-                    // Found the first meaningful token — check if next is `:`
-                    return matches!(self.tokens.get(i + 1).map(|t| &t.token), Some(Token::Colon));
-                }
-            }
-        }
-        false // reached EOF without `}` → block-lambda
-    }
-
     #[inline]
     fn lookahead_assign(&self) -> bool {
         matches!(
@@ -715,17 +692,50 @@ impl<'a> Parser<'a> {
 
     fn parse_type(&mut self) -> String {
         let base = match self.current().map(|t| &t.token) {
-            Some(Token::Str) => { self.consume(); "str".to_string() }
-            Some(Token::I8) => { self.consume(); "i8".to_string() }
-            Some(Token::I16) => { self.consume(); "i16".to_string() }
-            Some(Token::I32) => { self.consume(); "i32".to_string() }
-            Some(Token::I64) => { self.consume(); "i64".to_string() }
-            Some(Token::U8) => { self.consume(); "u8".to_string() }
-            Some(Token::U16) => { self.consume(); "u16".to_string() }
-            Some(Token::U32) => { self.consume(); "u32".to_string() }
-            Some(Token::U64) => { self.consume(); "u64".to_string() }
-            Some(Token::F32) => { self.consume(); "f32".to_string() }
-            Some(Token::F64) => { self.consume(); "f64".to_string() }
+            Some(Token::Str) => {
+                self.consume();
+                "str".to_string()
+            }
+            Some(Token::I8) => {
+                self.consume();
+                "i8".to_string()
+            }
+            Some(Token::I16) => {
+                self.consume();
+                "i16".to_string()
+            }
+            Some(Token::I32) => {
+                self.consume();
+                "i32".to_string()
+            }
+            Some(Token::I64) => {
+                self.consume();
+                "i64".to_string()
+            }
+            Some(Token::U8) => {
+                self.consume();
+                "u8".to_string()
+            }
+            Some(Token::U16) => {
+                self.consume();
+                "u16".to_string()
+            }
+            Some(Token::U32) => {
+                self.consume();
+                "u32".to_string()
+            }
+            Some(Token::U64) => {
+                self.consume();
+                "u64".to_string()
+            }
+            Some(Token::F32) => {
+                self.consume();
+                "f32".to_string()
+            }
+            Some(Token::F64) => {
+                self.consume();
+                "f64".to_string()
+            }
             _ => self.consume().text.clone(),
         };
         if matches!(self.current().map(|t| &t.token), Some(Token::Lt)) {
@@ -1003,9 +1013,21 @@ impl<'a> Parser<'a> {
                     // Accepts IdentPlain (custom types) and primitive type keywords
                     let is_type_keyword = matches!(
                         self.current().map(|t| &t.token),
-                        Some(Token::Str | Token::I8 | Token::I16 | Token::I32 | Token::I64
-                            | Token::U8 | Token::U16 | Token::U32 | Token::U64
-                            | Token::F32 | Token::F64 | Token::Bool | Token::Any)
+                        Some(
+                            Token::Str
+                                | Token::I8
+                                | Token::I16
+                                | Token::I32
+                                | Token::I64
+                                | Token::U8
+                                | Token::U16
+                                | Token::U32
+                                | Token::U64
+                                | Token::F32
+                                | Token::F64
+                                | Token::Bool
+                                | Token::Any
+                        )
                     );
                     if self.at(Token::IdentPlain) || is_type_keyword {
                         let type_name = self.parse_type();
@@ -1296,11 +1318,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(Token::Pipe); // consume closing |
         let body = Box::new(self.expr());
-        AstNode::Lambda {
-            span,
-            params,
-            body,
-        }
+        AstNode::Lambda { span, params, body }
     }
 
     fn postfix(&mut self) -> AstNode {
@@ -1321,7 +1339,10 @@ impl<'a> Parser<'a> {
                 {
                     pos -= 1;
                 }
-                matches!(self.tokens.get(pos).map(|t| &t.token), Some(Token::IdentPlain))
+                matches!(
+                    self.tokens.get(pos).map(|t| &t.token),
+                    Some(Token::IdentPlain)
+                )
             } else {
                 false
             }
@@ -1540,16 +1561,25 @@ impl<'a> Parser<'a> {
                         // Named arg: `name = value`
                         if self.at(Token::IdentPlain) {
                             let next = self.pos + 1;
-                            if matches!(self.tokens.get(next).map(|t| &t.token), Some(Token::Assign)) {
+                            if matches!(
+                                self.tokens.get(next).map(|t| &t.token),
+                                Some(Token::Assign)
+                            ) {
                                 let aname = self.consume().text.clone();
                                 self.consume(); // =
                                 let aval = self.expr();
-                                args.push(CallArg { value: aval, name: Some(aname) });
+                                args.push(CallArg {
+                                    value: aval,
+                                    name: Some(aname),
+                                });
                                 continue;
                             }
                         }
                         let aval = self.expr();
-                        args.push(CallArg { value: aval, name: None });
+                        args.push(CallArg {
+                            value: aval,
+                            name: None,
+                        });
                     }
                     self.expect(Token::RParen);
                     return AstNode::Call {
@@ -1866,10 +1896,16 @@ impl<'a> Parser<'a> {
 
     /// Check if position looks like a bare function definition: `Name( ... ) {` or `Name( ... ) ->`
     fn lookahead_fn_def_at(&self, pos: usize) -> bool {
-        if !matches!(self.tokens.get(pos).map(|t| &t.token), Some(Token::IdentPlain)) {
+        if !matches!(
+            self.tokens.get(pos).map(|t| &t.token),
+            Some(Token::IdentPlain)
+        ) {
             return false;
         }
-        if !matches!(self.tokens.get(pos + 1).map(|t| &t.token), Some(Token::LParen)) {
+        if !matches!(
+            self.tokens.get(pos + 1).map(|t| &t.token),
+            Some(Token::LParen)
+        ) {
             return false;
         }
         // Find matching closing paren
