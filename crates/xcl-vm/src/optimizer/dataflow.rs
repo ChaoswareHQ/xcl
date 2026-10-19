@@ -7,13 +7,13 @@ extern crate alloc;
 
 use crate::bytecode::{
     Instr, OP_ADD_LOCAL_LOCAL, OP_ADD_LOCAL_LOCAL_STORE, OP_ADD_LOCAL_STORE, OP_ADD_INT_LOCAL,
-    OP_DEC_LOCAL, OP_DIV_LOCAL_LOCAL, OP_DIV_LOCAL_STORE,
+    OP_ADD_FLOAT_LOCAL, OP_DEC_LOCAL, OP_DIV_LOCAL_LOCAL, OP_DIV_LOCAL_STORE, OP_DIV_FLOAT_LOCAL,
     OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_HALT, OP_INC_LOCAL,
     OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_CONST_LOCAL,
     OP_LOAD_LOCAL, OP_LOAD_LOCAL_PUSH_INT, OP_LOAD_LOCAL_STORE_LOCAL, OP_LT_LOCAL_LOCAL,
-    OP_MUL_LOCAL_LOCAL, OP_MUL_LOCAL_STORE, OP_MUL_INT_LOCAL,
-    OP_STORE_LOCAL, OP_SUB_LOCAL_LOCAL, OP_SUB_LOCAL_STORE, OP_SUB_INT_LOCAL, OP_WHILE_LT_INT,
-    OP_WHILE_LT_LOCAL,
+    OP_MOD_EQ_INT, OP_MUL_LOCAL_LOCAL, OP_MUL_LOCAL_STORE, OP_MUL_INT_LOCAL, OP_MUL_FLOAT_LOCAL,
+    OP_STORE_LOCAL, OP_SUB_LOCAL_LOCAL, OP_SUB_LOCAL_STORE, OP_SUB_INT_LOCAL, OP_SUB_FLOAT_LOCAL,
+    OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,
 };
 
 #[cfg(not(feature = "std"))]
@@ -354,10 +354,16 @@ pub(crate) fn live_variables(code: &[Instr], blocks: &[BasicBlock]) -> Vec<BTree
                     def_set[bi].insert(instr.c() as u32);
                 }
                 // Constant-operand fused ops: ADD_INT_LOCAL, SUB_INT_LOCAL, etc.
-                // Reads slot b, writes slot b
-                OP_ADD_INT_LOCAL | OP_SUB_INT_LOCAL | OP_MUL_INT_LOCAL => {
-                    use_set[bi].insert(instr.b() as u32);
-                    def_set[bi].insert(instr.b() as u32);
+                // Reads slot a, writes slot a
+                OP_ADD_INT_LOCAL | OP_SUB_INT_LOCAL | OP_MUL_INT_LOCAL
+                | OP_ADD_FLOAT_LOCAL | OP_SUB_FLOAT_LOCAL | OP_MUL_FLOAT_LOCAL | OP_DIV_FLOAT_LOCAL =>
+                {
+                    use_set[bi].insert(instr.a());
+                    def_set[bi].insert(instr.a());
+                }
+                // MOD_EQ_INT: reads slot a, pushes result (no local write)
+                OP_MOD_EQ_INT => {
+                    use_set[bi].insert(instr.a());
                 }
                 // INC/DEC: reads and writes slot a
                 OP_INC_LOCAL | OP_DEC_LOCAL => {

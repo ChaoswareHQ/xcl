@@ -1056,6 +1056,9 @@ impl Compiler {
                     BinaryOperator::Or => OP_OR,
                     BinaryOperator::Coalesce => OP_COALESCE,
                     BinaryOperator::In => OP_IN,
+                    BinaryOperator::Shl => OP_SHL,
+                    BinaryOperator::Shr => OP_SHR,
+                    BinaryOperator::BitAnd => OP_BITAND,
                 };
                 self.emit(Instr::none(opcode));
             }

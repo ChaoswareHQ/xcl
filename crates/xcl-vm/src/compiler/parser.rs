@@ -948,7 +948,7 @@ impl<'a> Parser<'a> {
     }
 
     fn equality(&mut self) -> AstNode {
-        let mut e = self.comparison();
+        let mut e = self.bitwise_and();
         loop {
             let op = match self.current().map(|t| &t.token) {
                 Some(Token::Eq) => BinaryOperator::Eq,
@@ -957,11 +957,30 @@ impl<'a> Parser<'a> {
             };
             let span = self.span();
             self.consume();
-            let r = Box::new(self.comparison());
+            let r = Box::new(self.bitwise_and());
             e = AstNode::BinaryOp {
                 span,
                 left: Box::new(e),
                 op,
+                right: r,
+            };
+        }
+        e
+    }
+
+    fn bitwise_and(&mut self) -> AstNode {
+        let mut e = self.comparison();
+        loop {
+            if !self.at(Token::BitAnd) {
+                break;
+            }
+            let span = self.span();
+            self.consume();
+            let r = Box::new(self.comparison());
+            e = AstNode::BinaryOp {
+                span,
+                left: Box::new(e),
+                op: BinaryOperator::BitAnd,
                 right: r,
             };
         }
@@ -1086,11 +1105,32 @@ impl<'a> Parser<'a> {
     }
 
     fn additive(&mut self) -> AstNode {
-        let mut e = self.multiplicative();
+        let mut e = self.shift();
         loop {
             let op = match self.current().map(|t| &t.token) {
                 Some(Token::Add) => BinaryOperator::Add,
                 Some(Token::Sub) => BinaryOperator::Sub,
+                _ => break,
+            };
+            let span = self.span();
+            self.consume();
+            let r = Box::new(self.shift());
+            e = AstNode::BinaryOp {
+                span,
+                left: Box::new(e),
+                op,
+                right: r,
+            };
+        }
+        e
+    }
+
+    fn shift(&mut self) -> AstNode {
+        let mut e = self.multiplicative();
+        loop {
+            let op = match self.current().map(|t| &t.token) {
+                Some(Token::Shl) => BinaryOperator::Shl,
+                Some(Token::Shr) => BinaryOperator::Shr,
                 _ => break,
             };
             let span = self.span();

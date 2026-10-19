@@ -237,6 +237,8 @@ pub mod runtime;
 pub mod utils;
 
 pub use bytecode::{Bytecode, Instr};
+pub use compiler::lexer;
+pub use compiler::parser;
 pub use compiler::AstNode;
 pub use runtime::{
     BuiltinImpl, DomainCtx, DomainSlot, FuncValue, GlobalOverrideGuard, Group, HandleKind,

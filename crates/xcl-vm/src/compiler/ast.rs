@@ -391,6 +391,12 @@ pub enum BinaryOperator {
     Coalesce,
     /// Membership test: `in`.
     In,
+    /// Left shift: `<<`.
+    Shl,
+    /// Right shift: `>>`.
+    Shr,
+    /// Bitwise AND: `&`.
+    BitAnd,
 }
 
 /// Unary operators supported by XCL expressions.

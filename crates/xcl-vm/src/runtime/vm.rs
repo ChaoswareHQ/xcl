@@ -58,9 +58,6 @@ use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use alloc::vec;
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-#[cfg(feature = "std")]
 use std::sync::Arc;
 
 #[cfg(not(feature = "std"))]
@@ -72,6 +69,19 @@ use crate::bytecode::*;
 use crate::runtime::value::{BuiltinImpl, ImplDescriptor, TAG_INT, TraitDescriptor, TypeDescriptor, Value};
 use bumpalo::Bump;
 use smallvec::SmallVec;
+
+// ── Helper functions for fast hashing ──
+
+/// Fast string hash for field name lookups (FNV-1a).
+#[inline(always)]
+pub fn fast_hash(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xCBF29CE484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001B3);
+    }
+    h
+}
 
 // ── Helper functions for integer arithmetic with overflow fallback ──
 
@@ -903,6 +913,46 @@ impl VM {
                 self.push(Value::bool(a.is_truthy() || b.is_truthy()));
                 Action::Next
             }
+            OP_SHL => {
+                let b = self.pop();
+                let a = self.pop();
+                if a.is_int() && b.is_int() {
+                    let shift = b.as_i48() as u32;
+                    if shift < 64 {
+                        self.push(Value::from_i48(a.as_i48() << shift));
+                    } else {
+                        self.push(Value::from_i48(0));
+                    }
+                } else {
+                    self.push(Value::nil());
+                }
+                Action::Next
+            }
+            OP_SHR => {
+                let b = self.pop();
+                let a = self.pop();
+                if a.is_int() && b.is_int() {
+                    let shift = b.as_i48() as u32;
+                    if shift < 64 {
+                        self.push(Value::from_i48(a.as_i48() >> shift));
+                    } else {
+                        self.push(Value::from_i48(0));
+                    }
+                } else {
+                    self.push(Value::nil());
+                }
+                Action::Next
+            }
+            OP_BITAND => {
+                let b = self.pop();
+                let a = self.pop();
+                if a.is_int() && b.is_int() {
+                    self.push(Value::from_i48(a.as_i48() & b.as_i48()));
+                } else {
+                    self.push(Value::nil());
+                }
+                Action::Next
+            }
             OP_IN => {
                 let c = self.pop();
                 let item = self.pop();
@@ -1181,13 +1231,12 @@ impl VM {
             }
             OP_GET_FIELD => {
                 let field_idx = i.a() as usize;
-                let string_table = self.frames[top].code.string_table.clone();
-                let field = &string_table[field_idx];
                 let target = self.pop();
+                let field = &self.frames[top].code.string_table[field_idx];
 
-                // First try map field access
+                // First try map field access (fast path for dict/struct access)
                 if let Some(map) = target.as_map() {
-                    if let Some(v) = map.get(&**field).copied() {
+                    if let Some(v) = map.get(field.as_ref()).copied() {
                         self.push(v);
                         return Action::Next;
                     }
@@ -1196,7 +1245,7 @@ impl VM {
                 // Then try universal methods (type, super) for non-map or missing fields
                 if let Some(impl_) = self.resolve_universal_method(field) {
                     let impl_copy = *impl_;
-                    let all_args = vec![target];
+                    let all_args = [target];
                     let result = impl_copy.call(self, &all_args);
                     self.push(result);
                     return Action::Next;
@@ -1604,6 +1653,10 @@ impl VM {
                     unsafe {
                         *l.get_unchecked_mut(dest) = Value::from_i48(r);
                     }
+                } else if a.is_float() && b.is_float() {
+                    unsafe {
+                        *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() + b.as_f64());
+                    }
                 } else {
                     unsafe {
                         *l.get_unchecked_mut(dest) = a.add(b, &self.arena);
@@ -1621,6 +1674,10 @@ impl VM {
                     let r = checked_sub_overflow(a.as_i48(), b.as_i48());
                     unsafe {
                         *l.get_unchecked_mut(dest) = Value::from_i48(r);
+                    }
+                } else if a.is_float() && b.is_float() {
+                    unsafe {
+                        *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() - b.as_f64());
                     }
                 } else {
                     unsafe {
@@ -1640,6 +1697,10 @@ impl VM {
                     unsafe {
                         *l.get_unchecked_mut(dest) = Value::from_i48(r);
                     }
+                } else if a.is_float() && b.is_float() {
+                    unsafe {
+                        *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() * b.as_f64());
+                    }
                 } else {
                     unsafe {
                         *l.get_unchecked_mut(dest) = a.mul(b, &self.arena);
@@ -1657,6 +1718,10 @@ impl VM {
                     let r = checked_div_overflow(a.as_i48(), b.as_i48());
                     unsafe {
                         *l.get_unchecked_mut(dest) = Value::from_i48(r);
+                    }
+                } else if a.is_float() && b.is_float() {
+                    unsafe {
+                        *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() / b.as_f64());
                     }
                 } else {
                     unsafe {
@@ -1702,6 +1767,10 @@ impl VM {
                     unsafe {
                         *l.get_unchecked_mut(dest) = Value::from_i48(r);
                     }
+                } else if a.is_float() && b.is_float() {
+                    unsafe {
+                        *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() + b.as_f64());
+                    }
                 } else {
                     unsafe {
                         *l.get_unchecked_mut(dest) = a.add(b, &self.arena);
@@ -1720,6 +1789,10 @@ impl VM {
                     let r = checked_sub_overflow(a.as_i48(), b.as_i48());
                     unsafe {
                         *l.get_unchecked_mut(dest) = Value::from_i48(r);
+                    }
+                } else if a.is_float() && b.is_float() {
+                    unsafe {
+                        *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() - b.as_f64());
                     }
                 } else {
                     unsafe {
@@ -1740,6 +1813,10 @@ impl VM {
                     unsafe {
                         *l.get_unchecked_mut(dest) = Value::from_i48(r);
                     }
+                } else if a.is_float() && b.is_float() {
+                    unsafe {
+                        *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() * b.as_f64());
+                    }
                 } else {
                     unsafe {
                         *l.get_unchecked_mut(dest) = a.mul(b, &self.arena);
@@ -1758,6 +1835,10 @@ impl VM {
                     let r = checked_div_overflow(a.as_i48(), b.as_i48());
                     unsafe {
                         *l.get_unchecked_mut(dest) = Value::from_i48(r);
+                    }
+                } else if a.is_float() && b.is_float() {
+                    unsafe {
+                        *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() / b.as_f64());
                     }
                 } else {
                     unsafe {
@@ -1899,16 +1980,27 @@ impl VM {
                 let dest = i.a() as usize;
                 let str_idx = i.b() as usize;
                 let obj_slot = i.c() as usize;
-                let field_name = self.frames[top].code.string_table[str_idx].to_string();
-                let l = &mut self.frames[top].locals;
-                let obj = unsafe { *l.get_unchecked(obj_slot) };
-                let result = if let Some(map) = obj.as_map() {
-                    map.get(&field_name).copied().unwrap_or(Value::nil())
+                let frame = &mut self.frames[top];
+                let field_name: &str = &frame.code.string_table[str_idx];
+                let obj = unsafe { *frame.locals.get_unchecked(obj_slot) };
+                let result = if let Some(map_obj) = obj.as_map_mut_ref() {
+                    // Fast path: use indexed arrays with pre-computed hashes
+                    let field_hash = fast_hash(field_name.as_bytes());
+                    let mut found = Value::nil();
+                    for (idx, (hash, key)) in map_obj.key_hashes.iter().enumerate() {
+                        if *hash == field_hash && key == field_name {
+                            found = map_obj.key_values[idx];
+                            break;
+                        }
+                    }
+                    found
+                } else if let Some(map) = obj.as_map() {
+                    map.get(field_name).copied().unwrap_or(Value::nil())
                 } else {
                     Value::nil()
                 };
                 unsafe {
-                    *l.get_unchecked_mut(dest) = result;
+                    *frame.locals.get_unchecked_mut(dest) = result;
                 }
                 Action::Next
             }
@@ -1931,6 +2023,10 @@ impl VM {
                     unsafe {
                         *l.get_unchecked_mut(dest) = Value::from_i48(r);
                     }
+                } else if a.is_float() && b.is_float() {
+                    unsafe {
+                        *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() % b.as_f64());
+                    }
                 } else {
                     unsafe {
                         *l.get_unchecked_mut(dest) = a.mod_(b);
@@ -1952,6 +2048,111 @@ impl VM {
                 unsafe {
                     *l.get_unchecked_mut(arr_slot) = arr;
                 }
+                Action::Next
+            }
+
+            // ── Float constant local arithmetic: $x = $x op float_const ──
+            OP_ADD_FLOAT_LOCAL => {
+                let frame = &self.frames[top];
+                let f = f64::from_bits(frame.code.wide_operands[i.b() as usize] as u64);
+                let l = &mut self.frames[top].locals;
+                let idx = i.a() as usize;
+                let v = unsafe { *l.get_unchecked(idx) };
+                if v.is_float() {
+                    unsafe {
+                        *l.get_unchecked_mut(idx) = Value::from_f64(v.as_f64() + f);
+                    }
+                } else if v.tag() == TAG_INT {
+                    unsafe {
+                        *l.get_unchecked_mut(idx) = Value::from_f64(v.as_i48() as f64 + f);
+                    }
+                } else {
+                    unsafe {
+                        *l.get_unchecked_mut(idx) = v.add(Value::from_f64(f), &self.arena);
+                    }
+                }
+                Action::Next
+            }
+            OP_SUB_FLOAT_LOCAL => {
+                let frame = &self.frames[top];
+                let f = f64::from_bits(frame.code.wide_operands[i.b() as usize] as u64);
+                let l = &mut self.frames[top].locals;
+                let idx = i.a() as usize;
+                let v = unsafe { *l.get_unchecked(idx) };
+                if v.is_float() {
+                    unsafe {
+                        *l.get_unchecked_mut(idx) = Value::from_f64(v.as_f64() - f);
+                    }
+                } else if v.tag() == TAG_INT {
+                    unsafe {
+                        *l.get_unchecked_mut(idx) = Value::from_f64(v.as_i48() as f64 - f);
+                    }
+                } else {
+                    unsafe {
+                        *l.get_unchecked_mut(idx) = v.sub_(Value::from_f64(f));
+                    }
+                }
+                Action::Next
+            }
+            OP_MUL_FLOAT_LOCAL => {
+                let frame = &self.frames[top];
+                let f = f64::from_bits(frame.code.wide_operands[i.b() as usize] as u64);
+                let l = &mut self.frames[top].locals;
+                let idx = i.a() as usize;
+                let v = unsafe { *l.get_unchecked(idx) };
+                if v.is_float() {
+                    unsafe {
+                        *l.get_unchecked_mut(idx) = Value::from_f64(v.as_f64() * f);
+                    }
+                } else if v.tag() == TAG_INT {
+                    unsafe {
+                        *l.get_unchecked_mut(idx) = Value::from_f64(v.as_i48() as f64 * f);
+                    }
+                } else {
+                    unsafe {
+                        *l.get_unchecked_mut(idx) = v.mul(Value::from_f64(f), &self.arena);
+                    }
+                }
+                Action::Next
+            }
+            OP_DIV_FLOAT_LOCAL => {
+                let frame = &self.frames[top];
+                let f = f64::from_bits(frame.code.wide_operands[i.b() as usize] as u64);
+                let l = &mut self.frames[top].locals;
+                let idx = i.a() as usize;
+                let v = unsafe { *l.get_unchecked(idx) };
+                if v.is_float() {
+                    unsafe {
+                        *l.get_unchecked_mut(idx) = Value::from_f64(v.as_f64() / f);
+                    }
+                } else if v.tag() == TAG_INT {
+                    unsafe {
+                        *l.get_unchecked_mut(idx) = Value::from_f64(v.as_i48() as f64 / f);
+                    }
+                } else {
+                    unsafe {
+                        *l.get_unchecked_mut(idx) = v.div_(Value::from_f64(f));
+                    }
+                }
+                Action::Next
+            }
+
+            // ── MOD_EQ_INT: locals[a] % b == c ──
+            OP_MOD_EQ_INT => {
+                let l = &mut self.frames[top].locals;
+                let idx = i.a() as usize;
+                let divisor = i.b() as i64;
+                let eq_val = i.c() as i64;
+                let v = unsafe { *l.get_unchecked(idx) };
+                let result = if v.tag() == TAG_INT && divisor != 0 {
+                    let val = v.as_i48();
+                    let mod_result = val % divisor;
+                    Value::bool(mod_result == eq_val)
+                } else {
+                    let mod_val = v.mod_(Value::from_i48(divisor));
+                    Value::bool(mod_val.eq_(Value::from_i48(eq_val)))
+                };
+                self.push(result);
                 Action::Next
             }
 
@@ -2258,6 +2459,14 @@ fn opcode_name(op: u8) -> String {
         OP_MOD_LOCAL_LOCAL_STORE => "OP_MOD_LL_ST",
         OP_LOAD_CONST_LOCAL => "OP_LOAD_CST_L",
         OP_ARRAY_PUSH_LOCAL => "OP_ARR_PUSH_L",
+        OP_ADD_FLOAT_LOCAL => "OP_ADD_FLT_L",
+        OP_SUB_FLOAT_LOCAL => "OP_SUB_FLT_L",
+        OP_MUL_FLOAT_LOCAL => "OP_MUL_FLT_L",
+        OP_DIV_FLOAT_LOCAL => "OP_DIV_FLT_L",
+        OP_MOD_EQ_INT => "OP_MOD_EQ",
+        OP_SHL => "OP_SHL",
+        OP_SHR => "OP_SHR",
+        OP_BITAND => "OP_BITAND",
         OP_INC_LOCAL => "OP_INC_L",
         OP_DEC_LOCAL => "OP_DEC_L",
         OP_ADD_INT_STORE_LOCAL => "OP_ADD_INT_ST",

@@ -1,5 +1,5 @@
 //! Bytecode optimization passes: data flow analysis, dead store elimination,
-//! constant propagation, and loop-invariant code motion.
+//! constant propagation, loop-invariant code motion, and loop unrolling.
 //!
 //! # Pipeline
 //!
@@ -7,10 +7,12 @@
 //! transforms the bytecode in place. The [`optimize`] function runs all passes
 //! in the correct order.
 
+mod cse;
 mod constant_prop;
 mod dataflow;
 mod dead_store;
 mod licm;
+mod loop_unroll;
 
 /// Run all data flow optimization passes on bytecode.
 pub fn optimize(code: &mut Vec<crate::bytecode::Instr>, wide: &mut [i64]) {
@@ -22,6 +24,12 @@ pub fn optimize(code: &mut Vec<crate::bytecode::Instr>, wide: &mut [i64]) {
 
     // Loop-invariant code motion — hoists LOAD_GLOBAL before loops
     licm::loop_invariant_code_motion(code, wide);
+
+    // Common subexpression elimination — removes redundant computations
+    cse::eliminate_common_subexpressions(code, wide);
+
+    // Loop unrolling — reduces branch overhead in tight loops
+    loop_unroll::loop_unroll(code, wide);
 }
 
 #[cfg(test)]

@@ -64,7 +64,7 @@
 //! assert!(!nil.is_truthy());
 //! ```
 
-#[cfg(not(feature = "std"))]
+ #[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
 #[cfg(feature = "std")]
 use std::collections::HashMap;
@@ -169,6 +169,13 @@ pub struct HeapMap {
     pub header: HeapHeader,
     /// Hash map storage for string keys and dynamic values.
     pub data: HashMap<String, Value>,
+    /// Pre-computed hash for each key, stored in insertion order.
+    /// Used for fast field access without re-hashing strings.
+    pub key_hashes: Vec<(u64, String)>,
+    /// Parallel values array indexed by position in `key_hashes`.
+    pub key_values: Vec<Value>,
+    /// Whether the index arrays are in sync with the HashMap.
+    pub index_dirty: bool,
 }
 
 /// Heap-allocated function or closure value.
@@ -365,6 +372,14 @@ impl Value {
     /// * `arena` - Target bump arena for allocation.
     #[inline(always)]
     pub fn from_map(m: HashMap<String, Value>, arena: &bumpalo::Bump) -> Self {
+        // Build indexed arrays for fast field access
+        let mut key_hashes = Vec::with_capacity(m.len());
+        let mut key_values = Vec::with_capacity(m.len());
+        for (k, v) in &m {
+            let hash = crate::runtime::vm::fast_hash(k.as_bytes());
+            key_hashes.push((hash, k.clone()));
+            key_values.push(*v);
+        }
         let obj = arena.alloc(HeapMap {
             header: HeapHeader {
                 kind: KIND_MAP,
@@ -373,6 +388,9 @@ impl Value {
                 variant: VARIANT_DEFAULT,
             },
             data: m,
+            key_hashes,
+            key_values,
+            index_dirty: false,
         });
         Value(TAG_PTR | ((obj as *const HeapMap as u64) & PAYLOAD))
     }
@@ -511,6 +529,16 @@ impl Value {
     pub fn as_map(self) -> Option<&'static HashMap<String, Value>> {
         if self.heap_kind() == Some(KIND_MAP) {
             Some(unsafe { &(*(self.as_ptr::<HeapMap>())).data })
+        } else {
+            None
+        }
+    }
+
+    /// Returns a mutable reference to the underlying HeapMap if this value is a map.
+    #[inline(always)]
+    pub fn as_map_mut_ref(self) -> Option<&'static HeapMap> {
+        if self.heap_kind() == Some(KIND_MAP) {
+            Some(unsafe { &*(self.as_ptr::<HeapMap>()) })
         } else {
             None
         }
@@ -996,6 +1024,14 @@ impl Value {
 
     /// Creates a typed heap map with specified subtype and variant tags, leaked to static lifetime.
     pub fn from_map_boxed_typed_v(m: HashMap<String, Value>, subtype: u16, variant: u8) -> Self {
+        // Build indexed arrays for fast field access
+        let mut key_hashes = Vec::with_capacity(m.len());
+        let mut key_values = Vec::with_capacity(m.len());
+        for (k, v) in &m {
+            let hash = crate::runtime::vm::fast_hash(k.as_bytes());
+            key_hashes.push((hash, k.clone()));
+            key_values.push(*v);
+        }
         let obj = Box::leak(Box::new(HeapMap {
             header: HeapHeader {
                 kind: KIND_MAP,
@@ -1004,6 +1040,9 @@ impl Value {
                 variant,
             },
             data: m,
+            key_hashes,
+            key_values,
+            index_dirty: false,
         }));
         Value(TAG_PTR | ((obj as *const HeapMap as u64) & PAYLOAD))
     }

@@ -208,6 +208,27 @@ pub const OP_LOAD_CONST_LOCAL: u8 = 108;
 /// Appends `locals[b]` in-place to the array in `locals[a]`.
 pub const OP_ARRAY_PUSH_LOCAL: u8 = 109;
 
+/// Fused: load local, add float constant from wide_operands[b], store back (`$x = $x + c`).
+pub const OP_ADD_FLOAT_LOCAL: u8 = 110;
+/// Fused: load local, sub float constant from wide_operands[b], store back (`$x = $x - c`).
+pub const OP_SUB_FLOAT_LOCAL: u8 = 111;
+/// Fused: load local, mul float constant from wide_operands[b], store back (`$x = $x * c`).
+pub const OP_MUL_FLOAT_LOCAL: u8 = 112;
+/// Fused: load local, div float constant from wide_operands[b], store back (`$x = $x / c`).
+pub const OP_DIV_FLOAT_LOCAL: u8 = 113;
+
+/// Fused: modulo and equality test (`locals[a] % b == c`).
+/// Pops a local, computes modulo, and compares with the equality constant.
+/// Operand `a` = local slot, `b` = modulo divisor, `c` = equality value.
+pub const OP_MOD_EQ_INT: u8 = 114;
+
+/// Bitwise left shift: pop two values, push `a << b`.
+pub const OP_SHL: u8 = 115;
+/// Bitwise right shift: pop two values, push `a >> b`.
+pub const OP_SHR: u8 = 116;
+/// Bitwise AND: pop two values, push `a & b`.
+pub const OP_BITAND: u8 = 117;
+
 /// Math intrinsic IDs for [`OP_MATH_UNARY`].
 pub const MATH_SQRT: u8 = 0;
 pub const MATH_SIN: u8 = 1;

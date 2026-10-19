@@ -164,36 +164,36 @@ $range3 = 5..100
 # ============================================
 
 # Basic function
-greet(name) {
-    print "Hello, " name "!"
+greet($name) {
+    print "Hello, " $name "!"
 }
 
 # Function with return type
-add(a, b) -> int {
-    a + b
+add($a, $b) -> int {
+    $a + $b
 }
 
 # Function with type-annotated params
-divide(x: float, y: float) -> float {
-    x / y
+divide($x: float, $y: float) -> float {
+    $x / $y
 }
 
 # Function with default params
-connect(host, port = 443) {
-    print "Connecting to " host ":" port
+connect($host, $port = 443) {
+    print "Connecting to " $host ":" $port
 }
 
 # Function with return statement
-max(a, b) {
-    if a > b {
-        return a
+max($a, $b) {
+    if $a > $b {
+        return $a
     }
-    return b
+    return $b
 }
 
 # Function with multiple statements
-complex(x, y) {
-    $temp = x + y
+complex($x, $y) {
+    $temp = $x + $y
     $result = $temp * 2
     if $result > 100 {
         return 100
@@ -205,16 +205,16 @@ complex(x, y) {
 # 9. LAMBDAS
 # ============================================
 
-# Single-expression lambda
-$double = (x) -> x * 2
-$square = (x) -> x * x
+# Pipe lambda — single param
+$double = |$x| $x * 2
+$square = |$x| $x * $x
 
-# Multi-parameter lambda
-$add = (a, b) -> a + b
+# Pipe lambda — multiple params
+$add = |$a, $b| $a + $b
 
 # Block lambda
-$process = (item) {
-    $upper = text.upper item
+$process = |$item| {
+    $upper = text.upper $item
     text.trim $upper
 }
 
@@ -230,14 +230,14 @@ $task = {
 
 # Simple pipeline
 $result1 = [1, 2, 3, 4, 5]
-    |> collections.filter (x) -> x > 2
-    |> collections.map (x) -> x * 10
+    |> collections.filter |$x| $x > 2
+    |> collections.map |$x| $x * 10
 
 # Pipeline with reduce
 $result2 = [1, 2, 3, 4, 5]
-    |> collections.filter (x) -> x > 2
-    |> collections.map (x) -> x * 10
-    |> collections.reduce 0 (acc, x) -> acc + x
+    |> collections.filter |$x| $x > 2
+    |> collections.map |$x| $x * 10
+    |> collections.reduce 0 |$acc, $x| $acc + $x
 
 # ============================================
 # 11. CONTROL FLOW
@@ -336,9 +336,9 @@ summary() -> str
 # ============================================
 
 MyService is CloudService {
-bucket_create(name) {
+bucket_create($name) {
         api.create "storage/buckets" {
-            name: name
+            name: $name
         }
     }
 bucket_list() {
@@ -498,7 +498,7 @@ $result = {
 # ============================================
 # 22. COMPLEX REAL-WORLD EXAMPLE
 # ============================================
-deploy(account, domain) {
+deploy($account, $domain) {
     # Load credentials
     $env = io.read_env ".env"
     if $env.is_err {
@@ -520,7 +520,7 @@ deploy(account, domain) {
         $dns = api.list "dns/records"
         if $dns.is_ok {
             $matching = collections.filter $dns.value {
-                |record| record.name == $domain
+                |$record| $record.name == $domain
             }
 
             if collections.array_len $matching > 0 {
@@ -581,7 +581,7 @@ $concat = "Hello" ", " "World" "!"
 $multi_arg = math.add 1 2
 
 # Lambda in pipeline
-$pipeline_lambda = [1, 2, 3] |> collections.map (x) -> x * 2
+$pipeline_lambda = [1, 2, 3] |> collections.map |$x| $x * 2
 
 # Dict with function calls
 $dict_calls = {
@@ -627,7 +627,7 @@ $dict_arg = api.create "dns/records" {
 $array_arg = collections.array_len [1, 2, 3]
 
 # Lambda arg
-$lambda_arg = collections.map [1, 2, 3] (x) -> x * 2
+$lambda_arg = collections.map [1, 2, 3] |$x| $x * 2
 
 # ============================================
 # 26. COMPOUND ASSIGNMENTS

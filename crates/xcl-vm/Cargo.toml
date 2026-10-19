@@ -23,7 +23,12 @@ linkme.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+mlua.workspace = true
 
 [[bench]]
 name = "dispatch"
+harness = false
+
+[[bench]]
+name = "luau_comparison"
 harness = false

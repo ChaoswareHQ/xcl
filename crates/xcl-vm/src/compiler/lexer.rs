@@ -215,6 +215,12 @@ pub enum Token {
     /// Greater than or equal operator `>=`.
     #[token(">=")]
     Ge,
+    /// Left shift operator `<<`.
+    #[token("<<")]
+    Shl,
+    /// Right shift operator `>>`.
+    #[token(">>")]
+    Shr,
     /// Less than operator `<`.
     #[token("<")]
     Lt,
@@ -266,6 +272,9 @@ pub enum Token {
     /// Modulo operator `%`.
     #[token("%")]
     Mod,
+    /// Bitwise AND operator `&`.
+    #[token("&")]
+    BitAnd,
     /// Assignment operator `=`.
     #[token("=")]
     Assign,

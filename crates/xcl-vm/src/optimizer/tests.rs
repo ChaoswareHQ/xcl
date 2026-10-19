@@ -128,6 +128,27 @@ fn test_licm_with_real_compiled_bytecode() {
     assert_eq!(result.as_int(), 100, "sum should be 100");
 }
 
+
+#[test]
+fn test_shift_operators() {
+    // Test shift left, shift right, and bitwise AND
+    use crate::{evaluate, VM};
+
+    let mut vm = VM::new();
+
+    // Left shift: 5 << 3 = 40
+    let result = evaluate("5 << 3", &mut vm);
+    assert_eq!(result.as_int(), 40, "5 << 3 should be 40");
+
+    // Right shift: 40 >> 2 = 10
+    let result = evaluate("40 >> 2", &mut vm);
+    assert_eq!(result.as_int(), 10, "40 >> 2 should be 10");
+
+    // Bitwise AND: 5 & 3 = 1
+    let result = evaluate("5 & 3", &mut vm);
+    assert_eq!(result.as_int(), 1, "5 & 3 should be 1");
+}
+
 #[test]
 fn test_licm_does_not_corrupt_benchmark_bytecode() {
     // Verify that LICM does not modify bytecode for programs without LOAD_GLOBAL in loops

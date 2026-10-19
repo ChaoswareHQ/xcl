@@ -488,5 +488,144 @@ fn peephole_at(code: &mut Vec<Instr>, wide: &mut [i64], i: usize, instr: Instr) 
         return true;
     }
 
+    // === NEW SUPEROPERATORS ===
+
+    // Pattern 29: Float constant fusion — LOAD_LOCAL a; PUSH_FLOAT w; OP; STORE_LOCAL a
+    // → OP_ADD_FLOAT_LOCAL a, w (like ADD_INT_LOCAL but for floats)
+    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        let next3 = code[i + 3];
+        if next.op() == OP_PUSH_FLOAT
+            && next3.op() == OP_STORE_LOCAL
+            && next3.a() == instr.a()
+        {
+            let arith_op = match next2.op() {
+                OP_ADD => Some(OP_ADD_FLOAT_LOCAL),
+                OP_SUB => Some(OP_SUB_FLOAT_LOCAL),
+                OP_MUL => Some(OP_MUL_FLOAT_LOCAL),
+                OP_DIV => Some(OP_DIV_FLOAT_LOCAL),
+                _ => None,
+            };
+            if let Some(fused) = arith_op {
+                code[i] = Instr::a2(fused, instr.a(), next.a() as u16);
+                drain_and_patch(code, wide, i + 1..=i + 3);
+                return true;
+            }
+        }
+    }
+
+    // Pattern 30: Modulo+equality fusion — LOAD_LOCAL a; PUSH_INT d; MOD; PUSH_INT v; EQ
+    // → OP_MOD_EQ_INT a, d, v (for $i % 2 == 0 patterns)
+    if op == OP_LOAD_LOCAL && code.len() >= i + 5 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        let next3 = code[i + 3];
+        let next4 = code[i + 4];
+        if next.op() == OP_PUSH_INT
+            && next.a() <= u16::MAX as u32
+            && next2.op() == OP_MOD
+            && next3.op() == OP_PUSH_INT
+            && next3.a() <= u8::MAX as u32
+            && next4.op() == OP_EQ
+        {
+            code[i] = Instr::make(
+                OP_MOD_EQ_INT,
+                instr.a(),
+                next.a() as u16,
+                next3.a() as u8,
+            );
+            drain_and_patch(code, wide, i + 1..=i + 4);
+            return true;
+        }
+    }
+
+    // === STRENGTH REDUCTION ===
+
+    // Pattern 31: Multiply by power of 2 → shift — PUSH_INT (2^n); MUL → PUSH_INT n; SHL
+    // e.g. $x * 4 → $x << 2
+    if op == OP_PUSH_INT && code.len() >= i + 2 {
+        let next = code[i + 1];
+        if next.op() == OP_MUL {
+            let val = instr.a() as u64;
+            if val > 0 && val.is_power_of_two() && val <= 64 {
+                let shift = val.trailing_zeros();
+                code[i] = Instr::a1(OP_PUSH_INT, shift as u32);
+                code[i + 1] = Instr::none(OP_SHL);
+                return true;
+            }
+        }
+    }
+
+    // Pattern 32: Divide by power of 2 → shift — PUSH_INT (2^n); DIV → PUSH_INT n; SHR
+    // e.g. $x / 8 → $x >> 3 (only for positive integers)
+    if op == OP_PUSH_INT && code.len() >= i + 2 {
+        let next = code[i + 1];
+        if next.op() == OP_DIV {
+            let val = instr.a() as u64;
+            if val > 0 && val.is_power_of_two() && val <= 64 {
+                let shift = val.trailing_zeros();
+                code[i] = Instr::a1(OP_PUSH_INT, shift as u32);
+                code[i + 1] = Instr::none(OP_SHR);
+                return true;
+            }
+        }
+    }
+
+    // Pattern 33: Modulo by power of 2 → bitwise AND — PUSH_INT (2^n); MOD → PUSH_INT (2^n-1); BITAND
+    // e.g. $x % 8 → $x & 7
+    if op == OP_PUSH_INT && code.len() >= i + 2 {
+        let next = code[i + 1];
+        if next.op() == OP_MOD {
+            let val = instr.a() as u64;
+            if val > 0 && val.is_power_of_two() {
+                let mask = val - 1;
+                if mask <= u32::MAX as u64 {
+                    code[i] = Instr::a1(OP_PUSH_INT, mask as u32);
+                    code[i + 1] = Instr::none(OP_BITAND);
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Pattern 34: Constant shift folding — PUSH_INT a; PUSH_INT b; SHL → PUSH_INT (a << b)
+    if op == OP_PUSH_INT && code.len() >= i + 3 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        if next.op() == OP_PUSH_INT && (next2.op() == OP_SHL || next2.op() == OP_SHR) {
+            let a = instr.a() as i64;
+            let b = next.a() as u32;
+            if b < 64 {
+                let result = if next2.op() == OP_SHL {
+                    (a as i128) << b
+                } else {
+                    (a as i128) >> b
+                };
+                if result >= 0 && result <= u32::MAX as i128 {
+                    code[i] = Instr::a1(OP_PUSH_INT, result as u32);
+                    drain_and_patch(code, wide, i + 1..=i + 2);
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Pattern 35: Constant bitwise AND folding — PUSH_INT a; PUSH_INT b; BITAND → PUSH_INT (a & b)
+    if op == OP_PUSH_INT && code.len() >= i + 3 {
+        let next = code[i + 1];
+        let next2 = code[i + 2];
+        if next.op() == OP_PUSH_INT && next2.op() == OP_BITAND {
+            let a = instr.a() as i64;
+            let b = next.a() as i64;
+            let result = a & b;
+            if result >= 0 && result <= u32::MAX as i64 {
+                code[i] = Instr::a1(OP_PUSH_INT, result as u32);
+                drain_and_patch(code, wide, i + 1..=i + 2);
+                return true;
+            }
+        }
+    }
+
     false
 }
