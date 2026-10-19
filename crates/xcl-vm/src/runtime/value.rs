@@ -64,10 +64,8 @@
 //! assert!(!nil.is_truthy());
 //! ```
 
- #[cfg(not(feature = "std"))]
-use hashbrown::HashMap;
-#[cfg(feature = "std")]
-use std::collections::HashMap;
+/// Internal map type using hashbrown's fast hasher (always hashbrown, regardless of std feature).
+pub type XclMap = hashbrown::HashMap<String, Value>;
 
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
@@ -167,8 +165,8 @@ pub struct HeapArray {
 pub struct HeapMap {
     /// Common object header.
     pub header: HeapHeader,
-    /// Hash map storage for string keys and dynamic values.
-    pub data: HashMap<String, Value>,
+    /// Hash map storage for string keys and dynamic values (hashbrown for fast hashing).
+    pub data: XclMap,
     /// Pre-computed hash for each key, stored in insertion order.
     /// Used for fast field access without re-hashing strings.
     pub key_hashes: Vec<(u64, String)>,
@@ -371,14 +369,17 @@ impl Value {
     /// * `m` - Hash map of keys and values.
     /// * `arena` - Target bump arena for allocation.
     #[inline(always)]
-    pub fn from_map(m: HashMap<String, Value>, arena: &bumpalo::Bump) -> Self {
+    pub fn from_map(m: std::collections::HashMap<String, Value>, arena: &bumpalo::Bump) -> Self {
         // Build indexed arrays for fast field access
-        let mut key_hashes = Vec::with_capacity(m.len());
-        let mut key_values = Vec::with_capacity(m.len());
+        let len = m.len();
+        let mut key_hashes = Vec::with_capacity(len);
+        let mut key_values = Vec::with_capacity(len);
+        let mut data = XclMap::with_capacity(len);
         for (k, v) in &m {
             let hash = crate::runtime::vm::fast_hash(k.as_bytes());
             key_hashes.push((hash, k.clone()));
             key_values.push(*v);
+            data.insert(k.clone(), *v);
         }
         let obj = arena.alloc(HeapMap {
             header: HeapHeader {
@@ -387,7 +388,31 @@ impl Value {
                 subtype: SUBTYPE_NONE,
                 variant: VARIANT_DEFAULT,
             },
-            data: m,
+            data,
+            key_hashes,
+            key_values,
+            index_dirty: false,
+        });
+        Value(TAG_PTR | ((obj as *const HeapMap as u64) & PAYLOAD))
+    }
+
+    /// Internal fast constructor for maps already built with XclMap and pre-computed key hashes.
+    /// Used by op_make_dict to avoid double hashing and allocation.
+    #[inline(always)]
+    pub(crate) fn from_map_xcl(
+        data: XclMap,
+        key_hashes: Vec<(u64, String)>,
+        key_values: Vec<Value>,
+        arena: &bumpalo::Bump,
+    ) -> Self {
+        let obj = arena.alloc(HeapMap {
+            header: HeapHeader {
+                kind: KIND_MAP,
+                flags: 0,
+                subtype: SUBTYPE_NONE,
+                variant: VARIANT_DEFAULT,
+            },
+            data,
             key_hashes,
             key_values,
             index_dirty: false,
@@ -526,7 +551,7 @@ impl Value {
 
     /// Returns a static reference to the underlying dictionary map if this value is a map.
     #[inline(always)]
-    pub fn as_map(self) -> Option<&'static HashMap<String, Value>> {
+    pub fn as_map(self) -> Option<&'static XclMap> {
         if self.heap_kind() == Some(KIND_MAP) {
             Some(unsafe { &(*(self.as_ptr::<HeapMap>())).data })
         } else {
@@ -563,6 +588,23 @@ impl Value {
             Some(unsafe { (*ptr).header.variant })
         } else {
             None
+        }
+    }
+
+    /// Fast map lookup using pre-computed key hashes instead of re-hashing via HashMap.
+    /// Falls back to the HashMap when index_dirty is true.
+    #[inline(always)]
+    pub fn map_get_fast(map: &HeapMap, key: &str) -> Option<Value> {
+        if !map.index_dirty {
+            let h = crate::runtime::vm::fast_hash(key.as_bytes());
+            for (i, (kh, k)) in map.key_hashes.iter().enumerate() {
+                if *kh == h && k == key {
+                    return Some(map.key_values[i]);
+                }
+            }
+            None
+        } else {
+            map.data.get(key).copied()
         }
     }
 
@@ -683,9 +725,21 @@ impl Value {
             return Self::from_array(v, arena);
         }
         if self.tag() == TAG_PTR || other.tag() == TAG_PTR {
+            // Fast path: both are strings — use borrowed slices and one allocation
+            if let (Some(a), Some(b)) = (self.as_str(), other.as_str()) {
+                let mut s = String::with_capacity(a.len() + b.len());
+                s.push_str(a);
+                s.push_str(b);
+                return Self::from_str(s, arena);
+            }
+
+            // Mixed types (e.g. int + string): avoid format! macro
             let a = self.as_string();
             let b = other.as_string();
-            return Self::from_str(format!("{a}{b}"), arena);
+            let mut s = String::with_capacity(a.len() + b.len());
+            s.push_str(&a);
+            s.push_str(&b);
+            return Self::from_str(s, arena);
         }
         Self::nil()
     }
@@ -1018,19 +1072,22 @@ impl Value {
     }
 
     /// Allocates a map with static lifetime (leaked Box).
-    pub fn from_map_boxed(m: HashMap<String, Value>) -> Self {
+    pub fn from_map_boxed(m: std::collections::HashMap<String, Value>) -> Self {
         Self::from_map_boxed_typed_v(m, SUBTYPE_NONE, VARIANT_DEFAULT)
     }
 
     /// Creates a typed heap map with specified subtype and variant tags, leaked to static lifetime.
-    pub fn from_map_boxed_typed_v(m: HashMap<String, Value>, subtype: u16, variant: u8) -> Self {
+    pub fn from_map_boxed_typed_v(m: std::collections::HashMap<String, Value>, subtype: u16, variant: u8) -> Self {
         // Build indexed arrays for fast field access
-        let mut key_hashes = Vec::with_capacity(m.len());
-        let mut key_values = Vec::with_capacity(m.len());
+        let len = m.len();
+        let mut key_hashes = Vec::with_capacity(len);
+        let mut key_values = Vec::with_capacity(len);
+        let mut data = XclMap::with_capacity(len);
         for (k, v) in &m {
             let hash = crate::runtime::vm::fast_hash(k.as_bytes());
             key_hashes.push((hash, k.clone()));
             key_values.push(*v);
+            data.insert(k.clone(), *v);
         }
         let obj = Box::leak(Box::new(HeapMap {
             header: HeapHeader {
@@ -1039,7 +1096,7 @@ impl Value {
                 subtype,
                 variant,
             },
-            data: m,
+            data,
             key_hashes,
             key_values,
             index_dirty: false,
@@ -1275,6 +1332,8 @@ pub struct FuncValue {
     pub closure_captures: Vec<String>,
     /// Captured environment bindings mapping name to value.
     pub closure_env: Vec<(String, Value)>,
+    /// True if the function body references special variables ($1, $#, $@, $*).
+    pub uses_special_vars: bool,
 }
 
 impl PartialEq for FuncValue {

@@ -11,7 +11,7 @@ mod core_ops {
     use crate::Instr;
     use crate::runtime::opcode::OpcodeResult;
     use crate::runtime::value::Value;
-    use crate::runtime::vm::VM;
+    use crate::runtime::vm::{fast_hash, VM};
 
     // ── Phase A + Tier 1: Stack/constants ──
 
@@ -65,11 +65,10 @@ mod core_ops {
         OpcodeResult::Next
     }
 
-    /// Pushes an interned string indexed from `string_table` by operand `a`.
+    /// Pushes an interned string indexed from `string_values` by operand `a`.
     #[xcl_op(code = 7, arity = 0, stack = "0 -> 1")]
     fn op_push_str(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
-        let s = vm.frames[top].code.string_table[instr.a() as usize].to_string();
-        vm.push(Value::from_str(s, &vm.arena));
+        vm.push(vm.frames[top].code.string_values[instr.a() as usize]);
         OpcodeResult::Next
     }
 
@@ -448,14 +447,21 @@ mod core_ops {
     #[xcl_op(code = 36, arity = 0, stack = "2n -> 1")]
     fn op_make_dict(vm: &mut VM, _top: usize, instr: Instr) -> OpcodeResult {
         let n = instr.a() as usize;
-        let mut m: std::collections::HashMap<String, Value> =
-            std::collections::HashMap::with_capacity(n);
+        // Build indexed arrays for fast field access using hashbrown directly
+        let mut key_hashes = Vec::with_capacity(n);
+        let mut key_values = Vec::with_capacity(n);
+        let mut data = crate::runtime::value::XclMap::with_capacity(n);
         for _ in 0..n {
             let v = vm.pop();
             let k = vm.pop();
-            m.insert(k.as_string(), v);
+            // Fast path: if key is a string, use as_str() to avoid as_string() formatting
+            let key_str = k.as_str().map(String::from).unwrap_or_else(|| k.as_string());
+            let hash = fast_hash(key_str.as_bytes());
+            key_hashes.push((hash, key_str.clone()));
+            key_values.push(v);
+            data.insert(key_str, v);
         }
-        vm.push(Value::from_map(m, &vm.arena));
+        vm.push(Value::from_map_xcl(data, key_hashes, key_values, &vm.arena));
         OpcodeResult::Next
     }
 
@@ -468,9 +474,9 @@ mod core_ops {
             let i = idx.as_int();
             let i = if i < 0 { arr.len() as i64 + i } else { i };
             arr.get(i as usize).copied().unwrap_or(Value::nil())
-        } else if let Some(m) = target.as_map() {
+        } else if let Some(map_obj) = target.as_map_mut_ref() {
             idx.as_str()
-                .and_then(|k| m.get(k).copied())
+                .and_then(|k| Value::map_get_fast(map_obj, k))
                 .unwrap_or(Value::nil())
         } else {
             Value::nil()
@@ -691,12 +697,20 @@ mod core_ops {
     #[xcl_op(code = 32, arity = 0, stack = "n+1 -> 1")]
     fn op_call(vm: &mut VM, _top: usize, instr: Instr) -> OpcodeResult {
         let n = instr.a() as usize;
-        let mut args = Vec::with_capacity(n);
+        let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(n);
         for _ in 0..n {
             args.push(vm.pop());
         }
         args.reverse();
         let callee = vm.pop();
+
+        // 4-entry direct-mapped callee cache
+        let slot = (callee.0 as usize) & 3;
+        if callee == vm.call_cache[slot].0 {
+            if let Some(f) = vm.call_cache[slot].1.as_func() {
+                return vm.enter_call_from_op(f, &args);
+            }
+        }
 
         if let Some(name) = callee.as_str() {
             // 1. Check global builtins first
@@ -717,7 +731,8 @@ mod core_ops {
                     if globals_idx < vm.globals.len() {
                         let func = vm.globals[globals_idx];
                         if let Some(f) = func.as_func() {
-                            return vm.enter_call_from_op(f.clone(), args);
+                            vm.call_cache[slot] = (callee, func);
+                            return vm.enter_call_from_op(f, &args);
                         }
                     }
                 }
@@ -743,10 +758,10 @@ mod core_ops {
                     .find_map(|(i, a)| a.as_func().map(|f| (i, f.clone())))
                 {
                     let call_args: Vec<Value> = args
-                        .into_iter()
+                        .iter()
                         .enumerate()
                         .filter(|(i, _)| *i != func_idx)
-                        .map(|(_, v)| v)
+                        .map(|(_, v)| *v)
                         .collect();
                     let &didx = vm.domain_index.get(name).unwrap();
                     let slot = &vm.domain_table[didx as usize];
@@ -801,12 +816,108 @@ mod core_ops {
             let found = vm
                 .globals
                 .iter()
-                .find_map(|g| g.as_func().filter(|f| &*f.name == name).cloned());
-            if let Some(func) = found {
-                return vm.enter_call_from_op(func, args);
+                .find_map(|g| g.as_func().filter(|f| &*f.name == name).map(|_| *g));
+            if let Some(func_val) = found {
+                vm.call_cache[slot] = (callee, func_val);
+                if let Some(f) = func_val.as_func() {
+                    return vm.enter_call_from_op(f, &args);
+                }
             }
         } else if let Some(func) = callee.as_func() {
-            return vm.enter_call_from_op(func.clone(), args);
+            return vm.enter_call_from_op(func, &args);
+        }
+        vm.push(Value::nil());
+        OpcodeResult::Next
+    }
+
+    /// Tail-call: pops args and callee, resolves the function, and reuses the current frame
+    /// instead of pushing a new one. Operand `a` = arg count.
+    #[xcl_op(code = 123, arity = 0, stack = "n+1 -> 0")]
+    fn op_tail_call(vm: &mut VM, _top: usize, instr: Instr) -> OpcodeResult {
+        let n = instr.a() as usize;
+        let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(n);
+        for _ in 0..n {
+            args.push(vm.pop());
+        }
+        args.reverse();
+        let callee = vm.pop();
+
+        // Resolve the function (same logic as OP_CALL, using the 4-entry cache)
+        let func = if let Some(name) = callee.as_str() {
+            // 1. Check global builtins first
+            if let Some(&idx) = vm.global_index.get(name) {
+                let gt_len = vm.global_table.len();
+                if (idx as usize) < gt_len {
+                    if let Some(Some(impl_)) = vm.global_table.get(idx as usize) {
+                        let impl_copy = *impl_;
+                        let result = impl_copy.call(vm, &args);
+                        // Truncate operand stack and push result
+                        if let Some(frame) = vm.frames.last() {
+                            vm.stack.truncate(frame.stack_base as usize);
+                        }
+                        vm.push(result);
+                        // Reuse current frame: reset ip and code
+                        if let Some(frame) = vm.frames.last_mut() {
+                            frame.ip = instr.a(); // will be adjusted by caller
+                        }
+                        return OpcodeResult::Next;
+                    }
+                }
+                // Check user-defined globals
+                if idx >= gt_len as u32 {
+                    let globals_idx = (idx - gt_len as u32) as usize;
+                    if globals_idx < vm.globals.len() {
+                        let func_val = vm.globals[globals_idx];
+                        if let Some(f) = func_val.as_func() {
+                            let slot = (callee.0 as usize) & 3;
+                            vm.call_cache[slot] = (callee, func_val);
+                            return vm.enter_tail_call(f, &args);
+                        }
+                    }
+                }
+            }
+            // 2. Check domain methods
+            if name.split('.').count() == 2 {
+                if let Some(dot_pos) = name.find('.') {
+                    let domain = &name[..dot_pos];
+                    let method = &name[dot_pos + 1..];
+                    if let Some(impl_) = vm.resolve_domain_method(domain, method) {
+                        let impl_copy = *impl_;
+                        let result = impl_copy.call(vm, &args);
+                        if let Some(frame) = vm.frames.last() {
+                            vm.stack.truncate(frame.stack_base as usize);
+                        }
+                        vm.push(result);
+                        return OpcodeResult::Next;
+                    }
+                }
+            }
+            // 3. Fallback: search all globals by name
+            let found = vm
+                .globals
+                .iter()
+                .find_map(|g| g.as_func().filter(|f| &*f.name == name).map(|_| *g));
+            if let Some(func_val) = found {
+                let slot = (callee.0 as usize) & 3;
+                vm.call_cache[slot] = (callee, func_val);
+                if let Some(f) = func_val.as_func() {
+                    return vm.enter_tail_call(f, &args);
+                }
+            }
+            None
+        } else if let Some(func) = callee.as_func() {
+            Some(func.clone())
+        } else {
+            None
+        };
+
+        if let Some(f) = func {
+            return vm.enter_tail_call(&f, &args);
+        }
+
+        // Fallback: push nil and return normally
+        if let Some(frame) = vm.frames.last() {
+            vm.stack.truncate(frame.stack_base as usize);
         }
         vm.push(Value::nil());
         OpcodeResult::Next
@@ -819,8 +930,9 @@ mod core_ops {
         let target = vm.pop();
         let field = &vm.frames[top].code.string_table[field_idx];
 
-        if let Some(map) = target.as_map() {
-            if let Some(v) = map.get(field.as_ref()).copied() {
+        // Fast path: use pre-computed key hashes
+        if let Some(map_obj) = target.as_map_mut_ref() {
+            if let Some(v) = Value::map_get_fast(map_obj, field) {
                 vm.push(v);
                 return OpcodeResult::Next;
             }
@@ -993,6 +1105,15 @@ mod core_ops {
                     }
                 }
             }
+        }
+
+        // Map property lookup: if receiver is a map and no args, return the field value
+        if nargs == 0
+            && let Some(map) = receiver.as_map()
+            && let Some(v) = map.get(method_name.as_ref())
+        {
+            vm.push(*v);
+            return OpcodeResult::Next;
         }
 
         if let Some(impl_) = vm.resolve_universal_method(method_name) {
@@ -1194,7 +1315,6 @@ mod core_ops {
             unsafe {
                 *f.locals.get_unchecked_mut(var_slot) = Value::from_i48(next_val);
             }
-            f.ip += 1;
             OpcodeResult::Next
         } else {
             let loop_ip = f.ip;
@@ -1576,9 +1696,9 @@ mod core_ops {
             let i = idx.as_int();
             let i = if i < 0 { arr.len() as i64 + i } else { i };
             arr.get(i as usize).copied().unwrap_or(Value::nil())
-        } else if let Some(m) = target.as_map() {
+        } else if let Some(map_obj) = target.as_map_mut_ref() {
             idx.as_str()
-                .and_then(|k| m.get(k).copied())
+                .and_then(|k| Value::map_get_fast(map_obj, k))
                 .unwrap_or(Value::nil())
         } else {
             Value::nil()
@@ -1599,17 +1719,7 @@ mod core_ops {
         let field_name: &str = &frame.code.string_table[str_idx];
         let obj = unsafe { *frame.locals.get_unchecked(obj_slot) };
         let result = if let Some(map_obj) = obj.as_map_mut_ref() {
-            let field_hash = crate::runtime::vm::fast_hash(field_name.as_bytes());
-            let mut found = Value::nil();
-            for (idx, (hash, key)) in map_obj.key_hashes.iter().enumerate() {
-                if *hash == field_hash && key == field_name {
-                    found = map_obj.key_values[idx];
-                    break;
-                }
-            }
-            found
-        } else if let Some(map) = obj.as_map() {
-            map.get(field_name).copied().unwrap_or(Value::nil())
+            Value::map_get_fast(map_obj, field_name).unwrap_or(Value::nil())
         } else {
             Value::nil()
         };
@@ -1657,7 +1767,7 @@ mod core_ops {
             0 => Value::from_i48(b as i64),
             1 => {
                 let bits = vm.frames[top].code.wide_operands[b as usize];
-                Value::from_f64(bits as f64)
+                Value::from_f64(f64::from_bits(bits as u64))
             }
             2 => {
                 let s = vm.frames[top].code.string_table[b as usize].to_string();

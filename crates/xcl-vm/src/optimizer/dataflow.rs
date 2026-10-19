@@ -6,16 +6,19 @@
 extern crate alloc;
 
 use crate::bytecode::{
-    Instr, OP_ADD_LOCAL_LOCAL, OP_ADD_LOCAL_LOCAL_STORE, OP_ADD_LOCAL_STORE, OP_ADD_INT_LOCAL,
-    OP_ADD_FLOAT_LOCAL, OP_DEC_LOCAL, OP_DIV_LOCAL_LOCAL, OP_DIV_LOCAL_STORE, OP_DIV_FLOAT_LOCAL,
-    OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_INC_LOCAL,
-    OP_LOAD_CONST_LOCAL, OP_LOAD_LOCAL_PUSH_INT, OP_LOAD_LOCAL_STORE_LOCAL, OP_LT_LOCAL_LOCAL,
-    OP_MOD_EQ_INT, OP_MUL_LOCAL_LOCAL, OP_MUL_LOCAL_STORE, OP_MUL_INT_LOCAL, OP_MUL_FLOAT_LOCAL,
-    OP_SUB_LOCAL_LOCAL, OP_SUB_LOCAL_STORE, OP_SUB_INT_LOCAL, OP_SUB_FLOAT_LOCAL,
+    Instr, OP_ADD_INT_STORE_LOCAL, OP_ADD_LOCAL_LOCAL, OP_ADD_LOCAL_LOCAL_STORE,
+    OP_ADD_LOCAL_STORE, OP_ADD_INT_LOCAL, OP_ADD_FLOAT_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_DEC_LOCAL,
+    OP_DIV_LOCAL_LOCAL, OP_DIV_LOCAL_LOCAL_STORE, OP_DIV_LOCAL_STORE, OP_DIV_FLOAT_LOCAL,
+    OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_GET_FIELD_LOCAL_STORE,
+    OP_GET_INDEX_LOCAL_LOCAL_STORE, OP_INC_LOCAL, OP_INC_LOCAL_INT, OP_LOAD_CONST_LOCAL,
+    OP_LOAD_LOCAL_LOAD_LOCAL, OP_LOAD_LOCAL_PUSH_INT, OP_LOAD_LOCAL_STORE_LOCAL, OP_LT_LOCAL_LOCAL,
+    OP_MOD_EQ_INT, OP_MOD_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_LOCAL, OP_MUL_LOCAL_LOCAL_STORE,
+    OP_MUL_LOCAL_STORE, OP_MUL_INT_LOCAL, OP_MUL_FLOAT_LOCAL, OP_SUB_LOCAL_LOCAL,
+    OP_SUB_LOCAL_LOCAL_STORE, OP_SUB_LOCAL_STORE, OP_SUB_INT_LOCAL, OP_SUB_FLOAT_LOCAL,
     OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,
 };
 use crate::runtime::vm::ops::consts::{
-    OP_HALT, OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_LOCAL, OP_STORE_LOCAL,
+    OP_HALT, OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_LOCAL, OP_RETURN, OP_STORE_LOCAL,
 };
 
 #[cfg(not(feature = "std"))]
@@ -44,7 +47,7 @@ pub(crate) struct BasicBlock {
 /// - The first instruction (index 0)
 /// - Target of any jump instruction
 /// - Instruction immediately following a jump
-pub(crate) fn build_basic_blocks(code: &[Instr]) -> Vec<BasicBlock> {
+pub(crate) fn build_basic_blocks(code: &[Instr], wide: &[i64]) -> Vec<BasicBlock> {
     let len = code.len();
     if len == 0 {
         return Vec::new();
@@ -149,10 +152,46 @@ pub(crate) fn build_basic_blocks(code: &[Instr]) -> Vec<BasicBlock> {
                         }
                     }
                 }
+                OP_WHILE_LT_INT | OP_WHILE_LT_LOCAL | OP_FOR_NUMBER_LOOP => {
+                    // Fall-through to loop body (next instruction)
+                    if idx + 1 < len && idx == block.end {
+                        let ft = idx + 1;
+                        if !block.successors.contains(&ft) {
+                            block.successors.push(ft);
+                        }
+                    }
+                    // Exit target is in wide operand c; resolve it now
+                    let exit_wide_idx = instr.c() as usize;
+                    if let Some(&exit_ip) = wide.get(exit_wide_idx) {
+                        let exit_ip = exit_ip as usize;
+                        if exit_ip < len && idx == block.end {
+                            if !block.successors.contains(&exit_ip) {
+                                block.successors.push(exit_ip);
+                            }
+                        }
+                    }
+                }
                 OP_HALT => {
                     // No successors
                 }
                 _ => {}
+            }
+        }
+    }
+
+    // Add fall-through edges: any block whose last instruction is not an unconditional
+    // terminator (JUMP, HALT, RETURN) should fall through to the next block (end + 1).
+    for block in &mut blocks {
+        let last_instr = code[block.end];
+        match last_instr.op() {
+            OP_JUMP | OP_HALT | OP_RETURN => {
+                // Unconditional terminators have no fall-through
+            }
+            _ => {
+                let next = block.end + 1;
+                if next < len && !block.successors.contains(&next) {
+                    block.successors.push(next);
+                }
             }
         }
     }
@@ -216,10 +255,14 @@ pub(crate) fn live_variables(code: &[Instr], blocks: &[BasicBlock]) -> Vec<BTree
                     def_set[bi].insert(instr.a());
                 }
                 // Three-operand fused: ADD_LOCAL_LOCAL_STORE â€” reads a and b, writes c
-                OP_ADD_LOCAL_LOCAL_STORE => {
-                    use_set[bi].insert(instr.a());
+                OP_ADD_LOCAL_LOCAL_STORE
+                | OP_MUL_LOCAL_LOCAL_STORE
+                | OP_SUB_LOCAL_LOCAL_STORE
+                | OP_DIV_LOCAL_LOCAL_STORE
+                | OP_MOD_LOCAL_LOCAL_STORE => {
                     use_set[bi].insert(instr.b() as u32);
-                    def_set[bi].insert(instr.c() as u32);
+                    use_set[bi].insert(instr.c() as u32);
+                    def_set[bi].insert(instr.a());
                 }
                 // Constant-operand fused ops: ADD_INT_LOCAL, SUB_INT_LOCAL, etc.
                 // Reads slot a, writes slot a
@@ -237,6 +280,53 @@ pub(crate) fn live_variables(code: &[Instr], blocks: &[BasicBlock]) -> Vec<BTree
                 OP_INC_LOCAL | OP_DEC_LOCAL => {
                     use_set[bi].insert(instr.a());
                     def_set[bi].insert(instr.a());
+                }
+                // INC_LOCAL_INT: reads and writes slot a (operand a = slot, b = const)
+                OP_INC_LOCAL_INT => {
+                    use_set[bi].insert(instr.a());
+                    def_set[bi].insert(instr.a());
+                }
+                // ADD_INT_STORE_LOCAL: reads slot b, writes slot a (operand a = dest, b = src, c = const)
+                OP_ADD_INT_STORE_LOCAL => {
+                    use_set[bi].insert(instr.b() as u32);
+                    def_set[bi].insert(instr.a());
+                }
+                // LOAD_LOCAL_LOAD_LOCAL: reads slot a and slot b
+                OP_LOAD_LOCAL_LOAD_LOCAL => {
+                    use_set[bi].insert(instr.a());
+                    use_set[bi].insert(instr.b() as u32);
+                }
+                // WHILE_LT_INT: reads slot a (operand a = slot, b = limit, c = exit_wide_idx)
+                OP_WHILE_LT_INT => {
+                    use_set[bi].insert(instr.a());
+                }
+                // WHILE_LT_LOCAL: reads slot a and slot b (operand a = left, b = right, c = exit_wide_idx)
+                OP_WHILE_LT_LOCAL => {
+                    use_set[bi].insert(instr.a());
+                    use_set[bi].insert(instr.b() as u32);
+                }
+                // GET_INDEX_LOCAL_LOCAL_STORE: reads slot b (index) and slot c (array), writes slot a
+                OP_GET_INDEX_LOCAL_LOCAL_STORE => {
+                    use_set[bi].insert(instr.b() as u32);
+                    use_set[bi].insert(instr.c() as u32);
+                    def_set[bi].insert(instr.a());
+                }
+                // GET_FIELD_LOCAL_STORE: reads slot c (object), writes slot a
+                OP_GET_FIELD_LOCAL_STORE => {
+                    use_set[bi].insert(instr.c() as u32);
+                    def_set[bi].insert(instr.a());
+                }
+                // ARRAY_PUSH_LOCAL: reads slot a (array) and slot b (value), writes slot a
+                OP_ARRAY_PUSH_LOCAL => {
+                    use_set[bi].insert(instr.a());
+                    use_set[bi].insert(instr.b() as u32);
+                    def_set[bi].insert(instr.a());
+                }
+                // FOR_NUMBER_LOOP: reads and writes the loop-var slot packed in a (var_slot = a >> 16)
+                OP_FOR_NUMBER_LOOP => {
+                    let var_slot = instr.a() >> 16;
+                    use_set[bi].insert(var_slot);
+                    def_set[bi].insert(var_slot);
                 }
                 _ => {}
             }
@@ -288,18 +378,118 @@ pub(crate) fn live_variables(code: &[Instr], blocks: &[BasicBlock]) -> Vec<BTree
         }
     }
 
-    // Build per-instruction live vars
+    // Build per-instruction live vars.
+    // For each block, scan backward: live[idx] = instr_use[idx] union (live[idx+1] - instr_def[idx])
+    // The live-out of the last instruction in a block = union of live_in of successor blocks.
     let mut result: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); len];
-    for (bi, block) in blocks.iter().enumerate() {
-        for (idx_offset, idx) in (block.start..=block.end).enumerate() {
-            let _ = idx_offset;
-            if idx < len {
-                // Live at this point = live_in plus uses from later in block
-                // Simplified: use live_in for the whole block
-                for var in &live_in[bi] {
-                    result[idx].insert(*var);
+
+    for block in blocks.iter() {
+        // live_out of this block = union of live_in of all successor blocks
+        let mut block_live_out: BTreeSet<u32> = BTreeSet::new();
+        for succ_idx in &block.successors {
+            for (si, succ_block) in blocks.iter().enumerate() {
+                if succ_block.start == *succ_idx {
+                    for var in &live_in[si] {
+                        block_live_out.insert(*var);
+                    }
                 }
             }
+        }
+
+        // Scan backward within the block, computing per-instruction use/def
+        let mut live_after: BTreeSet<u32> = block_live_out;
+        for idx in (block.start..=block.end).rev() {
+            let instr = &code[idx];
+            let op = instr.op();
+
+            // Compute per-instruction use and def
+            let mut instr_use: BTreeSet<u32> = BTreeSet::new();
+            let mut instr_def: BTreeSet<u32> = BTreeSet::new();
+            match op {
+                OP_LOAD_LOCAL => { instr_use.insert(instr.a()); }
+                OP_STORE_LOCAL => { instr_def.insert(instr.a()); }
+                OP_LOAD_CONST_LOCAL => { instr_def.insert(instr.a()); }
+                OP_LOAD_LOCAL_STORE_LOCAL => {
+                    instr_use.insert(instr.b() as u32);
+                    instr_def.insert(instr.a());
+                }
+                OP_LOAD_LOCAL_PUSH_INT => { instr_use.insert(instr.a()); }
+                OP_ADD_LOCAL_LOCAL | OP_SUB_LOCAL_LOCAL | OP_MUL_LOCAL_LOCAL
+                | OP_DIV_LOCAL_LOCAL | OP_LT_LOCAL_LOCAL => {
+                    instr_use.insert(instr.a());
+                    instr_use.insert(instr.b() as u32);
+                }
+                OP_ADD_LOCAL_STORE | OP_SUB_LOCAL_STORE | OP_MUL_LOCAL_STORE
+                | OP_DIV_LOCAL_STORE => {
+                    instr_use.insert(instr.a());
+                    instr_use.insert(instr.b() as u32);
+                    instr_def.insert(instr.a());
+                }
+                OP_ADD_LOCAL_LOCAL_STORE | OP_MUL_LOCAL_LOCAL_STORE
+                | OP_SUB_LOCAL_LOCAL_STORE | OP_DIV_LOCAL_LOCAL_STORE
+                | OP_MOD_LOCAL_LOCAL_STORE => {
+                    instr_use.insert(instr.b() as u32);
+                    instr_use.insert(instr.c() as u32);
+                    instr_def.insert(instr.a());
+                }
+                OP_ADD_INT_LOCAL | OP_SUB_INT_LOCAL | OP_MUL_INT_LOCAL
+                | OP_ADD_FLOAT_LOCAL | OP_SUB_FLOAT_LOCAL | OP_MUL_FLOAT_LOCAL | OP_DIV_FLOAT_LOCAL => {
+                    instr_use.insert(instr.a());
+                    instr_def.insert(instr.a());
+                }
+                OP_MOD_EQ_INT => { instr_use.insert(instr.a()); }
+                OP_INC_LOCAL | OP_DEC_LOCAL => {
+                    instr_use.insert(instr.a());
+                    instr_def.insert(instr.a());
+                }
+                OP_INC_LOCAL_INT => {
+                    instr_use.insert(instr.a());
+                    instr_def.insert(instr.a());
+                }
+                OP_ADD_INT_STORE_LOCAL => {
+                    instr_use.insert(instr.b() as u32);
+                    instr_def.insert(instr.a());
+                }
+                OP_LOAD_LOCAL_LOAD_LOCAL => {
+                    instr_use.insert(instr.a());
+                    instr_use.insert(instr.b() as u32);
+                }
+                OP_WHILE_LT_INT => { instr_use.insert(instr.a()); }
+                OP_WHILE_LT_LOCAL => {
+                    instr_use.insert(instr.a());
+                    instr_use.insert(instr.b() as u32);
+                }
+                OP_GET_INDEX_LOCAL_LOCAL_STORE => {
+                    instr_use.insert(instr.b() as u32);
+                    instr_use.insert(instr.c() as u32);
+                    instr_def.insert(instr.a());
+                }
+                OP_GET_FIELD_LOCAL_STORE => {
+                    instr_use.insert(instr.c() as u32);
+                    instr_def.insert(instr.a());
+                }
+                OP_ARRAY_PUSH_LOCAL => {
+                    instr_use.insert(instr.a());
+                    instr_use.insert(instr.b() as u32);
+                    instr_def.insert(instr.a());
+                }
+                OP_FOR_NUMBER_LOOP => {
+                    let var_slot = instr.a() >> 16;
+                    instr_use.insert(var_slot);
+                    instr_def.insert(var_slot);
+                }
+                _ => {}
+            }
+
+            // live at idx = instr_use union (live_after - instr_def)
+            let mut live_at: BTreeSet<u32> = instr_use;
+            for var in &live_after {
+                if !instr_def.contains(var) {
+                    live_at.insert(*var);
+                }
+            }
+            result[idx] = live_at;
+            live_after = result[idx].clone();
         }
     }
 

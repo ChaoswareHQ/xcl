@@ -65,7 +65,7 @@ fn find_induction_variable(code: &[Instr], loop_start: usize, loop_end: usize) -
 /// 4. Duplicate the loop body UNROLL_FACTOR times
 /// 5. Adjust the induction variable increment
 pub(crate) fn loop_unroll(code: &mut Vec<Instr>, wide: &[i64]) {
-    let blocks = build_basic_blocks(code);
+    let blocks = build_basic_blocks(code, wide);
     if blocks.is_empty() {
         return;
     }

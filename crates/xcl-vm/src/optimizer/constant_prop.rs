@@ -3,12 +3,15 @@
 //! Stops propagation at function calls, global access, and loop back-edges.
 
 use crate::bytecode::{
-    Instr, OP_ADD_FLOAT_LOCAL, OP_ADD_INT_LOCAL, OP_ADD_LOCAL_LOCAL_STORE, OP_ADD_LOCAL_STORE,
-    OP_CALL, OP_CALL_METHOD, OP_DEC_LOCAL, OP_DIV_FLOAT_LOCAL, OP_DIV_LOCAL_STORE,
-    OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_INC_LOCAL, OP_LOAD_CONST_LOCAL,
-    OP_LOAD_LOCAL_STORE_LOCAL, OP_MOD_EQ_INT, OP_MUL_FLOAT_LOCAL,
-    OP_MUL_INT_LOCAL, OP_MUL_LOCAL_STORE, OP_SUB_FLOAT_LOCAL,
-    OP_SUB_INT_LOCAL, OP_SUB_LOCAL_STORE, OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,
+    Instr, OP_ADD_FLOAT_LOCAL, OP_ADD_INT_LOCAL, OP_ADD_INT_STORE_LOCAL, OP_ADD_LOCAL_LOCAL_STORE,
+    OP_ADD_LOCAL_STORE, OP_ARRAY_PUSH_LOCAL, OP_CALL, OP_CALL_METHOD, OP_DEC_LOCAL,
+    OP_DIV_FLOAT_LOCAL, OP_DIV_LOCAL_LOCAL_STORE, OP_DIV_LOCAL_STORE, OP_FOR_ITER_NEXT,
+    OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_GET_FIELD_LOCAL_STORE,
+    OP_GET_INDEX_LOCAL_LOCAL_STORE, OP_INC_LOCAL, OP_INC_LOCAL_INT, OP_LOAD_CONST_LOCAL,
+    OP_LOAD_LOCAL_STORE_LOCAL, OP_MOD_EQ_INT, OP_MOD_LOCAL_LOCAL_STORE, OP_MUL_FLOAT_LOCAL,
+    OP_MUL_INT_LOCAL, OP_MUL_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_STORE, OP_SUB_FLOAT_LOCAL,
+    OP_SUB_INT_LOCAL, OP_SUB_LOCAL_LOCAL_STORE, OP_SUB_LOCAL_STORE, OP_WHILE_LT_INT,
+    OP_WHILE_LT_LOCAL,
 };
 use crate::runtime::vm::ops::consts::{
     OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_GLOBAL, OP_LOAD_LOCAL, OP_PUSH_INT,
@@ -42,8 +45,7 @@ pub fn constant_propagation(code: &mut Vec<Instr>, wide: &[i64]) {
     for (i, instr) in code.iter().enumerate() {
         let op = instr.op();
         match op {
-            OP_JUMP | OP_JUMP_IF_FALSE | OP_JUMP_IF_NIL
-            | OP_FOR_ITER_NEXT | OP_FOR_RANGE_NEXT => {
+            OP_JUMP | OP_JUMP_IF_FALSE | OP_JUMP_IF_NIL | OP_FOR_ITER_NEXT | OP_FOR_RANGE_NEXT => {
                 let target = instr.a() as usize;
                 if target < i {
                     loop_headers.insert(target);
@@ -151,22 +153,35 @@ pub fn constant_propagation(code: &mut Vec<Instr>, wide: &[i64]) {
                 }
             }
             // Fused ops that modify slots invalidate those slots
-            OP_ADD_LOCAL_STORE | OP_SUB_LOCAL_STORE | OP_MUL_LOCAL_STORE
-            | OP_DIV_LOCAL_STORE => {
+            OP_ADD_LOCAL_STORE | OP_SUB_LOCAL_STORE | OP_MUL_LOCAL_STORE | OP_DIV_LOCAL_STORE => {
                 let slot = instr.a();
                 constants.remove(&slot);
             }
-            OP_ADD_LOCAL_LOCAL_STORE => {
-                let slot = instr.c() as u32;
-                constants.remove(&slot);
+            // All three-operand fused stores write `a` (the sources are `b` and `c`).
+            OP_ADD_LOCAL_LOCAL_STORE
+            | OP_SUB_LOCAL_LOCAL_STORE
+            | OP_MUL_LOCAL_LOCAL_STORE
+            | OP_DIV_LOCAL_LOCAL_STORE
+            | OP_MOD_LOCAL_LOCAL_STORE
+            | OP_GET_INDEX_LOCAL_LOCAL_STORE
+            | OP_GET_FIELD_LOCAL_STORE
+            | OP_ADD_INT_STORE_LOCAL
+            | OP_INC_LOCAL_INT => {
+                constants.remove(&instr.a());
+            }
+            // In-place array append mutates the array in slot `a`.
+            OP_ARRAY_PUSH_LOCAL => {
+                constants.remove(&instr.a());
+            }
+            OP_FOR_NUMBER_LOOP => {
+                constants.remove(&(instr.a() >> 16));
             }
             OP_ADD_INT_LOCAL | OP_SUB_INT_LOCAL | OP_MUL_INT_LOCAL => {
                 let slot = instr.a();
                 constants.remove(&slot);
             }
             // Float constant ops destroy integer constants in slot a
-            OP_ADD_FLOAT_LOCAL | OP_SUB_FLOAT_LOCAL | OP_MUL_FLOAT_LOCAL | OP_DIV_FLOAT_LOCAL =>
-            {
+            OP_ADD_FLOAT_LOCAL | OP_SUB_FLOAT_LOCAL | OP_MUL_FLOAT_LOCAL | OP_DIV_FLOAT_LOCAL => {
                 let slot = instr.a();
                 constants.remove(&slot);
             }

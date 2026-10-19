@@ -83,5 +83,5 @@ pub struct Bytecode {
     /// User-defined top-level function declarations.
     pub user_functions: std::vec::Vec<(std::boxed::Box<str>, crate::runtime::value::FuncValue)>,
     /// Compiled nested closures and lambda bodies.
-    pub closures: std::vec::Vec<crate::runtime::value::FuncValue>,
+    pub closures: std::sync::Arc<[crate::runtime::value::FuncValue]>,
 }

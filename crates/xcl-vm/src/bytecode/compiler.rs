@@ -19,9 +19,9 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::sync::Arc;
 
+use super::Bytecode;
 use super::instr::Instr;
 use super::opcodes::*;
-use super::Bytecode;
 use super::peephole::peephole_optimize_once;
 use crate::compiler::ast::{AstNode, BinaryOperator, SpecialVarKind, TypeKind, UnaryOperator};
 use crate::runtime::value::{FuncValue, Value};
@@ -110,6 +110,8 @@ struct Compiler {
     globals: Vec<Box<str>>,
     functions: Vec<(Box<str>, FuncValue)>,
     closures: Vec<FuncValue>,
+    /// Whether the current function body references special variables ($1, $#, $@, $*).
+    uses_special_vars: bool,
 }
 
 impl Compiler {
@@ -122,6 +124,7 @@ impl Compiler {
             globals: Vec::new(),
             functions: Vec::new(),
             closures: Vec::new(),
+            uses_special_vars: false,
         }
     }
 
@@ -197,9 +200,9 @@ impl Compiler {
                 operand,
                 ..
             } => self.can_emit_to_slot(operand),
-            AstNode::BinaryOp { left, op, right, .. }
-                if local_local_store_opcode(*op).is_some() =>
-            {
+            AstNode::BinaryOp {
+                left, op, right, ..
+            } if local_local_store_opcode(*op).is_some() => {
                 self.can_emit_to_slot(left) && self.can_emit_to_slot(right)
             }
             AstNode::Index { target, index, .. } => {
@@ -465,7 +468,7 @@ impl Compiler {
             local_names: core::mem::take(&mut self.locals).into(),
             global_names: core::mem::take(&mut self.globals).into(),
             user_functions: core::mem::take(&mut self.functions),
-            closures: core::mem::take(&mut self.closures),
+            closures: core::mem::take(&mut self.closures).into(),
         }
     }
 
@@ -642,6 +645,19 @@ impl Compiler {
                 self.emit(Instr::a1(OP_STORE_LOCAL, slot));
             }
             AstNode::Return { value, .. } => {
+                // Tail-call optimization: return foo(args) where foo is a plain identifier
+                if let Some(AstNode::Call { callee, args, .. }) = value.as_deref() {
+                    if let AstNode::Ident { name, .. } = callee.as_ref() {
+                        // Emit OP_TAIL_CALL: callee string + args, then continue (no new frame)
+                        let i = self.intern(name);
+                        self.emit(Instr::a1(OP_PUSH_STR, i));
+                        for a in args {
+                            self.node(&a.value);
+                        }
+                        self.emit(Instr::a2(OP_TAIL_CALL, args.len() as u32, 0));
+                        return;
+                    }
+                }
                 if let Some(v) = value {
                     self.node(v);
                 } else {
@@ -700,26 +716,33 @@ impl Compiler {
 
                     if let (Some(start_i), Some(end_i)) = (start_val, end_val) {
                         // Use single-opcode FOR_NUMBER_LOOP (like Luau's FORNLOOP)
+                        // Runtime expects: a = (var_slot << 16) | start_wide_idx, b = end_wide_idx
                         let var = self.local(variable);
                         let start_minus_1 = self.wide(start_i.wrapping_sub(1));
-                        self.emit(Instr::a1(OP_PUSH_INT_WIDE, start_minus_1));
-                        self.emit(Instr::a1(OP_STORE_LOCAL, var));
                         let end_wide = self.wide(end_i);
                         let exit_wide = self.wide(0);
-                        let loop_start = self.ip();
-                        self.emit(Instr::make(
-                            OP_FOR_NUMBER_LOOP,
-                            var,
-                            end_wide as u16,
-                            exit_wide as u8,
-                        ));
-                        for s in body {
-                            self.node(s);
+                        // Check that var_slot and start_wide_idx fit in packed operand a
+                        if var <= 0xFFFF && start_minus_1 <= 0xFFFF {
+                            self.emit(Instr::a1(OP_PUSH_INT_WIDE, start_minus_1));
+                            self.emit(Instr::a1(OP_STORE_LOCAL, var));
+                            let loop_start = self.ip();
+                            let packed_a = (var << 16) | start_minus_1;
+                            self.emit(Instr::make(
+                                OP_FOR_NUMBER_LOOP,
+                                packed_a,
+                                end_wide as u16,
+                                exit_wide as u8,
+                            ));
+                            for s in body {
+                                self.node(s);
+                            }
+                            // Jump back to FOR_NUMBER_LOOP
+                            self.emit(Instr::a1(OP_JUMP, loop_start));
+                            let exit_ip = self.ip();
+                            self.wide[exit_wide as usize] = exit_ip as i64;
+                        } else {
+                            // Overflow: fall through to FOR_RANGE_START/NEXT path below
                         }
-                        // Jump back to FOR_NUMBER_LOOP
-                        self.emit(Instr::a1(OP_JUMP, loop_start));
-                        let exit_ip = self.ip();
-                        self.wide[exit_wide as usize] = exit_ip as i64;
                     } else {
                         // Fallback: use FOR_RANGE_START/NEXT for non-constant ranges
                         if let Some(s) = start {
@@ -778,7 +801,9 @@ impl Compiler {
                             name: left_name, ..
                         } = left.as_ref()
                         {
-                            if let AstNode::Int { value: limit, .. } = right.as_ref() {
+                            if let AstNode::Int { value: limit, .. } = right.as_ref()
+                                && (0..=i64::from(u16::MAX)).contains(limit)
+                            {
                                 let slot = self.local(left_name);
                                 let exit_wide = self.wide(0);
                                 let loop_start = self.ip();
@@ -855,6 +880,7 @@ impl Compiler {
                     params: params.iter().map(|p| p.name.clone()).collect(),
                     closure_captures: Vec::new(),
                     closure_env: Vec::new(),
+                    uses_special_vars: sub.uses_special_vars,
                 };
                 self.functions.push((name.as_str().into(), f));
             }
@@ -1070,6 +1096,7 @@ impl Compiler {
                     params: params.clone(),
                     closure_captures: Vec::new(),
                     closure_env: Vec::new(),
+                    uses_special_vars: sub.uses_special_vars,
                 };
                 let idx = self.closures.len() as u32;
                 self.closures.push(f);
@@ -1157,6 +1184,7 @@ impl Compiler {
             }
 
             AstNode::SpecialVar { kind, index, .. } => {
+                self.uses_special_vars = true;
                 use crate::runtime::opcode::special_var_kind as sv;
                 let kind_code = match kind {
                     SpecialVarKind::ScriptName => sv::SCRIPT_NAME,

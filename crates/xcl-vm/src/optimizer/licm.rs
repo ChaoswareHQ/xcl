@@ -134,7 +134,7 @@ pub fn loop_invariant_code_motion(code: &mut Vec<Instr>, wide: &mut [i64]) {
         return;
     }
 
-    let blocks = build_basic_blocks(code);
+    let blocks = build_basic_blocks(code, wide);
     let loops = detect_loops(code, &blocks);
 
     if loops.is_empty() {

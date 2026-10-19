@@ -3,9 +3,19 @@
 //! Uses live variable analysis from [`super::dataflow`] to identify dead stores.
 
 use crate::bytecode::{
-    Instr, OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,
+    Instr, OP_ADD_FLOAT_LOCAL, OP_ADD_INT_LOCAL, OP_ADD_LOCAL_LOCAL, OP_ADD_LOCAL_LOCAL_STORE,
+    OP_ADD_LOCAL_STORE, OP_ARRAY_PUSH_LOCAL, OP_CALL_METHOD, OP_DEC_LOCAL, OP_DIV_FLOAT_LOCAL,
+    OP_DIV_LOCAL_LOCAL, OP_DIV_LOCAL_LOCAL_STORE, OP_DIV_LOCAL_STORE, OP_FOR_ITER_NEXT,
+    OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_GET_FIELD_LOCAL_STORE, OP_GET_INDEX_LOCAL_LOCAL_STORE,
+    OP_INC_LOCAL, OP_INC_LOCAL_INT, OP_LOAD_LOCAL_LOAD_LOCAL, OP_LOAD_LOCAL_PUSH_INT,
+    OP_LOAD_LOCAL_STORE_LOCAL, OP_LT_LOCAL_LOCAL, OP_MOD_LOCAL_LOCAL_STORE, OP_MUL_FLOAT_LOCAL,
+    OP_MUL_INT_LOCAL, OP_MUL_LOCAL_LOCAL, OP_MUL_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_STORE,
+    OP_SUB_FLOAT_LOCAL, OP_SUB_INT_LOCAL, OP_SUB_LOCAL_LOCAL, OP_SUB_LOCAL_LOCAL_STORE,
+    OP_SUB_LOCAL_STORE, OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,
 };
-use crate::runtime::vm::ops::consts::{OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_GLOBAL, OP_STORE_LOCAL};
+use crate::runtime::vm::ops::consts::{
+    OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_GLOBAL, OP_LOAD_LOCAL, OP_STORE_LOCAL,
+};
 
 
 use super::dataflow::{build_basic_blocks, live_variables};
@@ -19,7 +29,7 @@ pub fn eliminate_dead_stores(code: &mut Vec<Instr>, wide: &mut [i64]) {
         return;
     }
 
-    let blocks = build_basic_blocks(code.as_slice());
+    let blocks = build_basic_blocks(code.as_slice(), wide);
     let live = live_variables(code, &blocks);
 
     // Mark instructions for removal
@@ -36,6 +46,124 @@ pub fn eliminate_dead_stores(code: &mut Vec<Instr>, wide: &mut [i64]) {
                 } else {
                     false
                 };
+                if !is_live {
+                    // Conservative: also check if any later instruction reads this slot
+                    // This handles cases where liveness analysis misses cross-block usage
+                    let mut found_use = false;
+                    for later in code.iter().skip(i + 1) {
+                        let op = later.op();
+                        match op {
+                            OP_LOAD_LOCAL => {
+                                if later.a() == slot {
+                                    found_use = true;
+                                    break;
+                                }
+                            }
+                            OP_ADD_LOCAL_STORE | OP_SUB_LOCAL_STORE | OP_MUL_LOCAL_STORE
+                            | OP_DIV_LOCAL_STORE => {
+                                if later.a() == slot || later.b() as u32 == slot {
+                                    found_use = true;
+                                    break;
+                                }
+                            }
+                            OP_ADD_LOCAL_LOCAL_STORE | OP_MUL_LOCAL_LOCAL_STORE
+                            | OP_SUB_LOCAL_LOCAL_STORE | OP_DIV_LOCAL_LOCAL_STORE
+                            | OP_MOD_LOCAL_LOCAL_STORE => {
+                                if later.b() as u32 == slot || later.c() as u32 == slot {
+                                    found_use = true;
+                                    break;
+                                }
+                            }
+                            OP_ADD_INT_LOCAL | OP_SUB_INT_LOCAL | OP_MUL_INT_LOCAL
+                            | OP_ADD_FLOAT_LOCAL | OP_SUB_FLOAT_LOCAL | OP_MUL_FLOAT_LOCAL
+                            | OP_DIV_FLOAT_LOCAL => {
+                                if later.a() == slot {
+                                    found_use = true;
+                                    break;
+                                }
+                            }
+                            OP_INC_LOCAL | OP_DEC_LOCAL | OP_INC_LOCAL_INT => {
+                                if later.a() == slot {
+                                    found_use = true;
+                                    break;
+                                }
+                            }
+                            OP_LOAD_LOCAL_STORE_LOCAL => {
+                                if later.a() == slot {
+                                    found_use = true;
+                                    break;
+                                }
+                            }
+                            OP_LOAD_LOCAL_PUSH_INT => {
+                                if later.a() == slot {
+                                    found_use = true;
+                                    break;
+                                }
+                            }
+                            OP_ADD_LOCAL_LOCAL | OP_SUB_LOCAL_LOCAL | OP_MUL_LOCAL_LOCAL
+                            | OP_DIV_LOCAL_LOCAL | OP_LT_LOCAL_LOCAL => {
+                                if later.a() == slot || later.b() as u32 == slot {
+                                    found_use = true;
+                                    break;
+                                }
+                            }
+                            OP_GET_INDEX_LOCAL_LOCAL_STORE => {
+                                if later.b() as u32 == slot || later.c() as u32 == slot {
+                                    found_use = true;
+                                    break;
+                                }
+                            }
+                            OP_GET_FIELD_LOCAL_STORE => {
+                                if later.c() as u32 == slot {
+                                    found_use = true;
+                                    break;
+                                }
+                            }
+                            OP_ARRAY_PUSH_LOCAL => {
+                                if later.a() == slot || later.b() as u32 == slot {
+                                    found_use = true;
+                                    break;
+                                }
+                            }
+                            OP_WHILE_LT_INT => {
+                                if later.a() == slot {
+                                    found_use = true;
+                                    break;
+                                }
+                            }
+                            OP_WHILE_LT_LOCAL => {
+                                if later.a() == slot || later.b() as u32 == slot {
+                                    found_use = true;
+                                    break;
+                                }
+                            }
+                            OP_FOR_NUMBER_LOOP => {
+                                let var_slot = later.a() >> 16;
+                                if var_slot == slot {
+                                    found_use = true;
+                                    break;
+                                }
+                            }
+                            OP_LOAD_LOCAL_LOAD_LOCAL => {
+                                if later.a() == slot || later.b() as u32 == slot {
+                                    found_use = true;
+                                    break;
+                                }
+                            }
+                            OP_CALL_METHOD => {
+                                // OP_CALL_METHOD reads the receiver from the stack.
+                                // Check if the immediately preceding instruction loads this slot.
+                                // We can't easily track stack depth, so only protect if
+                                // there's a LOAD_LOCAL of this slot right before CALL_METHOD.
+                                // This is handled by the LOAD_LOCAL case above.
+                            }
+                            _ => {}
+                        }
+                    }
+                    if found_use {
+                        continue;
+                    }
+                }
                 if !is_live {
                     remove[i] = true;
                 }

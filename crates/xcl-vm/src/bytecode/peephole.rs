@@ -142,6 +142,7 @@ fn try_fuse_const_store(
         OP_PUSH_FLOAT | OP_PUSH_STR | OP_PUSH_INT_WIDE => (instr.a() as u16, match op {
             OP_PUSH_FLOAT => 1,
             OP_PUSH_STR => 2,
+            OP_PUSH_INT_WIDE => 6,
             _ => 0,
         }),
         OP_PUSH_NIL => (0, 3),

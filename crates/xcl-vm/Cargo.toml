@@ -22,3 +22,21 @@ hashbrown.workspace = true
 xcl-macros.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
+mlua.workspace = true
+
+[[bench]]
+name = "vm_core"
+harness = false
+
+[[bench]]
+name = "vm_data"
+harness = false
+
+[[bench]]
+name = "vm_algorithms"
+harness = false
+
+[[bench]]
+name = "vm_games"
+harness = false
