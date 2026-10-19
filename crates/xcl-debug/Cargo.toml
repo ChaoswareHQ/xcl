@@ -9,9 +9,18 @@ repository.workspace = true
 readme = "README.md"
 homepage.workspace = true
 
+[lib]
+name = "xcl_debug"
+path = "src/lib.rs"
+
 [[bin]]
 name = "xcl-debug"
 path = "src/main.rs"
 
+[[bin]]
+name = "xcl-bytecode"
+path = "src/bytecode_main.rs"
+
 [dependencies]
 xcl-vm.workspace = true
+clap.workspace = true

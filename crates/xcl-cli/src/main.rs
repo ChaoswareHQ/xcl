@@ -192,7 +192,7 @@ fn main() {
     if let Some(expr) = &opts.eval {
         if opts.decompile {
             // Decompile mode: show bytecode instead of running
-            let output = xcl_decompile::decompile_source(expr);
+            let output = xcl_debug::decompile::decompile_source(expr);
             print!("{}", output);
         } else {
             let result = run_source(expr, opts.quiet);
@@ -206,7 +206,7 @@ fn main() {
         for file in &opts.files {
             match fs::read_to_string(file) {
                 Ok(source) => {
-                    let output = xcl_decompile::decompile_source(&source);
+                    let output = xcl_debug::decompile::decompile_source(&source);
                     print!("{}", output);
                 }
                 Err(e) => {

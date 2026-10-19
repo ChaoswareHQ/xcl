@@ -4,7 +4,7 @@
 //! - `OP_*` constants in the `consts` submodule
 //! - a `dispatch_core` function with a direct `match` dispatch
 
-use xcl_vm_macros::xcl_opcodes;
+use xcl_macros::xcl_opcodes;
 
 #[xcl_opcodes(scope = core)]
 mod core_ops {

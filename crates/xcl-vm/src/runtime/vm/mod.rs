@@ -745,6 +745,7 @@ impl VM {
                     crate::runtime::opcode::OpcodeResult::Next => Action::Next,
                     crate::runtime::opcode::OpcodeResult::Jump(addr) => Action::Jump(addr),
                     crate::runtime::opcode::OpcodeResult::Return => Action::Return,
+                    crate::runtime::opcode::OpcodeResult::PushFrame => Action::PushFrame,
                 };
             }
         }
@@ -1707,6 +1708,7 @@ impl VM {
                         super::opcode::OpcodeResult::Next => Action::Next,
                         super::opcode::OpcodeResult::Jump(addr) => Action::Jump(addr),
                         super::opcode::OpcodeResult::Return => Action::Return,
+                        super::opcode::OpcodeResult::PushFrame => Action::PushFrame,
                     }
                 } else {
                     Action::Next

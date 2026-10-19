@@ -620,9 +620,8 @@ Source code → Lexer → Parser → Compiler → Bytecode → VM → Output
 | `xcl-macros` | Procedural macros: `#[xcl_fn]` for native functions, `#[derive(Xcl)]` for type registration, `#[xcl_impl]` for impl blocks |
 | `xcl-plugins` | Standard library plugins: all domains (io, fs, net, encoding, cloud, ffi, etc.) |
 | `xcl-cli` | Command-line interface for running XCL scripts |
-| `xcl-debug` | Parser debug tool: tokenize, parse, and visualize AST trees |
+| `xcl-debug` | Parser debug tool and bytecode toolkit: tokenize, parse, visualize AST, decompile bytecode, and disassemble (`xcl-debug` and `xcl-bytecode` binaries) |
 | `xcl-doc` | Documentation generator that reads macro metadata and produces an HTML site |
-| `xcl-decompile` | Bytecode decompiler for inspecting compiled programs |
 
 ## Writing Native Functions
 

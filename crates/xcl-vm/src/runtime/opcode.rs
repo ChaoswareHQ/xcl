@@ -40,6 +40,8 @@ pub enum OpcodeResult {
     Jump(u32),
     /// Return from the current frame.
     Return,
+    /// Push the pending frame onto the frame stack.
+    PushFrame,
 }
 
 /// A registered opcode entry.
@@ -64,4 +66,12 @@ pub fn registered_opcode_name(op: u8) -> Option<&'static str> {
         .iter()
         .find(|e| e.code == op)
         .map(|e| e.name)
+}
+
+/// Returns the human-readable name for any opcode.
+///
+/// Checks macro-generated core opcodes first, then the extension registry.
+pub fn opcode_name(op: u8) -> Option<&'static str> {
+    crate::runtime::vm::ops::opcode_name_core(op)
+        .or_else(|| registered_opcode_name(op))
 }

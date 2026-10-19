@@ -26,8 +26,12 @@
 //! This registers `https.get` in the VM — no manual wrappers or statics needed.
 
 use proc_macro::TokenStream;
+use proc_macro2::Span;
 use quote::quote;
-use syn::{FnArg, ItemFn, ItemImpl, LitStr, Type, parse_macro_input};
+use syn::{
+    parse::Parse, Attribute, Expr, ExprLit, FnArg, Ident, ItemFn, ItemImpl, ItemMod, Lit, LitStr,
+    Meta, Token, Type, Visibility, VisRestricted, parse_macro_input,
+};
 
 /// Extract the first line of `///` doc comments as a summary string.
 fn extract_doc_summary(attrs: &[syn::Attribute]) -> Option<String> {
@@ -1545,4 +1549,283 @@ pub fn xcl_opcode(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     expanded.into()
+}
+
+// Proc-macro for XCL core opcode generation.
+//
+// Exports `#[xcl_opcodes(scope = core)]` on a module and `#[xcl_op(...)]` on functions
+// inside that module to generate opcode constants and a direct-call dispatch match.
+
+/// Parse `#[xcl_op(code = N, arity = M, stack = "...", flags = "...")]` attributes.
+struct OpMeta {
+    code: u8,
+    name: Option<String>,
+}
+
+impl Parse for OpMeta {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let mut code: Option<u8> = None;
+        let mut name: Option<String> = None;
+
+        while !input.is_empty() {
+            let key: Ident = input.parse()?;
+            input.parse::<Token![=]>()?;
+            let value: Expr = input.parse()?;
+
+            match key.to_string().as_str() {
+                "code" => {
+                    if let Expr::Lit(ExprLit { lit: Lit::Int(lit_int), .. }) = value {
+                        code = Some(lit_int.base10_parse()?);
+                    } else {
+                        return Err(syn::Error::new_spanned(value, "expected integer literal"));
+                    }
+                }
+                "name" => {
+                    if let Expr::Lit(ExprLit { lit: Lit::Str(lit_str), .. }) = value {
+                        name = Some(lit_str.value());
+                    } else {
+                        return Err(syn::Error::new_spanned(value, "expected string literal"));
+                    }
+                }
+                _ => {
+                    // Ignore other keys like arity, stack, flags — they are metadata only
+                }
+            }
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
+        }
+
+        let code = code.ok_or_else(|| syn::Error::new(Span::call_site(), "missing `code`"))?;
+        Ok(OpMeta { code, name })
+    }
+}
+
+/// Extract xcl_op metadata from function attributes.
+fn extract_xcl_op_attrs(attrs: &[Attribute]) -> Option<OpMeta> {
+    for attr in attrs {
+        if attr.path().is_ident("xcl_op")
+            && let Meta::List(ml) = &attr.meta
+        {
+            let meta: OpMeta = syn::parse2(ml.tokens.clone()).ok()?;
+            return Some(meta);
+        }
+    }
+    None
+}
+
+/// Check if an attribute is xcl_op (to filter it out).
+fn is_xcl_op_attr(attr: &Attribute) -> bool {
+    attr.path().is_ident("xcl_op")
+}
+
+/// Convert function name like `op_add` to constant name `OP_ADD`.
+fn func_to_const(name: &str) -> String {
+    if let Some(stripped) = name.strip_prefix("op_") {
+        format!("OP_{}", stripped).to_uppercase()
+    } else {
+        name.to_uppercase()
+    }
+}
+
+/// Parse scope from `#[xcl_opcodes(scope = core)]`.
+struct OpcodesMeta {
+    scope: String,
+}
+
+impl Parse for OpcodesMeta {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let _key: Ident = input.parse()?;
+        input.parse::<Token![=]>()?;
+        let scope: Ident = input.parse()?;
+        Ok(OpcodesMeta {
+            scope: scope.to_string(),
+        })
+    }
+}
+
+#[proc_macro_attribute]
+pub fn xcl_opcodes(args: TokenStream, input: TokenStream) -> TokenStream {
+    let meta = parse_macro_input!(args as OpcodesMeta);
+    let item_mod = parse_macro_input!(input as ItemMod);
+
+    let scope = meta.scope;
+    let mod_name = &item_mod.ident;
+
+    // Collect functions from the module
+    let funcs = if let Some(ref block) = item_mod.content {
+        block.1.clone()
+    } else {
+        return syn::Error::new_spanned(item_mod.ident, "module must have a body")
+            .to_compile_error()
+            .into();
+    };
+
+    let mut consts = Vec::new();
+    let mut dispatch_arms = Vec::new();
+    let mut cleaned_items = Vec::new();
+    let mut codes_seen = Vec::new();
+    let mut names_seen = Vec::new();
+    let mut name_arms = Vec::new();
+
+    for item in funcs {
+        if let syn::Item::Fn(func) = &item {
+            let Some(op_meta) = extract_xcl_op_attrs(&func.attrs) else {
+                cleaned_items.push(item);
+                continue;
+            };
+
+            let code = op_meta.code;
+
+            // Validate code < 128 for core
+            if scope == "core" && code >= 128 {
+                return syn::Error::new(
+                    func.sig.ident.span(),
+                    format!("core opcode code must be < 128, got {}", code),
+                )
+                .to_compile_error()
+                .into();
+            }
+
+            // Check duplicate codes
+            if codes_seen.contains(&code) {
+                return syn::Error::new(
+                    func.sig.ident.span(),
+                    format!("duplicate opcode code {}", code),
+                )
+                .to_compile_error()
+                .into();
+            }
+            codes_seen.push(code);
+
+            // Determine constant name
+            let const_name = op_meta
+                .name
+                .unwrap_or_else(|| func_to_const(&func.sig.ident.to_string()));
+
+            // Check duplicate names
+            if names_seen.contains(&const_name) {
+                return syn::Error::new(
+                    func.sig.ident.span(),
+                    format!("duplicate opcode name {}", const_name),
+                )
+                .to_compile_error()
+                .into();
+            }
+            names_seen.push(const_name.clone());
+
+            let const_ident = Ident::new(&const_name, func.sig.ident.span());
+
+            // Generate constant
+            consts.push(quote! {
+                pub const #const_ident: u8 = #code;
+            });
+
+            // Generate dispatch arm
+            let func_ident = &func.sig.ident;
+            dispatch_arms.push(quote! {
+                #code => {
+                    #mod_name::#func_ident(vm, top, instr)
+                }
+            });
+
+            // Generate opcode name arm
+            name_arms.push(quote! {
+                #code => #const_name,
+            });
+
+            // Build cleaned function (remove xcl_op attrs, keep others, make pub(crate))
+            let mut cleaned_func = func.clone();
+            cleaned_func.attrs.retain(|a| !is_xcl_op_attr(a));
+            let span = Span::call_site();
+            cleaned_func.vis = Visibility::Restricted(VisRestricted {
+                pub_token: syn::token::Pub(span),
+                paren_token: syn::token::Paren(span),
+                in_token: Some(syn::token::In(span)),
+                path: Box::new(syn::Path::from(Ident::new("crate", span))),
+            });
+            cleaned_items.push(syn::Item::Fn(cleaned_func));
+        } else {
+            cleaned_items.push(item);
+        }
+    }
+
+    // Build the migrated-opcode bitmask (only for core scope)
+    let mask_lit = if scope == "core" {
+        let mask: u128 = codes_seen.iter().map(|&c| 1u128 << c).sum();
+        quote! { #mask }
+    } else {
+        quote! { 0 }
+    };
+
+    // Build the output: consts module + cleaned module + dispatch function + opcode_name_core
+    let output = if scope == "core" {
+        quote! {
+            pub mod consts {
+                #(#consts)*
+            }
+
+            mod #mod_name {
+                #(#cleaned_items)*
+            }
+
+            pub(crate) const MIGRATED_MASK: u128 = #mask_lit;
+
+            #[inline(always)]
+            pub(crate) fn is_core_migrated(op: u8) -> bool {
+                op < 128 && ((MIGRATED_MASK >> op) & 1) == 1
+            }
+
+            #[inline(always)]
+            pub(crate) fn dispatch_core(
+                vm: &mut crate::runtime::vm::VM,
+                top: usize,
+                instr: crate::Instr,
+            ) -> Option<crate::runtime::opcode::OpcodeResult> {
+                use crate::runtime::opcode::OpcodeResult;
+                Some(match instr.op() {
+                    #(#dispatch_arms)*
+                    _ => return None,
+                })
+            }
+
+            pub(crate) fn opcode_name_core(op: u8) -> Option<&'static str> {
+                Some(match op {
+                    #(#name_arms)*
+                    _ => return None,
+                })
+            }
+        }
+    } else {
+        quote! {
+            pub mod consts {
+                #(#consts)*
+            }
+
+            mod #mod_name {
+                #(#cleaned_items)*
+            }
+
+            pub(crate) fn dispatch_core(
+                vm: &mut crate::runtime::vm::VM,
+                top: usize,
+                instr: crate::Instr,
+            ) -> Option<crate::runtime::opcode::OpcodeResult> {
+                use crate::runtime::opcode::OpcodeResult;
+                Some(match instr.op() {
+                    #(#dispatch_arms)*
+                    _ => return None,
+                })
+            }
+
+            pub(crate) fn opcode_name_core(op: u8) -> Option<&'static str> {
+                Some(match op {
+                    #(#name_arms)*
+                    _ => return None,
+                })
+            }
+        }
+    };
+
+    output.into()
 }

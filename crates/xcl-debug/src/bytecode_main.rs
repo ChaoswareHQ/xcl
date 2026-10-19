@@ -74,52 +74,20 @@ enum Commands {
 }
 
 fn get_opcode_name(op: u8) -> &'static str {
-    match op {
-        0 => "OP_NOP",
-        1 => "OP_PUSH_NIL",
-        2 => "OP_PUSH_TRUE",
-        3 => "OP_PUSH_FALSE",
-        4 => "OP_PUSH_INT",
-        5 => "OP_PUSH_INT_WIDE",
-        6 => "OP_PUSH_FLOAT",
-        7 => "OP_PUSH_STR",
-        8 => "OP_LOAD_LOCAL",
-        9 => "OP_STORE_LOCAL",
-        10 => "OP_LOAD_GLOBAL",
-        11 => "OP_STORE_GLOBAL",
-        12 => "OP_ADD",
-        13 => "OP_SUB",
-        14 => "OP_MUL",
-        15 => "OP_DIV",
-        16 => "OP_MOD",
-        17 => "OP_NEG",
-        18 => "OP_EQ",
-        19 => "OP_NEQ",
-        20 => "OP_LT",
-        21 => "OP_GT",
-        22 => "OP_LE",
-        23 => "OP_GE",
-        24 => "OP_AND",
-        25 => "OP_OR",
-        26 => "OP_NOT",
-        27 => "OP_IN",
-        28 => "OP_JUMP",
-        29 => "OP_JUMP_IF_FALSE",
-        30 => "OP_JUMP_IF_NIL",
+    xcl_vm::opcode_name(op)
+        .or_else(|| superinstruction_name(op))
+        .or_else(|| xcl_vm::registered_opcode_name(op))
+        .unwrap_or("UNKNOWN")
+}
+
+fn superinstruction_name(op: u8) -> Option<&'static str> {
+    Some(match op {
         32 => "OP_CALL",
-        33 => "OP_RETURN",
-        34 => "OP_HALT",
-        35 => "OP_MAKE_ARRAY",
-        36 => "OP_MAKE_DICT",
-        37 => "OP_GET_INDEX",
         38 => "OP_GET_FIELD",
-        39 => "OP_ARRAY_PUSH",
         42 => "OP_FOR_ITER_START",
         43 => "OP_FOR_ITER_NEXT",
         44 => "OP_FOR_RANGE_START",
         45 => "OP_FOR_RANGE_NEXT",
-        46 => "OP_LOAD_LAMBDA",
-        47 => "OP_COALESCE",
         52 => "OP_TYPE_TEST",
         53 => "OP_TYPE_CAST",
         60 => "OP_LOAD_LOCAL_LOAD_LOCAL",
@@ -154,8 +122,8 @@ fn get_opcode_name(op: u8) -> &'static str {
         107 => "OP_MOD_LOCAL_LOCAL_STORE",
         108 => "OP_LOAD_CONST_LOCAL",
         109 => "OP_ARRAY_PUSH_LOCAL",
-        _ => xcl_vm::registered_opcode_name(op).unwrap_or("UNKNOWN"),
-    }
+        _ => return None,
+    })
 }
 
 fn load_and_compile(path: &str) -> Bytecode {
@@ -207,12 +175,12 @@ fn cmd_disassemble(bc: &Bytecode, raw: bool) {
             // Single operand a
             4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 28 | 29 | 30 | 35 | 36 | 37 | 38 | 46 | 52
             | 53 | 80 | 81 => match op {
-                7 => format!(" a={} \"{}\"", a, bc.string_table[a as usize]),
-                8 => format!(" a={} ${}", a, bc.local_names[a as usize]),
-                9 => format!(" a={} ${}", a, bc.local_names[a as usize]),
-                10 => format!(" a={} @{}", a, bc.global_names[a as usize]),
-                11 => format!(" a={} @{}", a, bc.global_names[a as usize]),
-                5 | 6 => format!(" a={} (wide[{}]={})", a, a, bc.wide_operands[a as usize]),
+                7 => format!(" a={} \"{}\"", a, bc.string_table.get(a as usize).map_or("?", |s| s.as_ref())),
+                8 => format!(" a={} ${}", a, bc.local_names.get(a as usize).map_or("$?", |s| s.as_ref())),
+                9 => format!(" a={} ${}", a, bc.local_names.get(a as usize).map_or("$?", |s| s.as_ref())),
+                10 => format!(" a={} @{}", a, bc.global_names.get(a as usize).map_or("?", |s| s.as_ref())),
+                11 => format!(" a={} @{}", a, bc.global_names.get(a as usize).map_or("?", |s| s.as_ref())),
+                5 | 6 => format!(" a={} (wide[{}]={})", a, a, bc.wide_operands.get(a as usize).unwrap_or(&i64::MIN)),
                 _ => format!(" a={}", a),
             },
 
@@ -222,10 +190,11 @@ fn cmd_disassemble(bc: &Bytecode, raw: bool) {
                 60..=65 | 82 | 83 | 92 | 96..=103 | 105..=107 | 109 => {
                     format!(
                         " a=${} b=${}",
-                        bc.local_names[a as usize], bc.local_names[b as usize]
+                        bc.local_names.get(a as usize).map_or("$?", |s| s.as_ref()),
+                        bc.local_names.get(b as usize).map_or("$?", |s| s.as_ref())
                     )
                 }
-                66 => format!(" a=\"{}\" b={}", bc.string_table[a as usize], b),
+                66 => format!(" a=\"{}\" b={}", bc.string_table.get(a as usize).map_or("?", |s| s.as_ref()), b),
                 _ => format!(" a={} b={}", a, b),
             },
 
@@ -235,14 +204,14 @@ fn cmd_disassemble(bc: &Bytecode, raw: bool) {
                     let kind = if c == 1 { "float" } else { "int" };
                     format!(
                         " a=${} b=wide[{}] c={}",
-                        bc.local_names[a as usize], b, kind
+                        bc.local_names.get(a as usize).map_or("$?", |s| s.as_ref()), b, kind
                     )
                 }
                 _ => format!(" a={} b={} c={}", a, b, c),
             },
 
             // For loop special
-            90 => format!(" a=${} b=-{} c={}", bc.local_names[a as usize], b, c),
+            90 => format!(" a=${} b=-{} c={}", bc.local_names.get(a as usize).map_or("$?", |s| s.as_ref()), b, c),
 
             _ => format!(" a={} b={} c={}", a, b, c),
         };

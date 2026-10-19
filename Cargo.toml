@@ -14,11 +14,10 @@ readme       = "README.md"
 homepage     = "https://chaoswarehq.com"
 
 [workspace.dependencies]
-xcl-decompile = { path = "crates/xcl-decompile" }
+xcl-debug = { path = "crates/xcl-debug" }
 xcl-macros = { path = "crates/xcl-macros" }
 xcl-plugins = { path = "crates/xcl-plugins" }
 xcl-vm     = { path = "crates/xcl-vm" }
-xcl-vm-macros = { path = "crates/xcl-vm-macros" }
 
 # xcl-cli
 mimalloc = "0.1.52"

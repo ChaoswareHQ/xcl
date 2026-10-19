@@ -247,7 +247,7 @@ pub use runtime::{
     OPCODE_REGISTRY, OpcodeEntry, OpcodeFn, OpcodeResult, RawPtr, SUBTYPE_ERROR, SUBTYPE_HANDLE,
     SUBTYPE_NONE, SUBTYPE_RESULT, SUBTYPE_USER_BASE, TraitDescriptor, TraitMethod, TypeDescriptor,
     TypeField, TypeKind, TypeVariant, VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK, VM, Value,
-    XclObject, XclType, extract_arg, is_known_kind, registered_opcode_name,
+    XclObject, XclType, extract_arg, is_known_kind, opcode_name, registered_opcode_name,
 };
 pub use utils::{IMPL_REGISTRY, NATIVE_REGISTRY, TRAIT_REGISTRY, TYPE_REGISTRY, split_named_args};
 

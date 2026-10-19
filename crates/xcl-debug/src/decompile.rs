@@ -24,7 +24,7 @@
 //!     user_functions: Vec::new(),
 //!     closures: Vec::new(),
 //! };
-//! let output = xcl_decompile::decompile(&bc);
+//! let output = xcl_debug::decompile::decompile(&bc);
 //! assert!(output.contains("OP_PUSH_INT"));
 //! ```
 
@@ -325,54 +325,15 @@ fn format_operand_c(op: u8, c: u8, bc: &Bytecode) -> String {
 
 /// Return the human-readable name for an opcode.
 fn opcode_name(op: u8) -> &'static str {
-    match op {
-        OP_NOP                       => "OP_NOP",
-        OP_PUSH_NIL                  => "OP_PUSH_NIL",
-        OP_PUSH_TRUE                 => "OP_PUSH_TRUE",
-        OP_PUSH_FALSE                => "OP_PUSH_FALSE",
-        OP_PUSH_INT                  => "OP_PUSH_INT",
-        OP_PUSH_INT_WIDE             => "OP_PUSH_INT_WIDE",
-        OP_PUSH_FLOAT                => "OP_PUSH_FLOAT",
-        OP_PUSH_STR                  => "OP_PUSH_STR",
-        OP_LOAD_LOCAL                => "OP_LOAD_LOCAL",
-        OP_STORE_LOCAL               => "OP_STORE_LOCAL",
-        OP_LOAD_GLOBAL               => "OP_LOAD_GLOBAL",
-        OP_STORE_GLOBAL              => "OP_STORE_GLOBAL",
-        OP_ADD                       => "OP_ADD",
-        OP_SUB                       => "OP_SUB",
-        OP_MUL                       => "OP_MUL",
-        OP_DIV                       => "OP_DIV",
-        OP_MOD                       => "OP_MOD",
-        OP_NEG                       => "OP_NEG",
-        OP_EQ                        => "OP_EQ",
-        OP_NEQ                       => "OP_NEQ",
-        OP_LT                        => "OP_LT",
-        OP_GT                        => "OP_GT",
-        OP_LE                        => "OP_LE",
-        OP_GE                        => "OP_GE",
-        OP_AND                       => "OP_AND",
-        OP_OR                        => "OP_OR",
-        OP_NOT                       => "OP_NOT",
-        OP_IN                        => "OP_IN",
-        OP_JUMP                      => "OP_JUMP",
-        OP_JUMP_IF_FALSE             => "OP_JUMP_IF_FALSE",
-        OP_JUMP_IF_NIL               => "OP_JUMP_IF_NIL",
-        OP_CALL                      => "OP_CALL",
-        OP_RETURN                    => "OP_RETURN",
-        OP_HALT                      => "OP_HALT",
-        OP_MAKE_ARRAY                => "OP_MAKE_ARRAY",
-        OP_MAKE_DICT                 => "OP_MAKE_DICT",
-        OP_GET_INDEX                 => "OP_GET_INDEX",
-        OP_GET_FIELD                 => "OP_GET_FIELD",
-        OP_ARRAY_PUSH                => "OP_ARRAY_PUSH",
-        OP_FOR_ITER_START            => "OP_FOR_ITER_START",
-        OP_FOR_ITER_NEXT             => "OP_FOR_ITER_NEXT",
-        OP_FOR_RANGE_START           => "OP_FOR_RANGE_START",
-        OP_FOR_RANGE_NEXT            => "OP_FOR_RANGE_NEXT",
-        OP_LOAD_LAMBDA               => "OP_LOAD_LAMBDA",
-        OP_COALESCE                  => "OP_COALESCE",
-        OP_TYPE_TEST                 => "OP_TYPE_TEST",
-        // Superinstructions
+    xcl_vm::opcode_name(op)
+        .or_else(|| superinstruction_name(op))
+        .or_else(|| xcl_vm::registered_opcode_name(op))
+        .unwrap_or("OP_UNKNOWN")
+}
+
+/// Fallback names for superinstructions not covered by the macro.
+fn superinstruction_name(op: u8) -> Option<&'static str> {
+    Some(match op {
         OP_LOAD_LOCAL_LOAD_LOCAL     => "OP_LOAD_LOCAL_LOAD_LOCAL",
         OP_ADD_LOCAL_LOCAL           => "OP_ADD_LOCAL_LOCAL",
         OP_SUB_LOCAL_LOCAL           => "OP_SUB_LOCAL_LOCAL",
@@ -380,14 +341,12 @@ fn opcode_name(op: u8) -> &'static str {
         OP_LOAD_LOCAL_PUSH_INT       => "OP_LOAD_LOCAL_PUSH_INT",
         OP_LOAD_LOCAL_STORE_LOCAL    => "OP_LOAD_LOCAL_STORE_LOCAL",
         OP_CALL_METHOD               => "OP_CALL_METHOD",
-        // More superinstructions
         OP_INC_LOCAL                 => "OP_INC_LOCAL",
         OP_DEC_LOCAL                 => "OP_DEC_LOCAL",
         OP_MUL_LOCAL_LOCAL           => "OP_MUL_LOCAL_LOCAL",
         OP_DIV_LOCAL_LOCAL           => "OP_DIV_LOCAL_LOCAL",
         OP_ADD_INT_STORE_LOCAL       => "OP_ADD_INT_STORE_LOCAL",
         OP_INC_LOCAL_INT             => "OP_INC_LOCAL_INT",
-        // New superinstructions
         OP_FOR_NUMBER_LOOP           => "OP_FOR_NUMBER_LOOP",
         OP_ADD_INT_LOCAL             => "OP_ADD_INT_LOCAL",
         OP_ADD_LOCAL_STORE           => "OP_ADD_LOCAL_STORE",
@@ -407,8 +366,8 @@ fn opcode_name(op: u8) -> &'static str {
         OP_MOD_LOCAL_LOCAL_STORE     => "OP_MOD_LOCAL_LOCAL_STORE",
         OP_LOAD_CONST_LOCAL          => "OP_LOAD_CONST_LOCAL",
         OP_ARRAY_PUSH_LOCAL          => "OP_ARRAY_PUSH_LOCAL",
-        _                            => xcl_vm::registered_opcode_name(op).unwrap_or("OP_UNKNOWN"),
-    }
+        _ => return None,
+    })
 }
 
 /// Compile source to bytecode and decompile it, returning the decompiled output.
