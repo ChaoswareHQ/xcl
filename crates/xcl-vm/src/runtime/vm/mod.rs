@@ -259,34 +259,6 @@ impl VM {
         self.script_args = args;
     }
 
-    /// Registers core language axioms (`type`, `super`) directly.
-    /// Called automatically by [`VM::new`] or can be called manually.
-    pub fn register_core(&mut self) {
-        use crate::runtime::value::{BuiltinImpl, NativeKind};
-        let entries = super::axioms::axiom_entries();
-        for entry in &entries {
-            let impl_ = match entry.kind {
-                NativeKind::Pure => {
-                    let f: crate::runtime::value::BuiltinFn =
-                        unsafe { core::mem::transmute(entry.ptr.0) };
-                    BuiltinImpl::Pure(f)
-                }
-                NativeKind::Ctx => {
-                    let f: crate::runtime::value::BuiltinCtxFn =
-                        unsafe { core::mem::transmute(entry.ptr.0) };
-                    BuiltinImpl::Ctx(f)
-                }
-            };
-            let idx = self.global_table.len() as u32;
-            self.global_table.push(Some(impl_));
-            self.global_index.insert(entry.method.into(), idx);
-            // Store static refs for override_by_trait
-            // We leak the entries into static storage so we can store &'static refs
-            self.native_entries
-                .push(unsafe { &*(entry as *const crate::runtime::value::NativeEntry) });
-        }
-    }
-
     /// Registers native functions from a static slice.
     pub fn register_natives(&mut self, entries: &'static [NativeEntry]) {
         use crate::runtime::value::{BuiltinImpl, NativeKind};
@@ -885,7 +857,6 @@ mod tests {
         let ast = parse(&tokens, src);
         let bc = compile(&ast);
         let mut vm = VM::new();
-        vm.register_core();
         let vals: Vec<Value> = args
             .iter()
             .map(|s| Value::from_str_boxed((*s).to_string()))
@@ -931,7 +902,6 @@ mod tests {
         let ast = parse(&tokens, src);
         let bc = compile(&ast);
         let mut vm = VM::new();
-        vm.register_core();
         let vals: Vec<Value> = ["a", "b"]
             .iter()
             .map(|s| Value::from_str_boxed((*s).to_string()))

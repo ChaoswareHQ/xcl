@@ -1496,6 +1496,11 @@ impl<'a> DomainCtx<'a> {
         self.args.get(i).copied().unwrap_or(Value::unit())
     }
 
+    /// Returns the type descriptors registered in the VM.
+    pub fn type_entries(&self) -> &[&'static TypeDescriptor] {
+        &self.vm.type_entries
+    }
+
     /// Returns a reference to the VM's bump allocation arena.
     pub fn arena(&self) -> &bumpalo::Bump {
         &self.vm.arena
@@ -1726,7 +1731,7 @@ pub trait XclType: Sized {
 /// Universal trait available on all XCL values.
 ///
 /// Provides methods like `type` and `super` that work on any value in the XCL VM.
-/// These are implemented as core axioms registered directly in the VM.
+/// These are provided by the standard plugin layer.
 pub trait XclObject {
     /// Returns the type name of the value as a string.
     fn xcl_type_name(&self) -> String;

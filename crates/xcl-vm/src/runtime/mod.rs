@@ -3,13 +3,10 @@
 //! This module handles the final phase of the XCL compilation pipeline:
 //! executing compiled bytecode on a stack-based virtual machine with NaN-boxed values.
 
-pub mod axioms;
-pub mod errors;
 pub mod opcode;
 pub mod value;
 pub mod vm;
 
-pub use errors::{Group, is_known_kind};
 pub use opcode::{OpcodeEntry, OpcodeFn, OpcodeResult, opcode_name};
 pub use value::{
     BuiltinImpl, DomainCtx, FuncValue, GlobalOverrideGuard, HandleKind, ImplDescriptor, ImplMethod,

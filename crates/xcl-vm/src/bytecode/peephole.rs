@@ -6,6 +6,19 @@
 use super::instr::Instr;
 use super::opcodes::*;
 
+#[inline(always)]
+fn is_direct_jump(op: u8) -> bool {
+    matches!(
+        op,
+        OP_JUMP | OP_JUMP_IF_FALSE | OP_JUMP_IF_NIL | OP_FOR_ITER_NEXT | OP_FOR_RANGE_NEXT
+    )
+}
+
+#[inline(always)]
+fn is_wide_exit_jump(op: u8) -> bool {
+    matches!(op, OP_WHILE_LT_INT | OP_WHILE_LT_LOCAL | OP_FOR_NUMBER_LOOP)
+}
+
 /// Drain instructions in `range` and adjust all jump targets after `range.start()`.
 #[inline]
 fn drain_and_patch(
@@ -20,35 +33,27 @@ fn drain_and_patch(
     let count_u32 = count as u32;
     for instr in code.iter_mut() {
         let op = instr.op();
-        match op {
-            OP_JUMP | OP_JUMP_IF_FALSE | OP_JUMP_IF_NIL | OP_FOR_ITER_NEXT | OP_FOR_RANGE_NEXT => {
-                if instr.a() > start_u32 {
-                    *instr = Instr::make(op, instr.a() - count_u32, instr.b(), instr.c());
-                }
+        if is_direct_jump(op) {
+            if instr.a() > start_u32 {
+                *instr = Instr::make(op, instr.a() - count_u32, instr.b(), instr.c());
             }
-            OP_WHILE_LT_INT | OP_WHILE_LT_LOCAL | OP_FOR_NUMBER_LOOP => {
-                let w_idx = instr.c() as usize;
-                if let Some(exit_ip) = wide.get_mut(w_idx)
-                    && *exit_ip > start as i64
-                {
-                    *exit_ip -= count as i64;
-                }
+        } else if is_wide_exit_jump(op) {
+            let w_idx = instr.c() as usize;
+            if let Some(exit_ip) = wide.get_mut(w_idx)
+                && *exit_ip > start as i64
+            {
+                *exit_ip -= count as i64;
             }
-            _ => {}
         }
     }
 }
 
 /// Collect all instruction indices that are jump targets.
 fn collect_jump_targets(code: &[Instr]) -> std::collections::HashSet<usize> {
-    use super::opcodes::*;
     let mut targets = std::collections::HashSet::new();
     for instr in code {
         let op = instr.op();
-        if matches!(
-            op,
-            OP_JUMP | OP_JUMP_IF_FALSE | OP_JUMP_IF_NIL | OP_FOR_ITER_NEXT | OP_FOR_RANGE_NEXT
-        ) {
+        if is_direct_jump(op) {
             let target = instr.a() as usize;
             if target < code.len() {
                 targets.insert(target);
@@ -58,6 +63,169 @@ fn collect_jump_targets(code: &[Instr]) -> std::collections::HashSet<usize> {
     targets
 }
 
+/// LOAD_LOCAL a; PUSH_INT 1; ADD/SUB; STORE_LOCAL a -> INC_LOCAL/DEC_LOCAL a
+fn try_fuse_inc_dec(
+    code: &mut Vec<Instr>,
+    wide: &mut [i64],
+    i: usize,
+    instr: Instr,
+) -> bool {
+    if instr.op() != OP_LOAD_LOCAL || code.len() < i + 4 {
+        return false;
+    }
+    let next = code[i + 1];
+    let next2 = code[i + 2];
+    let next3 = code[i + 3];
+    if next.op() != OP_PUSH_INT
+        || next.a() != 1
+        || next3.op() != OP_STORE_LOCAL
+        || next3.a() != instr.a()
+    {
+        return false;
+    }
+    let fused = match next2.op() {
+        OP_ADD => OP_INC_LOCAL,
+        OP_SUB => OP_DEC_LOCAL,
+        _ => return false,
+    };
+    code[i] = Instr::a1(fused, instr.a());
+    drain_and_patch(code, wide, i + 1..=i + 3);
+    true
+}
+
+/// PUSH_<const>; STORE_LOCAL -> LOAD_CONST_LOCAL
+///
+/// Covers PUSH_INT, PUSH_FLOAT, PUSH_STR, PUSH_NIL/TRUE/FALSE, and PUSH_INT_WIDE.
+/// All of these must respect the same jump-target guards.
+fn try_fuse_const_store(
+    code: &mut Vec<Instr>,
+    wide: &mut [i64],
+    i: usize,
+    instr: Instr,
+    jump_targets: &std::collections::HashSet<usize>,
+) -> bool {
+    let op = instr.op();
+    if !matches!(
+        op,
+        OP_PUSH_INT
+            | OP_PUSH_FLOAT
+            | OP_PUSH_STR
+            | OP_PUSH_NIL
+            | OP_PUSH_TRUE
+            | OP_PUSH_FALSE
+            | OP_PUSH_INT_WIDE
+    ) {
+        return false;
+    }
+    if code.len() < i + 2
+        || jump_targets.contains(&i)
+        || jump_targets.contains(&(i + 1))
+    {
+        return false;
+    }
+    if i > 0 && code[i - 1].op() == OP_JUMP {
+        return false;
+    }
+    let next = code[i + 1];
+    if next.op() != OP_STORE_LOCAL {
+        return false;
+    }
+    let slot = next.a();
+    let (b, c) = match op {
+        OP_PUSH_INT => {
+            let v = instr.a();
+            if u16::try_from(v).is_err() {
+                return false;
+            }
+            (v as u16, 0)
+        }
+        OP_PUSH_FLOAT | OP_PUSH_STR | OP_PUSH_INT_WIDE => (instr.a() as u16, match op {
+            OP_PUSH_FLOAT => 1,
+            OP_PUSH_STR => 2,
+            _ => 0,
+        }),
+        OP_PUSH_NIL => (0, 3),
+        OP_PUSH_TRUE => (0, 4),
+        OP_PUSH_FALSE => (0, 5),
+        _ => unreachable!(),
+    };
+    code[i] = Instr::make(OP_LOAD_CONST_LOCAL, slot, b, c);
+    drain_and_patch(code, wide, i + 1..=i + 1);
+    true
+}
+
+/// PUSH_INT k combined with a following ADD/MUL/DIV/MOD.
+///
+/// Preserves the existing rule order:
+/// 1. k + 0 -> NOP
+/// 2. k * 1 -> NOP
+/// 3. k / 1 -> NOP
+/// 4. k * 0 -> PUSH_INT 0
+/// 5. 2^n * -> shift
+/// 6. 2^n / -> shift
+/// 7. 2^n % -> bitwise AND
+fn try_fuse_push_int_op(
+    code: &mut Vec<Instr>,
+    wide: &mut [i64],
+    i: usize,
+    instr: Instr,
+) -> bool {
+    if instr.op() != OP_PUSH_INT || code.len() < i + 2 {
+        return false;
+    }
+    let next = code[i + 1];
+    let val = instr.a();
+    let uval = val as u64;
+
+    if next.op() == OP_ADD && val == 0 {
+        code[i] = Instr::none(OP_NOP);
+        drain_and_patch(code, wide, i + 1..=i + 1);
+        return true;
+    }
+    if next.op() == OP_MUL && val == 1 {
+        code[i] = Instr::none(OP_NOP);
+        drain_and_patch(code, wide, i + 1..=i + 1);
+        return true;
+    }
+    if next.op() == OP_DIV && val == 1 {
+        code[i] = Instr::none(OP_NOP);
+        drain_and_patch(code, wide, i + 1..=i + 1);
+        return true;
+    }
+    if next.op() == OP_MUL && val == 0 {
+        code[i] = Instr::a1(OP_PUSH_INT, 0);
+        drain_and_patch(code, wide, i + 1..=i + 1);
+        return true;
+    }
+
+    if uval == 0 || !uval.is_power_of_two() {
+        return false;
+    }
+
+    match next.op() {
+        OP_MUL if uval <= 64 => {
+            code[i] = Instr::a1(OP_PUSH_INT, uval.trailing_zeros());
+            code[i + 1] = Instr::none(OP_SHL);
+            true
+        }
+        OP_DIV if uval <= 64 => {
+            code[i] = Instr::a1(OP_PUSH_INT, uval.trailing_zeros());
+            code[i + 1] = Instr::none(OP_SHR);
+            true
+        }
+        OP_MOD => {
+            let mask = uval - 1;
+            if u32::try_from(mask).is_ok() {
+                code[i] = Instr::a1(OP_PUSH_INT, mask as u32);
+                code[i + 1] = Instr::none(OP_BITAND);
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
 /// Peephole optimizer â€” scans bytecode and fuses common patterns.
 /// This runs after compilation and catches patterns the AST-level fusion misses.
 /// Uses fixed-point iteration: keeps scanning until no more optimizations are made,
@@ -99,38 +267,8 @@ fn peephole_at(
 ) -> bool {
     let op = instr.op();
 
-    // Pattern 6: LOAD_LOCAL a; PUSH_INT 1; ADD; STORE_LOCAL a â†’ INC_LOCAL a
-    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
-        let next = code[i + 1];
-        let next2 = code[i + 2];
-        let next3 = code[i + 3];
-        if next.op() == OP_PUSH_INT
-            && next.a() == 1
-            && next2.op() == OP_ADD
-            && next3.op() == OP_STORE_LOCAL
-            && next3.a() == instr.a()
-        {
-            code[i] = Instr::a1(OP_INC_LOCAL, instr.a());
-            drain_and_patch(code, wide, i + 1..=i + 3);
-            return true;
-        }
-    }
-
-    // Pattern 11: DEC_LOCAL â€” LOAD_LOCAL a; PUSH_INT 1; SUB; STORE_LOCAL a
-    if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
-        let next = code[i + 1];
-        let next2 = code[i + 2];
-        let next3 = code[i + 3];
-        if next.op() == OP_PUSH_INT
-            && next.a() == 1
-            && next2.op() == OP_SUB
-            && next3.op() == OP_STORE_LOCAL
-            && next3.a() == instr.a()
-        {
-            code[i] = Instr::a1(OP_DEC_LOCAL, instr.a());
-            drain_and_patch(code, wide, i + 1..=i + 3);
-            return true;
-        }
+    if try_fuse_inc_dec(code, wide, i, instr) {
+        return true;
     }
 
     // Pattern 7: LOAD_LOCAL a; LOAD_LOCAL b; ADD; STORE_LOCAL a â†’ ADD_LOCAL_STORE a, b
@@ -304,158 +442,12 @@ fn peephole_at(
         return true;
     }
 
-    // Pattern 13: PUSH_INT a; STORE_LOCAL b â†’ LOAD_CONST_LOCAL
-    // Fuses constant integer assignment into a single instruction.
-    // Encoding: a=slot, b=value (16-bit), c=0 for inline int.
-    // Only fuses when value fits in 16 bits (most common case).
-    if op == OP_PUSH_INT
-        && code.len() >= i + 2
-        && !jump_targets.contains(&i)
-        && !jump_targets.contains(&(i + 1))
-    {
-        let prev_is_jump = i > 0 && code[i - 1].op() == OP_JUMP;
-        if !prev_is_jump {
-            let next = code[i + 1];
-            if next.op() == OP_STORE_LOCAL {
-                let int_val = instr.a();
-                let slot = next.a();
-                if u16::try_from(int_val).is_ok() {
-                    code[i] = Instr::make(OP_LOAD_CONST_LOCAL, slot, int_val as u16, 0);
-                    drain_and_patch(code, wide, i + 1..=i + 1);
-                    return true;
-                }
-            }
-        }
+    if try_fuse_const_store(code, wide, i, instr, &jump_targets) {
+        return true;
     }
 
-    // Pattern 14: PUSH_FLOAT a; STORE_LOCAL b â†’ LOAD_CONST_LOCAL b, wide_idx, 1
-    if op == OP_PUSH_FLOAT
-        && code.len() >= i + 2
-        && !jump_targets.contains(&i)
-        && !jump_targets.contains(&(i + 1))
-    {
-        let prev_is_jump = i > 0 && code[i - 1].op() == OP_JUMP;
-        if !prev_is_jump {
-            let next = code[i + 1];
-            if next.op() == OP_STORE_LOCAL {
-                let w = instr.a() as u16;
-                let slot = next.a();
-                code[i] = Instr::make(OP_LOAD_CONST_LOCAL, slot, w, 1);
-                drain_and_patch(code, wide, i + 1..=i + 1);
-                return true;
-            }
-        }
-    }
-
-    // Pattern 15: PUSH_STR a; STORE_LOCAL b â†’ LOAD_CONST_LOCAL with kind=2
-    if op == OP_PUSH_STR
-        && code.len() >= i + 2
-        && !jump_targets.contains(&i)
-        && !jump_targets.contains(&(i + 1))
-    {
-        // Extra safety: if previous instruction is JUMP, this is the merge point
-        // of an if-else — the then branch pushes to stack, don't fuse.
-        let prev_is_jump = i > 0 && code[i - 1].op() == OP_JUMP;
-        if !prev_is_jump {
-            let next = code[i + 1];
-            if next.op() == OP_STORE_LOCAL {
-                let str_idx = instr.a() as u16;
-                let slot = next.a();
-                code[i] = Instr::make(OP_LOAD_CONST_LOCAL, slot, str_idx, 2);
-                drain_and_patch(code, wide, i + 1..=i + 1);
-                return true;
-            }
-        }
-    }
-
-    // Pattern 16: PUSH_NIL/TRUE/FALSE; STORE_LOCAL b â†’ fused boolean/nil store
-    // Encode as LOAD_CONST_LOCAL with c=3 for nil, c=4 for true, c=5 for false
-    if (op == OP_PUSH_NIL || op == OP_PUSH_TRUE || op == OP_PUSH_FALSE)
-        && code.len() >= i + 2
-        && !jump_targets.contains(&i)
-        && !jump_targets.contains(&(i + 1))
-    {
-        let prev_is_jump = i > 0 && code[i - 1].op() == OP_JUMP;
-        if !prev_is_jump {
-            let next = code[i + 1];
-            if next.op() == OP_STORE_LOCAL {
-                let kind = match op {
-                    OP_PUSH_NIL => 3,
-                    OP_PUSH_TRUE => 4,
-                    OP_PUSH_FALSE => 5,
-                    _ => 0,
-                };
-                let slot = next.a();
-                code[i] = Instr::make(OP_LOAD_CONST_LOCAL, slot, 0, kind);
-                drain_and_patch(code, wide, i + 1..=i + 1);
-                return true;
-            }
-        }
-    }
-
-    // Pattern 17: PUSH_INT_WIDE a; STORE_LOCAL b â†’ LOAD_CONST_LOCAL b, a, 0
-    if op == OP_PUSH_INT_WIDE
-        && code.len() >= i + 2
-        && !jump_targets.contains(&i)
-        && !jump_targets.contains(&(i + 1))
-    {
-        let prev_is_jump = i > 0 && code[i - 1].op() == OP_JUMP;
-        if !prev_is_jump {
-            let next = code[i + 1];
-            if next.op() == OP_STORE_LOCAL {
-                let w = instr.a() as u16;
-                let slot = next.a();
-                code[i] = Instr::make(OP_LOAD_CONST_LOCAL, slot, w, 0);
-                drain_and_patch(code, wide, i + 1..=i + 1);
-                return true;
-            }
-        }
-    }
-
-    // === NEW ALGEBRAIC PATTERNS ===
-
-    // Pattern 18: Identity addition â€” PUSH_INT 0; ADD â†’ NOP (x + 0 = x)
-    // The ADD pops two values and pushes the sum; with 0 on top, it just returns the bottom value.
-    // Replace ADD with NOP so the bottom value stays on the stack, then remove the PUSH_INT 0.
-    if op == OP_PUSH_INT && instr.a() == 0 && code.len() >= i + 2 {
-        let next = code[i + 1];
-        if next.op() == OP_ADD {
-            // Remove PUSH_INT 0, replace ADD with NOP (value already on stack)
-            code[i] = Instr::none(OP_NOP);
-            drain_and_patch(code, wide, i + 1..=i + 1);
-            return true;
-        }
-    }
-
-    // Pattern 19: Identity multiplication â€” PUSH_INT 1; MUL â†’ NOP (x * 1 = x)
-    if op == OP_PUSH_INT && instr.a() == 1 && code.len() >= i + 2 {
-        let next = code[i + 1];
-        if next.op() == OP_MUL {
-            code[i] = Instr::none(OP_NOP);
-            drain_and_patch(code, wide, i + 1..=i + 1);
-            return true;
-        }
-    }
-
-    // Pattern 20: Identity division â€” PUSH_INT 1; DIV â†’ NOP (x / 1 = x)
-    if op == OP_PUSH_INT && instr.a() == 1 && code.len() >= i + 2 {
-        let next = code[i + 1];
-        if next.op() == OP_DIV {
-            code[i] = Instr::none(OP_NOP);
-            drain_and_patch(code, wide, i + 1..=i + 1);
-            return true;
-        }
-    }
-
-    // Pattern 21: Zero multiplication â€” PUSH_INT 0; MUL â†’ PUSH_INT 0 (x * 0 = 0)
-    // Replace the PUSH_INT 0 at position i with NOP (remove the x), replace MUL with PUSH_INT 0
-    if op == OP_PUSH_INT && instr.a() == 0 && code.len() >= i + 2 {
-        let next = code[i + 1];
-        if next.op() == OP_MUL {
-            code[i] = Instr::a1(OP_PUSH_INT, 0);
-            drain_and_patch(code, wide, i + 1..=i + 1);
-            return true;
-        }
+    if try_fuse_push_int_op(code, wide, i, instr) {
+        return true;
     }
 
     // Pattern 22: Self subtraction â€” LOAD_LOCAL a; LOAD_LOCAL a; SUB â†’ PUSH_INT 0 (x - x = 0)
@@ -592,53 +584,8 @@ fn peephole_at(
         }
     }
 
-    // === STRENGTH REDUCTION ===
-
-    // Pattern 31: Multiply by power of 2 → shift — PUSH_INT (2^n); MUL → PUSH_INT n; SHL
-    // e.g. $x * 4 → $x << 2
-    if op == OP_PUSH_INT && code.len() >= i + 2 {
-        let next = code[i + 1];
-        if next.op() == OP_MUL {
-            let val = instr.a() as u64;
-            if val > 0 && val.is_power_of_two() && val <= 64 {
-                let shift = val.trailing_zeros();
-                code[i] = Instr::a1(OP_PUSH_INT, shift);
-                code[i + 1] = Instr::none(OP_SHL);
-                return true;
-            }
-        }
-    }
-
-    // Pattern 32: Divide by power of 2 → shift — PUSH_INT (2^n); DIV → PUSH_INT n; SHR
-    // e.g. $x / 8 → $x >> 3 (only for positive integers)
-    if op == OP_PUSH_INT && code.len() >= i + 2 {
-        let next = code[i + 1];
-        if next.op() == OP_DIV {
-            let val = instr.a() as u64;
-            if val > 0 && val.is_power_of_two() && val <= 64 {
-                let shift = val.trailing_zeros();
-                code[i] = Instr::a1(OP_PUSH_INT, shift);
-                code[i + 1] = Instr::none(OP_SHR);
-                return true;
-            }
-        }
-    }
-
-    // Pattern 33: Modulo by power of 2 → bitwise AND — PUSH_INT (2^n); MOD → PUSH_INT (2^n-1); BITAND
-    // e.g. $x % 8 → $x & 7
-    if op == OP_PUSH_INT && code.len() >= i + 2 {
-        let next = code[i + 1];
-        if next.op() == OP_MOD {
-            let val = instr.a() as u64;
-            if val > 0 && val.is_power_of_two() {
-                let mask = val - 1;
-                if u32::try_from(mask).is_ok() {
-                    code[i] = Instr::a1(OP_PUSH_INT, mask as u32);
-                    code[i + 1] = Instr::none(OP_BITAND);
-                    return true;
-                }
-            }
-        }
+    if try_fuse_push_int_op(code, wide, i, instr) {
+        return true;
     }
 
     // Pattern 34: Constant shift folding — PUSH_INT a; PUSH_INT b; SHL → PUSH_INT (a << b)

@@ -14,6 +14,8 @@
 extern crate self as xcl_plugins;
 
 pub mod args;
+pub mod errors;
+mod axioms;
 mod registry;
 #[cfg(feature = "encoding")]
 mod encoding;
@@ -32,6 +34,7 @@ mod wellknown;
 mod opcode_test;
 
 pub use args::split_named_args;
+pub use errors::{Group, is_known_kind};
 pub use registry::{
     register_all, IMPL_REGISTRY, NATIVE_REGISTRY, OPCODE_REGISTRY, TRAIT_REGISTRY, TYPE_REGISTRY,
     OpcodeEntry, OpcodeFn, registered_opcode_name,
@@ -44,7 +47,6 @@ use xcl_vm::{VM, Value};
 /// Create a new VM with all registered types and builtins.
 pub fn new_vm() -> VM {
     let mut vm = VM::new();
-    vm.register_core();
     registry::register_all(&mut vm);
     vm
 }
