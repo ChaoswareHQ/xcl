@@ -113,8 +113,8 @@ pub(crate) fn build_basic_blocks(code: &[Instr]) -> Vec<BasicBlock> {
 
     // Build successor edges and collect defs/uses
     for block in &mut blocks {
-        for idx in block.start..=block.end {
-            let instr = code[idx];
+        for (idx, instr) in code[block.start..=block.end].iter().enumerate() {
+            let idx = block.start + idx;
             match instr.op() {
                 OP_STORE_LOCAL => {
                     block.defs.push(instr.a());
@@ -191,8 +191,8 @@ fn reaching_definitions(
     let mut kill: Vec<Vec<u32>> = vec![Vec::new(); num_blocks];
 
     for (bi, block) in blocks.iter().enumerate() {
-        for idx in block.start..=block.end {
-            let instr = code[idx];
+        for (idx, instr) in code[block.start..=block.end].iter().enumerate() {
+            let idx = block.start + idx;
             if instr.op() == OP_STORE_LOCAL {
                 let slot = instr.a();
                 // Kill previous defs of this slot
@@ -272,11 +272,12 @@ fn reaching_definitions(
             result[block.start].clone_from(&in_defs[bi]);
         }
         // Subsequent instructions get in_defs plus defs from earlier in block
-        for idx in (block.start + 1)..=block.end {
+        for (idx_offset, _result_idx) in ((block.start + 1)..=block.end).enumerate() {
+            let idx = block.start + 1 + idx_offset;
             if idx < len {
                 result[idx].clone_from(&in_defs[bi]);
-                for i in block.start..idx {
-                    let instr = code[i];
+                for (i_offset, instr) in code[block.start..idx].iter().enumerate() {
+                    let i = block.start + i_offset;
                     if instr.op() == OP_STORE_LOCAL {
                         let slot = instr.a();
                         // Remove killed defs of this slot
@@ -309,8 +310,7 @@ pub(crate) fn live_variables(code: &[Instr], blocks: &[BasicBlock]) -> Vec<BTree
     let mut def_set: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); num_blocks];
 
     for (bi, block) in blocks.iter().enumerate() {
-        for idx in block.start..=block.end {
-            let instr = code[idx];
+        for instr in &code[block.start..=block.end] {
             let op = instr.op();
             match op {
                 // Simple load/store
@@ -423,7 +423,8 @@ pub(crate) fn live_variables(code: &[Instr], blocks: &[BasicBlock]) -> Vec<BTree
     // Build per-instruction live vars
     let mut result: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); len];
     for (bi, block) in blocks.iter().enumerate() {
-        for idx in block.start..=block.end {
+        for (idx_offset, idx) in (block.start..=block.end).enumerate() {
+            let _ = idx_offset;
             if idx < len {
                 // Live at this point = live_in plus uses from later in block
                 // Simplified: use live_in for the whole block

@@ -88,8 +88,7 @@ fn detect_loops(code: &[Instr], blocks: &[BasicBlock]) -> Vec<Vec<usize>> {
                 loop_blocks.insert(si); // Header
                 let mut worklist: Vec<usize> = vec![bi];
                 while let Some(w) = worklist.pop() {
-                    if !loop_blocks.contains(&w) {
-                        loop_blocks.insert(w);
+                    if loop_blocks.insert(w) {
                         // Add predecessors of w
                         for (pi, pred_succs) in successors.iter().enumerate() {
                             if pred_succs.contains(&w) && !loop_blocks.contains(&pi) {
@@ -146,7 +145,7 @@ pub fn loop_invariant_code_motion(code: &mut Vec<Instr>, wide: &mut [i64]) {
     // Map instruction index to block index for quick lookup
     let instr_to_block: Vec<Option<usize>> = (0..code.len())
         .map(|i| {
-            blocks.iter().position(|b| i >= b.start && i <= b.end).map(|bi| bi)
+            blocks.iter().position(|b| i >= b.start && i <= b.end)
         })
         .collect();
 

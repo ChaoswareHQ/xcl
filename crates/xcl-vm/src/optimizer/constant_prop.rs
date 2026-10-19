@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 /// Tracks known constant values for each local slot and replaces LOAD_LOCAL
 /// with PUSH_INT when the slot is known to hold a constant. Stops propagation
 /// at function calls (side effects), global variable access (mutable), and loop back-edges.
-pub fn constant_propagation(code: &mut Vec<Instr>, wide: &mut [i64]) {
+pub fn constant_propagation(code: &mut Vec<Instr>, wide: &[i64]) {
     if code.len() <= 1 {
         return;
     }

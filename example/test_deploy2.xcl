@@ -6,7 +6,7 @@ cloudflare "my-account" {
     $dns = api.list "dns/records"
     if $dns.is_ok {
         $matching = collections.filter $dns.value {
-            |record| record.name == "test"
+            |$record| $record.name == "test"
         }
 
         if collections.array_len $matching > 0 {

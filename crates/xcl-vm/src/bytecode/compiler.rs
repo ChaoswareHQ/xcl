@@ -154,7 +154,7 @@ impl Compiler {
                 let dst = self.temp_slot(temp_depth);
                 // Inline small values directly in operand b (kind=0)
                 // For larger values, store in wide_operands (kind=6)
-                if *value >= 0 && *value <= i64::from(u16::MAX) {
+                if u16::try_from(*value).is_ok() {
                     self.emit(Instr::make(OP_LOAD_CONST_LOCAL, dst, *value as u16, 0));
                 } else {
                     let w = self.wide(*value);
@@ -176,7 +176,7 @@ impl Compiler {
                 if let AstNode::Int { value, .. } = operand.as_ref() {
                     let dst = self.temp_slot(temp_depth);
                     let neg = -*value;
-                    if neg >= 0 && neg <= i64::from(u16::MAX) {
+                    if u16::try_from(neg).is_ok() {
                         self.emit(Instr::make(OP_LOAD_CONST_LOCAL, dst, neg as u16, 0));
                     } else {
                         let w = self.wide(neg);

@@ -75,10 +75,10 @@ use smallvec::SmallVec;
 /// Fast string hash for field name lookups (FNV-1a).
 #[inline(always)]
 pub fn fast_hash(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xCBF29CE484222325;
+    let mut h: u64 = 0xCBF2_9CE4_8422_2325;
     for &b in bytes {
         h ^= b as u64;
-        h = h.wrapping_mul(0x100000001B3);
+        h = h.wrapping_mul(0x0100_0000_01B3);
     }
     h
 }
@@ -109,9 +109,43 @@ fn checked_div_overflow(a: i64, b: i64) -> i64 {
         .unwrap_or_else(|| (a as f64 / b as f64) as i64)
 }
 
-// ── Macros to reduce dispatch boilerplate ──
-// Since Rust macros cannot expand to match arms directly, we use nested match
-// patterns with guard clauses in the dispatch method.
+// ── Helper functions to reduce dispatch boilerplate ──
+// Each function handles a fused binary arithmetic opcode by reading two locals,
+// performing the operation with int/float/fallback paths, and writing back.
+
+type BinaryIntOp = fn(i64, i64) -> i64;
+type BinaryFloatOp = fn(f64, f64) -> f64;
+type BinaryFallbackOp = fn(Value, Value, &bumpalo::Bump) -> Value;
+
+#[inline(always)]
+fn fused_local_store(
+    locals: &mut SmallVec<[Value; 16]>,
+    instr: Instr,
+    int_op: BinaryIntOp,
+    float_op: BinaryFloatOp,
+    fallback: BinaryFallbackOp,
+    arena: &bumpalo::Bump,
+) -> Action {
+    let dest = instr.a() as usize;
+    let src = instr.b() as usize;
+    let a = unsafe { *locals.get_unchecked(dest) };
+    let b = unsafe { *locals.get_unchecked(src) };
+    if a.tag() == TAG_INT && b.tag() == TAG_INT {
+        let r = int_op(a.as_i48(), b.as_i48());
+        unsafe {
+            *locals.get_unchecked_mut(dest) = Value::from_i48(r);
+        }
+    } else if a.is_float() && b.is_float() {
+        unsafe {
+            *locals.get_unchecked_mut(dest) = Value::from_f64(float_op(a.as_f64(), b.as_f64()));
+        }
+    } else {
+        unsafe {
+            *locals.get_unchecked_mut(dest) = fallback(a, b, arena);
+        }
+    }
+    Action::Next
+}
 
 #[cfg(feature = "opcode-stats")]
 /// Generate opcode_name match from a list of opcode => display_name pairs.
@@ -829,7 +863,7 @@ impl VM {
                 let result = if a.is_int() && b.is_int() {
                     a.as_i48() == b.as_i48()
                 } else if a.is_float() && b.is_float() {
-                    a.as_f64() == b.as_f64()
+                    (a.as_f64() - b.as_f64()).abs() < 1e-15
                 } else {
                     a.eq_(b)
                 };
@@ -842,7 +876,7 @@ impl VM {
                 let result = if a.is_int() && b.is_int() {
                     a.as_i48() != b.as_i48()
                 } else if a.is_float() && b.is_float() {
-                    a.as_f64() != b.as_f64()
+                    (a.as_f64() - b.as_f64()).abs() >= 1e-15
                 } else {
                     !a.eq_(b)
                 };
@@ -1642,94 +1676,22 @@ impl VM {
             }
 
             // ── Two-operand local store: dest = dest op src ──
-            OP_ADD_LOCAL_STORE => {
-                let l = &mut self.frames[top].locals;
-                let dest = i.a() as usize;
-                let src = i.b() as usize;
-                let a = unsafe { *l.get_unchecked(dest) };
-                let b = unsafe { *l.get_unchecked(src) };
-                if a.tag() == TAG_INT && b.tag() == TAG_INT {
-                    let r = checked_add_overflow(a.as_i48(), b.as_i48());
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_i48(r);
-                    }
-                } else if a.is_float() && b.is_float() {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() + b.as_f64());
-                    }
-                } else {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = a.add(b, &self.arena);
-                    }
-                }
-                Action::Next
-            }
-            OP_SUB_LOCAL_STORE => {
-                let l = &mut self.frames[top].locals;
-                let dest = i.a() as usize;
-                let src = i.b() as usize;
-                let a = unsafe { *l.get_unchecked(dest) };
-                let b = unsafe { *l.get_unchecked(src) };
-                if a.tag() == TAG_INT && b.tag() == TAG_INT {
-                    let r = checked_sub_overflow(a.as_i48(), b.as_i48());
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_i48(r);
-                    }
-                } else if a.is_float() && b.is_float() {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() - b.as_f64());
-                    }
-                } else {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = a.sub_(b);
-                    }
-                }
-                Action::Next
-            }
-            OP_MUL_LOCAL_STORE => {
-                let l = &mut self.frames[top].locals;
-                let dest = i.a() as usize;
-                let src = i.b() as usize;
-                let a = unsafe { *l.get_unchecked(dest) };
-                let b = unsafe { *l.get_unchecked(src) };
-                if a.tag() == TAG_INT && b.tag() == TAG_INT {
-                    let r = checked_mul_overflow(a.as_i48(), b.as_i48());
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_i48(r);
-                    }
-                } else if a.is_float() && b.is_float() {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() * b.as_f64());
-                    }
-                } else {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = a.mul(b, &self.arena);
-                    }
-                }
-                Action::Next
-            }
-            OP_DIV_LOCAL_STORE => {
-                let l = &mut self.frames[top].locals;
-                let dest = i.a() as usize;
-                let src = i.b() as usize;
-                let a = unsafe { *l.get_unchecked(dest) };
-                let b = unsafe { *l.get_unchecked(src) };
-                if a.tag() == TAG_INT && b.tag() == TAG_INT {
-                    let r = checked_div_overflow(a.as_i48(), b.as_i48());
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_i48(r);
-                    }
-                } else if a.is_float() && b.is_float() {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() / b.as_f64());
-                    }
-                } else {
-                    unsafe {
-                        *l.get_unchecked_mut(dest) = a.div_(b);
-                    }
-                }
-                Action::Next
-            }
+            OP_ADD_LOCAL_STORE => fused_local_store(
+                &mut self.frames[top].locals, i, checked_add_overflow,
+                |a, b| a + b, |a, b, arena| a.add(b, arena), &self.arena,
+            ),
+            OP_SUB_LOCAL_STORE => fused_local_store(
+                &mut self.frames[top].locals, i, checked_sub_overflow,
+                |a, b| a - b, |a, b, _arena| a.sub_(b), &self.arena,
+            ),
+            OP_MUL_LOCAL_STORE => fused_local_store(
+                &mut self.frames[top].locals, i, checked_mul_overflow,
+                |a, b| a * b, |a, b, arena| a.mul(b, arena), &self.arena,
+            ),
+            OP_DIV_LOCAL_STORE => fused_local_store(
+                &mut self.frames[top].locals, i, checked_div_overflow,
+                |a, b| a / b, |a, b, _arena| a.div_(b), &self.arena,
+            ),
 
             // ── WHILE_LT_INT: while $a < b { body } (single-opcode while-loop) ──
             // Operand a = local slot, b = int constant, c = exit_wide_idx

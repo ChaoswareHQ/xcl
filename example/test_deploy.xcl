@@ -1,5 +1,5 @@
 # Test the deploy function structure
-deploy(account, domain) {
+deploy($account, $domain) {
     # Load credentials
     $env = io.read_env ".env"
     if $env.is_err {
@@ -13,7 +13,7 @@ deploy(account, domain) {
         $dns = api.list "dns/records"
         if $dns.is_ok {
             $matching = collections.filter $dns.value {
-                |record| record.name == $domain
+                |$record| $record.name == $domain
             }
 
             if collections.array_len $matching > 0 {

@@ -158,7 +158,7 @@ fn peephole_at(code: &mut Vec<Instr>, wide: &mut [i64], i: usize, instr: Instr) 
         let next2 = code[i + 2];
         let next3 = code[i + 3];
         if next.op() == OP_PUSH_INT
-            && next.a() <= u16::MAX as u32
+            && u16::try_from(next.a()).is_ok()
             && next3.op() == OP_STORE_LOCAL
             && next3.a() == instr.a()
         {
@@ -178,12 +178,12 @@ fn peephole_at(code: &mut Vec<Instr>, wide: &mut [i64], i: usize, instr: Instr) 
 
     // Pattern 10: LOAD_LOCAL a; PUSH_INT k; ADD; STORE_LOCAL b â†’ ADD_INT_STORE_LOCAL b, a, k
     // Like Luau's ADDK â€” constant on the right side
-    if op == OP_LOAD_LOCAL && code.len() >= i + 4 && instr.a() <= u16::MAX as u32 {
+    if op == OP_LOAD_LOCAL && code.len() >= i + 4 && u16::try_from(instr.a()).is_ok() {
         let next = code[i + 1];
         let next2 = code[i + 2];
         let next3 = code[i + 3];
         if next.op() == OP_PUSH_INT
-            && next.a() <= u8::MAX as u32
+            && u8::try_from(next.a()).is_ok()
             && next2.op() == OP_ADD
             && next3.op() == OP_STORE_LOCAL
         {
@@ -287,7 +287,7 @@ fn peephole_at(code: &mut Vec<Instr>, wide: &mut [i64], i: usize, instr: Instr) 
         if next.op() == OP_STORE_LOCAL {
             let int_val = instr.a();
             let slot = next.a();
-            if int_val <= u16::MAX as u32 {
+            if u16::try_from(int_val).is_ok() {
                 code[i] = Instr::make(OP_LOAD_CONST_LOCAL, slot, int_val as u16, 0);
                 drain_and_patch(code, wide, i + 1..=i + 1);
                 return true;
@@ -523,10 +523,10 @@ fn peephole_at(code: &mut Vec<Instr>, wide: &mut [i64], i: usize, instr: Instr) 
         let next3 = code[i + 3];
         let next4 = code[i + 4];
         if next.op() == OP_PUSH_INT
-            && next.a() <= u16::MAX as u32
+            && u16::try_from(next.a()).is_ok()
             && next2.op() == OP_MOD
             && next3.op() == OP_PUSH_INT
-            && next3.a() <= u8::MAX as u32
+            && u8::try_from(next3.a()).is_ok()
             && next4.op() == OP_EQ
         {
             code[i] = Instr::make(
@@ -550,7 +550,7 @@ fn peephole_at(code: &mut Vec<Instr>, wide: &mut [i64], i: usize, instr: Instr) 
             let val = instr.a() as u64;
             if val > 0 && val.is_power_of_two() && val <= 64 {
                 let shift = val.trailing_zeros();
-                code[i] = Instr::a1(OP_PUSH_INT, shift as u32);
+                code[i] = Instr::a1(OP_PUSH_INT, shift);
                 code[i + 1] = Instr::none(OP_SHL);
                 return true;
             }
@@ -565,7 +565,7 @@ fn peephole_at(code: &mut Vec<Instr>, wide: &mut [i64], i: usize, instr: Instr) 
             let val = instr.a() as u64;
             if val > 0 && val.is_power_of_two() && val <= 64 {
                 let shift = val.trailing_zeros();
-                code[i] = Instr::a1(OP_PUSH_INT, shift as u32);
+                code[i] = Instr::a1(OP_PUSH_INT, shift);
                 code[i + 1] = Instr::none(OP_SHR);
                 return true;
             }
@@ -580,7 +580,7 @@ fn peephole_at(code: &mut Vec<Instr>, wide: &mut [i64], i: usize, instr: Instr) 
             let val = instr.a() as u64;
             if val > 0 && val.is_power_of_two() {
                 let mask = val - 1;
-                if mask <= u32::MAX as u64 {
+                if u32::try_from(mask).is_ok() {
                     code[i] = Instr::a1(OP_PUSH_INT, mask as u32);
                     code[i + 1] = Instr::none(OP_BITAND);
                     return true;
@@ -595,7 +595,7 @@ fn peephole_at(code: &mut Vec<Instr>, wide: &mut [i64], i: usize, instr: Instr) 
         let next2 = code[i + 2];
         if next.op() == OP_PUSH_INT && (next2.op() == OP_SHL || next2.op() == OP_SHR) {
             let a = instr.a() as i64;
-            let b = next.a() as u32;
+            let b = next.a();
             if b < 64 {
                 let result = if next2.op() == OP_SHL {
                     (a as i128) << b
@@ -619,7 +619,7 @@ fn peephole_at(code: &mut Vec<Instr>, wide: &mut [i64], i: usize, instr: Instr) 
             let a = instr.a() as i64;
             let b = next.a() as i64;
             let result = a & b;
-            if result >= 0 && result <= u32::MAX as i64 {
+            if u32::try_from(result).is_ok() {
                 code[i] = Instr::a1(OP_PUSH_INT, result as u32);
                 drain_and_patch(code, wide, i + 1..=i + 2);
                 return true;

@@ -19,7 +19,7 @@ const UNROLL_FACTOR: usize = 4;
 /// Checks if an instruction is a function call or other side-effecting operation
 /// that prevents safe unrolling.
 #[inline]
-fn is_side_effecting(instr: &Instr) -> bool {
+fn is_side_effecting(instr: Instr) -> bool {
     matches!(
         instr.op(),
         OP_CALL
@@ -64,7 +64,7 @@ fn find_induction_variable(code: &[Instr], loop_start: usize, loop_end: usize) -
 /// 3. Find the induction variable ($i = $i + 1)
 /// 4. Duplicate the loop body UNROLL_FACTOR times
 /// 5. Adjust the induction variable increment
-pub(crate) fn loop_unroll(code: &mut Vec<Instr>, wide: &mut [i64]) {
+pub(crate) fn loop_unroll(code: &mut Vec<Instr>, wide: &[i64]) {
     let blocks = build_basic_blocks(code);
     if blocks.is_empty() {
         return;
@@ -99,22 +99,22 @@ pub(crate) fn loop_unroll(code: &mut Vec<Instr>, wide: &mut [i64]) {
 /// Try to unroll a single loop starting at `header`.
 fn try_unroll_loop(
     code: &mut Vec<Instr>,
-    wide: &mut [i64],
+    wide: &[i64],
     _blocks: &[BasicBlock],
     header: usize,
 ) -> bool {
-    let len = code.len();
+    let _len = code.len();
 
     // Find the loop body: from header to the backward jump target
     let mut loop_end = header;
     let mut jump_back_target: Option<usize> = None;
 
-    for idx in header..len {
-        let instr = &code[idx];
+    for (idx, instr) in code[header..].iter().enumerate() {
+        let idx = header + idx;
         let op = instr.op();
 
         // Check for side effects
-        if is_side_effecting(instr) {
+        if is_side_effecting(*instr) {
             return false;
         }
 
@@ -160,7 +160,7 @@ fn try_unroll_loop(
     }
 
     // Find the induction variable
-    let Some((_slot, increment)) = find_induction_variable(code, body_start, body_end) else {
+    let Some((slot, increment)) = find_induction_variable(code, body_start, body_end) else {
         return false;
     };
 
@@ -172,9 +172,7 @@ fn try_unroll_loop(
 
     // Collect the loop body instructions (excluding the jump at the end)
     let mut body_instrs: Vec<Instr> = Vec::new();
-    for idx in body_start..body_end {
-        body_instrs.push(code[idx]);
-    }
+    body_instrs.extend(&code[body_start..body_end]);
 
     // Build the unrolled body: duplicate UNROLL_FACTOR times
     let mut unrolled_body: Vec<Instr> = Vec::new();
@@ -194,36 +192,34 @@ fn try_unroll_loop(
 
     // Replace the induction variable increment in the last copy with the total increment
     // Find the INC/ADD_INT_LOCAL instruction in the last copy and adjust it
-    if let Some(slot) = _slot.checked_sub(0) {
-        let last_copy_start = (UNROLL_FACTOR - 1) * body_size;
-        for instr in unrolled_body[last_copy_start..].iter_mut() {
-            match instr.op() {
-                OP_INC_LOCAL if instr.a() == slot => {
-                    // Replace INC_LOCAL with ADD_INT_LOCAL using the total increment
-                    let inc_val = new_increment.abs() as u32;
-                    if inc_val <= u16::MAX as u32 {
-                        *instr = Instr::a2(
-                            if new_increment > 0 {
-                                OP_ADD_INT_LOCAL
-                            } else {
-                                OP_SUB_INT_LOCAL
-                            },
-                            slot,
-                            inc_val as u16,
-                        );
-                    }
-                    break;
+    let last_copy_start = (UNROLL_FACTOR - 1) * body_size;
+    for instr in unrolled_body[last_copy_start..].iter_mut() {
+        match instr.op() {
+            OP_INC_LOCAL if instr.a() == slot => {
+                // Replace INC_LOCAL with ADD_INT_LOCAL using the total increment
+                let inc_val = new_increment.unsigned_abs();
+                if u16::try_from(inc_val).is_ok() {
+                    *instr = Instr::a2(
+                        if new_increment > 0 {
+                            OP_ADD_INT_LOCAL
+                        } else {
+                            OP_SUB_INT_LOCAL
+                        },
+                        slot,
+                        inc_val as u16,
+                    );
                 }
-                OP_ADD_INT_LOCAL if instr.a() == slot => {
-                    let current_val = instr.b() as i64;
-                    let total = current_val * UNROLL_FACTOR as i64;
-                    if total > 0 && total <= u16::MAX as i64 {
-                        *instr = Instr::a2(OP_ADD_INT_LOCAL, slot, total as u16);
-                    }
-                    break;
-                }
-                _ => {}
+                break;
             }
+            OP_ADD_INT_LOCAL if instr.a() == slot => {
+                let current_val = instr.b() as i64;
+                let total = current_val * UNROLL_FACTOR as i64;
+                if total > 0 && total <= u16::MAX as i64 {
+                    *instr = Instr::a2(OP_ADD_INT_LOCAL, slot, total as u16);
+                }
+                break;
+            }
+            _ => {}
         }
     }
 

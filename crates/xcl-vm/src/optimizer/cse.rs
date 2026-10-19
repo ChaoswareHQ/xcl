@@ -57,7 +57,7 @@ fn cse_in_block(code: &mut Vec<Instr>, wide: &mut [i64], block: &BasicBlock) {
         if (op == OP_ADD_LOCAL_LOCAL
             || op == OP_SUB_LOCAL_LOCAL
             || op == OP_MUL_LOCAL_LOCAL)
-            && i + 1 <= end
+            && i < end
         {
             let next = code[i + 1];
             if next.op() == OP_STORE_LOCAL {
@@ -172,7 +172,7 @@ fn cse_in_block(code: &mut Vec<Instr>, wide: &mut [i64], block: &BasicBlock) {
         }
 
         // Track PUSH_INT; STORE_LOCAL as a constant expression
-        if op == OP_PUSH_INT && i + 1 <= end {
+        if op == OP_PUSH_INT && i < end {
             let next = code[i + 1];
             if next.op() == crate::bytecode::OP_STORE_LOCAL {
                 let constant = instr.a();

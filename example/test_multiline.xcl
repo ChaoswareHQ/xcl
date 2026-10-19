@@ -1,4 +1,4 @@
-deploy(account, domain) {
+deploy($account, $domain) {
     cloudflare $account {
         $code = """
             addEventListener('fetch', event => {

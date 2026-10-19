@@ -17,13 +17,13 @@ $eq = 10 == 10
 $and1 = true and true
 $neg = -10
 $range1 = 1..10
-greet(name) {
-    print "Hello, " name "!"
+greet($name) {
+    print "Hello, " $name "!"
 }
-$double = (x) -> x * 2
+$double = |$x| $x * 2
 $result1 = [1, 2, 3, 4, 5]
-    |> collections.filter (x) -> x > 2
-    |> collections.map (x) -> x * 10
+    |> collections.filter |$x| $x > 2
+    |> collections.map |$x| $x * 10
 $message = if $count > 10 {
     "big number"
 } else {
@@ -61,9 +61,9 @@ to_string() -> str
 summary() -> str
 }
 MyService is CloudService {
-bucket_create(name) {
+bucket_create($name) {
         api.create "storage/buckets" {
-            name: name
+            name: $name
         }
     }
 bucket_list() {
@@ -145,7 +145,7 @@ $result = {
 }
 
 # Deploy function
-deploy(account, domain) {
+deploy($account, $domain) {
     $env = io.read_env ".env"
     if $env.is_err {
         print "FATAL: Missing .env"
@@ -161,7 +161,7 @@ deploy(account, domain) {
         $dns = api.list "dns/records"
         if $dns.is_ok {
             $matching = collections.filter $dns.value {
-                |record| record.name == $domain
+                |$record| $record.name == $domain
             }
             if collections.array_len $matching > 0 {
                 $record = collections.array_get $matching 0
