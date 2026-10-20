@@ -157,8 +157,39 @@ impl OpcodeCounter {
 /// instruction. They are now the same type.
 type Action = crate::runtime::opcode::OpcodeResult;
 
+/// Number of entries in the direct-mapped callee cache.
+///
+/// Sixteen slots (256 bytes per VM) keeps alternating call sites — e.g.
+/// `is_even` / `is_odd` — from evicting each other; four slots thrashed and
+/// made every tail call miss.
+pub(crate) const CALL_CACHE_SLOTS: usize = 16;
+/// Mask for [`CALL_CACHE_SLOTS`] (a power of two).
+pub(crate) const CALL_CACHE_MASK: usize = CALL_CACHE_SLOTS - 1;
+
+/// A call frame on the VM's frame stack.
+///
+/// # Lifetime invariant
+///
+/// A frame's bytecode pointer may be dereferenced **only while the frame is
+/// active**, i.e. at an index `< self.frame_depth`, and only during the `run()`
+/// or `call_value()` invocation that activated it.
+///
+/// That is sound because every bytecode that can become a frame is kept alive
+/// for the whole of that invocation by one of:
+/// 1. the root: `run(&mut self, bc: &Bytecode)` borrows it for the call;
+/// 2. callees: `FuncValue.bytecode: Option<Arc<Bytecode>>` owned by globals,
+///    call_cache, closures, the operand stack, or the arena (reset only at
+///    the start of `run`);
+/// 3. `Bytecode.user_functions` / `Bytecode.closures` of the root bytecode.
+///
+/// After `run()` / `call_value()` returns, `frame_depth` is back to its entry
+/// value, so the now-dangling pointers in `frames` are never dereferenced.
 pub(crate) struct Frame {
-    code: Arc<Bytecode>,
+    /// Bytecode this frame executes.
+    ///
+    /// Borrowed, not owned: see the lifetime invariant above. A frame
+    /// may only dereference this while it is active (`index < frame_depth`).
+    code_ptr: *const Bytecode,
     /// This frame's local slots inside the VM's shared register file.
     ///
     /// Copyable and pointer-based: handlers need to read/write registers while
@@ -186,6 +217,26 @@ pub(crate) struct Frame {
     /// Positional arguments passed into this frame (`$1`, `$#`, `$@`, `$*`).
     argv: Vec<Value>,
 }
+
+impl Frame {
+    /// Dereference the borrowed bytecode pointer.
+    ///
+    /// # Safety
+    /// Only call while this frame is active; see the module-level invariant.
+    #[inline(always)]
+    fn code(&self) -> &Bytecode {
+        // SAFETY: caller guarantees this frame is active (index < frame_depth)
+        // during run() or call_value(), so the pointer is valid per the
+        // lifetime invariant documented on Frame.
+        unsafe { &*self.code_ptr }
+    }
+}
+
+// SAFETY: the pointer targets a heap-allocated `Bytecode`, not memory owned by
+// the frame or by the `Vec<Frame>`. Sending a VM with `frame_depth == 0` moves
+// only dangling pointers; the next `run` re-initialises them before any
+// dereference.
+unsafe impl Send for Frame {}
 
 /// A frame's view of the shared register file (`VM::regs[base..base + len]`).
 #[derive(Clone, Copy)]
@@ -252,8 +303,10 @@ impl core::ops::IndexMut<usize> for LocalSlice {
 /// `VM` for the duration of the loop (handlers need `&mut VM`).
 #[inline(always)]
 fn frame_code_bounds(frame: &Frame) -> (*const Instr, usize) {
-    let code = &frame.code.instructions;
-    (code.as_ptr(), code.len())
+    // SAFETY: frame_code_bounds is only called for active frames
+    // (index < frame_depth) during run() or call_value().
+    let code = frame.code();
+    (code.instructions.as_ptr(), code.instructions.len())
 }
 
 /// A dispatch table slot containing all methods registered for a specific domain namespace.
@@ -318,7 +371,7 @@ pub struct VM {
     /// Top-level positional script arguments.
     script_args: Vec<Value>,
     /// Direct-mapped 4-entry callee cache for fast recursive call dispatch.
-    call_cache: [(Value, Value); 4],
+    call_cache: [(Value, Value); CALL_CACHE_SLOTS],
     /// Number of live call frames.
     ///
     /// `frames[..frame_depth]` are live; the rest are recycled slots kept
@@ -389,7 +442,7 @@ impl VM {
             opcode_counter: OpcodeCounter::new(),
             script_name: "<input>".into(),
             script_args: Vec::new(),
-            call_cache: [(Value::nil(), Value::nil()); 4],
+            call_cache: [(Value::nil(), Value::nil()); CALL_CACHE_SLOTS],
             frame_depth: 0,
             installed_code: None,
             function_slots: Vec::new(),
@@ -551,11 +604,11 @@ impl VM {
     /// The slot is reset in place, so no `Frame` is ever moved. Callers then
     /// fill in `stack_base`, `locals` and `argv` through `self.frames[idx]`.
     #[inline]
-    fn acquire_frame(&mut self, bc: &Arc<Bytecode>) -> usize {
+    fn acquire_frame(&mut self, bc: &Bytecode) -> usize {
         let idx = self.frame_depth;
         if idx == self.frames.len() {
             self.frames.push(Frame {
-                code: Arc::clone(bc),
+                code_ptr: bc as *const Bytecode,
                 locals: LocalSlice::EMPTY,
                 local_base: 0,
                 ip: 0,
@@ -571,9 +624,7 @@ impl VM {
         self.frame_depth = idx + 1;
 
         let frame = unsafe { self.frames.get_unchecked_mut(idx) };
-        if !Arc::ptr_eq(&frame.code, bc) {
-            frame.code = Arc::clone(bc);
-        }
+        frame.code_ptr = bc as *const Bytecode;
         frame.ip = 0;
         // Item 3: only clear when non-empty — avoids writing length on every call.
         if !frame.iter.is_empty() {
@@ -807,7 +858,7 @@ impl VM {
         }
         // Item 2: clear growing state so repeated runs leave nothing behind.
         self.context_stack.clear();
-        self.call_cache = [(Value::nil(), Value::nil()); 4];
+        self.call_cache = [(Value::nil(), Value::nil()); CALL_CACHE_SLOTS];
         self.arena.reset();
         self.closures = Arc::clone(&bc.closures);
 
@@ -863,9 +914,9 @@ impl VM {
         }
 
         let n = bc.local_names.len().max(16);
-        let root_code = Arc::new(bc.clone());
         self.regs.clear();
-        let root = self.acquire_frame(&root_code);
+        // SAFETY: bc is borrowed by run() and lives for the entire call.
+        let root = self.acquire_frame(bc);
         // Item 3: root frame has no parameters, so nil-fill every slot.
         self.bind_registers(root, n, 0);
         {
@@ -1077,6 +1128,46 @@ impl VM {
         crate::runtime::opcode::OpcodeResult::PushFrame
     }
 
+    /// Enters a call whose arguments are on the operand stack but whose callee
+    /// is **not** (fused named calls embed it in the instruction).
+    ///
+    /// `arg_start` is the first argument; the result replaces it on return.
+    fn enter_call_args_at(
+        &mut self,
+        func: &crate::runtime::value::FuncValue,
+        arg_start: usize,
+        nargs: usize,
+    ) -> crate::runtime::opcode::OpcodeResult {
+        let Some(bc) = &func.bytecode else {
+            self.stack.truncate(arg_start);
+            self.push(Value::nil());
+            return crate::runtime::opcode::OpcodeResult::Next;
+        };
+
+        let n = bc.local_names.len().max(func.params.len());
+        let copy = func.params.len().min(nargs);
+
+        let idx = self.acquire_frame(bc);
+        let reg_base = self.bind_registers(idx, n, copy);
+        self.regs[reg_base..reg_base + copy]
+            .copy_from_slice(&self.stack[arg_start..arg_start + copy]);
+
+        {
+            let frame = &mut self.frames[idx];
+            frame.ip = 0;
+            frame.stack_base = arg_start as u32;
+
+            if func.uses_special_vars {
+                frame
+                    .argv
+                    .extend_from_slice(&self.stack[arg_start..arg_start + nargs]);
+            }
+        }
+
+        self.stack.truncate(arg_start);
+        crate::runtime::opcode::OpcodeResult::PushFrame
+    }
+
     /// Same as `enter_call` but returns [`OpcodeResult`] for use from opcode handlers.
     fn enter_call_from_op(
         &mut self,
@@ -1113,9 +1204,8 @@ impl VM {
         };
         let frame = &mut self.frames[top];
 
-        if !Arc::ptr_eq(&frame.code, bc) {
-            frame.code = Arc::clone(bc);
-        }
+        // SAFETY: this frame is active (index < frame_depth) during run().
+        frame.code_ptr = Arc::as_ptr(bc);
         frame.ip = 0;
         frame.iter.clear();
         frame.iter_idx = 0;
@@ -1206,7 +1296,8 @@ impl VM {
             }
 
             let frame = &self.frames[top];
-            if frame.ip as usize >= frame.code.instructions.len() {
+            // SAFETY: frame is active (index < frame_depth) during call_value().
+            if frame.ip as usize >= frame.code().instructions.len() {
                 // Run deferred closures before returning
                 self.run_defers();
                 // Frame ran off the end — treat top of stack as return value
@@ -1229,7 +1320,8 @@ impl VM {
                 continue;
             }
 
-            let instr = unsafe { *frame.code.instructions.get_unchecked(frame.ip as usize) };
+            // SAFETY: frame is active (index < frame_depth) during call_value().
+            let instr = unsafe { *frame.code().instructions.get_unchecked(frame.ip as usize) };
             let action = self.dispatch(frame.locals, top, instr);
             match action {
                 Action::Next => {
@@ -1922,5 +2014,89 @@ mod tests {
             vm.context_stack.is_empty(),
             "context_stack must be empty after repeated runs"
         );
+    }
+
+    // ── Tier 2: frame code pointer tests ──
+
+    #[test]
+    fn frame_code_pointer_survives_repeated_runs() {
+        // Compile three different programs and run them round-robin 50 times
+        // each on one VM to catch stale pointer issues.
+        let src_recursion = "f($n) { if $n <= 0 { return 1 } return f($n - 1) * 2 }; f(10)";
+        let src_closure = "$f = |$x| $x * 3; $f 7";
+        let src_tail = "ping($n) { if $n <= 0 { return 7 } return pong ($n - 1) }; pong($n) { if $n <= 0 { return 9 } return ping ($n - 1) }; ping 5";
+
+        let tokens1 = lex(src_recursion, "<test>");
+        let ast1 = parse(&tokens1, src_recursion);
+        let bc1 = compile(&ast1);
+
+        let tokens2 = lex(src_closure, "<test>");
+        let ast2 = parse(&tokens2, src_closure);
+        let bc2 = compile(&ast2);
+
+        let tokens3 = lex(src_tail, "<test>");
+        let ast3 = parse(&tokens3, src_tail);
+        let bc3 = compile(&ast3);
+
+        let mut vm = VM::new();
+        for _ in 0..50 {
+            assert_eq!(vm.run(&bc1).as_i48(), 1024, "recursion failed");
+            assert_eq!(vm.run(&bc2).as_i48(), 21, "closure failed");
+            assert_eq!(vm.run(&bc3).as_i48(), 9, "tail call failed");
+        }
+    }
+
+    #[test]
+    fn tail_call_across_bytecodes_after_run() {
+        // Run a tail-call program, then a different program, then the tail-call
+        // program again on the same VM.
+        let src_tail = "ping($n) { if $n <= 0 { return 7 } return pong ($n - 1) }; pong($n) { if $n <= 0 { return 9 } return ping ($n - 1) }; ping 4";
+        let src_other = "$x = 100; $x + 1";
+
+        let tokens1 = lex(src_tail, "<test>");
+        let ast1 = parse(&tokens1, src_tail);
+        let bc1 = compile(&ast1);
+
+        let tokens2 = lex(src_other, "<test>");
+        let ast2 = parse(&tokens2, src_other);
+        let bc2 = compile(&ast2);
+
+        let mut vm = VM::new();
+        assert_eq!(vm.run(&bc1).as_i48(), 7, "first tail call");
+        assert_eq!(vm.run(&bc2).as_i48(), 101, "other program");
+        assert_eq!(vm.run(&bc1).as_i48(), 7, "tail call again");
+    }
+
+    #[test]
+    fn call_value_after_run() {
+        // Keep a function Value returned by run, call it via call_value after
+        // the VM has run a different program.
+        let src1 = "$f = |$x| $x + 10; $f";
+        let src2 = "42 * 2";
+
+        let tokens1 = lex(src1, "<test>");
+        let ast1 = parse(&tokens1, src1);
+        let bc1 = compile(&ast1);
+
+        let tokens2 = lex(src2, "<test>");
+        let ast2 = parse(&tokens2, src2);
+        let bc2 = compile(&ast2);
+
+        let mut vm = VM::new();
+        let func = vm.run(&bc1);
+        assert!(func.as_func().is_some(), "expected function from first run");
+
+        // Run a different program
+        assert_eq!(vm.run(&bc2).as_i48(), 84, "different program");
+
+        // Call the saved function via call_value
+        let result = vm.call_value(func, &[Value::from_i48(5)]);
+        assert_eq!(result.as_i48(), 15, "call_value after run");
+    }
+
+    #[test]
+    fn vm_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<VM>();
     }
 }

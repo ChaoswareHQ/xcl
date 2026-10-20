@@ -9,29 +9,26 @@
 //! - Does not cache in-place store-back ops (ADD_LOCAL_STORE, etc.) or
 //!   constant-in-place ops (ADD_INT_LOCAL, INC_LOCAL, etc.).
 
-
 // `alloc` re-exports needed by `no_std` builds (std prelude provides them).
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use alloc::{
-    vec::Vec,
-};
+use alloc::vec::Vec;
 
 use crate::bytecode::Instr;
 use crate::runtime::vm::ops::consts::{
     OP_ADD, OP_ADD_FIELD_LOCAL_STORE, OP_ADD_FLOAT_LOCAL, OP_ADD_INT_LOCAL, OP_ADD_LOCAL_LOCAL,
     OP_ADD_LOCAL_LOCAL_STORE, OP_ADD_LOCAL_STORE, OP_DEC_LOCAL, OP_DIV, OP_DIV_FLOAT_LOCAL,
-    OP_DIV_LOCAL_LOCAL, OP_DIV_LOCAL_LOCAL_STORE, OP_DIV_LOCAL_STORE, OP_HALT, OP_INC_LOCAL,
-    OP_INC_LOCAL_INT, OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_LOCAL,
-    OP_LOAD_LOCAL_STORE_LOCAL, OP_MUL, OP_MUL_FLOAT_LOCAL, OP_MUL_INT_LOCAL,
-    OP_MUL_LOCAL_LOCAL, OP_MUL_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_STORE, OP_RETURN, OP_STORE_LOCAL,
-    OP_SUB, OP_SUB_FLOAT_LOCAL, OP_SUB_INT_LOCAL, OP_SUB_LOCAL_LOCAL, OP_SUB_LOCAL_LOCAL_STORE,
-    OP_SUB_LOCAL_STORE, OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_WHILE_LT_INT,
-    OP_WHILE_LT_LOCAL,
+    OP_DIV_LOCAL_LOCAL, OP_DIV_LOCAL_LOCAL_STORE, OP_DIV_LOCAL_STORE, OP_FOR_ITER_NEXT,
+    OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_HALT, OP_INC_LOCAL, OP_INC_LOCAL_INT, OP_JUMP,
+    OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_LOCAL, OP_LOAD_LOCAL_STORE_LOCAL, OP_MUL,
+    OP_MUL_FLOAT_LOCAL, OP_MUL_INT_LOCAL, OP_MUL_LOCAL_LOCAL, OP_MUL_LOCAL_LOCAL_STORE,
+    OP_MUL_LOCAL_STORE, OP_RETURN, OP_STORE_LOCAL, OP_SUB, OP_SUB_FLOAT_LOCAL, OP_SUB_INT_LOCAL,
+    OP_SUB_LOCAL_LOCAL, OP_SUB_LOCAL_LOCAL_STORE, OP_SUB_LOCAL_STORE, OP_WHILE_LT_INT,
+    OP_WHILE_LT_INT_WIDE, OP_WHILE_LT_LOCAL,
 };
 use crate::runtime::vm::ops::meta;
 
-use super::dataflow::{build_basic_blocks, BasicBlock};
+use super::dataflow::{BasicBlock, build_basic_blocks};
 
 use crate::HashMap;
 
@@ -62,8 +59,12 @@ fn defined_slots(instr: Instr) -> Vec<u32> {
 /// Normalize commutative operands: for ADD/MUL return (min, max), for SUB/DIV keep order.
 fn normalize_key(op: u8, left: u32, right: u32) -> (u32, u32) {
     match op {
-        OP_ADD | OP_MUL | OP_ADD_LOCAL_LOCAL | OP_ADD_LOCAL_LOCAL_STORE
-        | OP_MUL_LOCAL_LOCAL | OP_MUL_LOCAL_LOCAL_STORE => {
+        OP_ADD
+        | OP_MUL
+        | OP_ADD_LOCAL_LOCAL
+        | OP_ADD_LOCAL_LOCAL_STORE
+        | OP_MUL_LOCAL_LOCAL
+        | OP_MUL_LOCAL_LOCAL_STORE => {
             if left < right {
                 (left, right)
             } else {
@@ -134,7 +135,8 @@ fn cse_in_block(code: &mut Vec<Instr>, wide: &mut [i64], block: &BasicBlock) {
                         if let Some(&first_dest) = expr_map.get(&key) {
                             if first_dest != dest {
                                 // Replace 4-instruction sequence with LOAD_LOCAL_STORE_LOCAL
-                                code[i] = Instr::a2(OP_LOAD_LOCAL_STORE_LOCAL, first_dest, dest as u16);
+                                code[i] =
+                                    Instr::a2(OP_LOAD_LOCAL_STORE_LOCAL, first_dest, dest as u16);
                                 let range = (i + 1)..=(i + 3);
                                 code.drain(range);
                                 patch_jumps_after(code, wide, i + 1, 3);
@@ -150,7 +152,11 @@ fn cse_in_block(code: &mut Vec<Instr>, wide: &mut [i64], block: &BasicBlock) {
                     // Also invalidate for the remaining instructions in the pattern
                     if i < end && i + 1 < code.len() {
                         // After potential drain, code may have shifted; only invalidate if not drained
-                        if code.get(i).map(|x| x.op() == OP_LOAD_LOCAL).unwrap_or(false) {
+                        if code
+                            .get(i)
+                            .map(|x| x.op() == OP_LOAD_LOCAL)
+                            .unwrap_or(false)
+                        {
                             // Pattern was NOT replaced; invalidate for next instructions
                             // (LOAD_LOCAL doesn't define anything, so skip)
                         }
@@ -193,7 +199,10 @@ fn cse_in_block(code: &mut Vec<Instr>, wide: &mut [i64], block: &BasicBlock) {
         }
 
         // --- 3. Stack-based binary + STORE: ADD_LOCAL_LOCAL; STORE_LOCAL ---
-        if (op == OP_ADD_LOCAL_LOCAL || op == OP_SUB_LOCAL_LOCAL || op == OP_MUL_LOCAL_LOCAL || op == OP_DIV_LOCAL_LOCAL)
+        if (op == OP_ADD_LOCAL_LOCAL
+            || op == OP_SUB_LOCAL_LOCAL
+            || op == OP_MUL_LOCAL_LOCAL
+            || op == OP_DIV_LOCAL_LOCAL)
             && i < end
         {
             let next = code[i + 1];
@@ -270,11 +279,7 @@ fn cse_in_block(code: &mut Vec<Instr>, wide: &mut [i64], block: &BasicBlock) {
 
         // --- 7. Reset map on control flow boundaries ---
         match op {
-            OP_JUMP
-            | OP_JUMP_IF_FALSE
-            | OP_JUMP_IF_NIL
-            | OP_RETURN
-            | OP_HALT => {
+            OP_JUMP | OP_JUMP_IF_FALSE | OP_JUMP_IF_NIL | OP_RETURN | OP_HALT => {
                 expr_map.clear();
             }
             _ => {}
@@ -318,19 +323,12 @@ fn patch_jumps_after(code: &mut [Instr], wide: &mut [i64], after: usize, count: 
     for instr in code.iter_mut() {
         let op = instr.op();
         match op {
-            OP_JUMP
-            | OP_JUMP_IF_FALSE
-            | OP_JUMP_IF_NIL
-            | OP_FOR_ITER_NEXT
-            | OP_FOR_RANGE_NEXT => {
+            OP_JUMP | OP_JUMP_IF_FALSE | OP_JUMP_IF_NIL | OP_FOR_ITER_NEXT | OP_FOR_RANGE_NEXT => {
                 if instr.a() > after_u32 {
-                    *instr =
-                        Instr::make(op, instr.a() - count_u32, instr.b(), instr.c());
+                    *instr = Instr::make(op, instr.a() - count_u32, instr.b(), instr.c());
                 }
             }
-            OP_WHILE_LT_INT
-            | OP_WHILE_LT_LOCAL
-            | OP_FOR_NUMBER_LOOP => {
+            OP_WHILE_LT_INT | OP_WHILE_LT_INT_WIDE | OP_WHILE_LT_LOCAL | OP_FOR_NUMBER_LOOP => {
                 let w_idx = instr.c() as usize;
                 if let Some(exit_ip) = wide.get_mut(w_idx)
                     && *exit_ip > after as i64

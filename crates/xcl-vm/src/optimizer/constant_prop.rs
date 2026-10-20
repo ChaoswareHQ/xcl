@@ -9,10 +9,11 @@ use alloc::vec::Vec;
 
 use crate::bytecode::Instr;
 use crate::runtime::vm::ops::consts::{
-    OP_CALL, OP_CALL_METHOD, OP_DEC_LOCAL, OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT,
-    OP_INC_LOCAL, OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_CONST_LOCAL, OP_LOAD_GLOBAL,
-    OP_LOAD_LOCAL, OP_LOAD_LOCAL_STORE_LOCAL, OP_PUSH_INT, OP_STORE_GLOBAL, OP_STORE_LOCAL,
-    OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,
+    OP_CALL, OP_CALL_METHOD, OP_CALL_NAME, OP_DEC_LOCAL, OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP,
+    OP_FOR_RANGE_NEXT, OP_INC_LOCAL, OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL,
+    OP_LOAD_CONST_LOCAL, OP_LOAD_GLOBAL, OP_LOAD_LOCAL, OP_LOAD_LOCAL_STORE_LOCAL, OP_PUSH_INT,
+    OP_STORE_GLOBAL, OP_STORE_LOCAL, OP_TAIL_CALL_NAME, OP_WHILE_LT_INT, OP_WHILE_LT_INT_WIDE,
+    OP_WHILE_LT_LOCAL,
 };
 use crate::runtime::vm::ops::meta;
 
@@ -49,7 +50,7 @@ pub fn constant_propagation(code: &mut Vec<Instr>, wide: &[i64]) {
                     loop_headers.insert(target);
                 }
             }
-            OP_WHILE_LT_INT | OP_WHILE_LT_LOCAL | OP_FOR_NUMBER_LOOP => {
+            OP_WHILE_LT_INT | OP_WHILE_LT_INT_WIDE | OP_WHILE_LT_LOCAL | OP_FOR_NUMBER_LOOP => {
                 // These opcodes jump back to themselves (the header is at i)
                 // and exit forward. The header is the current instruction.
                 loop_headers.insert(i);
@@ -62,7 +63,7 @@ pub fn constant_propagation(code: &mut Vec<Instr>, wide: &[i64]) {
     for instr in code.iter() {
         let op = instr.op();
         match op {
-            OP_WHILE_LT_INT | OP_WHILE_LT_LOCAL | OP_FOR_NUMBER_LOOP => {
+            OP_WHILE_LT_INT | OP_WHILE_LT_INT_WIDE | OP_WHILE_LT_LOCAL | OP_FOR_NUMBER_LOOP => {
                 let w_idx = instr.c() as usize;
                 if let Some(&exit_ip) = wide.get(w_idx) {
                     let exit = exit_ip as usize;
@@ -112,7 +113,7 @@ pub fn constant_propagation(code: &mut Vec<Instr>, wide: &[i64]) {
                 }
             }
             // Function calls and global access invalidate all constants
-            OP_CALL | OP_CALL_METHOD => {
+            OP_CALL | OP_CALL_METHOD | OP_CALL_NAME | OP_TAIL_CALL_NAME => {
                 constants.clear();
             }
             OP_LOAD_GLOBAL | OP_STORE_GLOBAL => {

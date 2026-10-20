@@ -66,7 +66,8 @@ mod core_ops {
         top: usize,
         instr: Instr,
     ) -> OpcodeResult {
-        let v = vm.frames[top].code.wide_operands[instr.a() as usize];
+        // SAFETY: frame at `top` is active during dispatch.
+        let v = vm.frames[top].code().wide_operands[instr.a() as usize];
         vm.push(Value::from_i48(v));
         OpcodeResult::Next
     }
@@ -74,7 +75,8 @@ mod core_ops {
     /// Pushes a 64-bit float constant indexed from `wide_operands` by operand `a`.
     #[opcode(code = 6, arity = 0, stack = "0 -> 1")]
     fn op_push_float(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
-        let bits = vm.frames[top].code.wide_operands[instr.a() as usize];
+        // SAFETY: frame at `top` is active during dispatch.
+        let bits = vm.frames[top].code().wide_operands[instr.a() as usize];
         vm.push(Value::from_f64(f64::from_bits(bits as u64)));
         OpcodeResult::Next
     }
@@ -82,7 +84,8 @@ mod core_ops {
     /// Pushes an interned string indexed from `string_values` by operand `a`.
     #[opcode(code = 7, arity = 0, stack = "0 -> 1")]
     fn op_push_str(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
-        vm.push(vm.frames[top].code.string_values[instr.a() as usize]);
+        // SAFETY: frame at `top` is active during dispatch.
+        vm.push(vm.frames[top].code().string_values[instr.a() as usize]);
         OpcodeResult::Next
     }
 
@@ -555,7 +558,8 @@ mod core_ops {
     #[opcode(code = 46, arity = 0, stack = "0 -> 1")]
     fn op_load_lambda(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         let idx = instr.a() as usize;
-        let func = vm.frames[top].code.closures[idx].clone();
+        // SAFETY: frame at `top` is active during dispatch.
+        let func = vm.frames[top].code().closures[idx].clone();
         vm.push(Value::from_func(func, &vm.arena));
         OpcodeResult::Next
     }
@@ -745,35 +749,64 @@ mod core_ops {
 
     // ── Batch 1: calls, fields, types, iteration ──
 
-    /// Calls a function or builtin by name. Operand `a` = arg count.
-    #[opcode(code = 32, arity = 0, stack = "n+1 -> 1")]
-    fn op_call(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
-        let n = instr.a() as usize;
-        let stack_len = vm.stack.len();
-        // Stack layout is [callee, arg0 .. argN-1].
-        let base = stack_len - n - 1;
+    /// Hot path for named calls: callee and args are on the stack at `base..base+n+1`.
+    /// Returns immediately when the callee resolves to a function (fast path or cache hit).
+    /// Falls through to `call_from_stack_slow` for name resolution.
+    #[inline(always)]
+    fn call_from_stack(vm: &mut VM, n: usize, base: usize) -> OpcodeResult {
         let callee = vm.stack[base];
-
-        // Fast path: the callee is already a function value (local, parameter, closure).
-        // Enter the frame straight from the operand stack: no argument buffer, no lookup.
         if let Some(f) = callee.as_func() {
             return vm.enter_call_at(f, base, n);
         }
-
-        // Name cache. Arena pointers are at least 16-byte aligned, so hash on the
-        // allocation index instead of the raw address (the low bits are always zero).
-        let slot = ((callee.0 >> 4) as usize) & 3;
+        let slot = ((callee.0 >> 4) as usize) & crate::runtime::vm::CALL_CACHE_MASK;
         if callee.0 == vm.call_cache[slot].0.0 {
             if let Some(f) = vm.call_cache[slot].1.as_func() {
                 return vm.enter_call_at(f, base, n);
             }
         }
+        call_from_stack_slow(vm, n, base, callee, slot)
+    }
 
-        // Cold path: materialize the arguments and pop callee + args off the stack.
+    /// Cold path for `OP_CALL`: the callee is on the stack below the args.
+    #[cold]
+    #[inline(never)]
+    fn call_from_stack_slow(
+        vm: &mut VM,
+        n: usize,
+        base: usize,
+        callee: Value,
+        slot: usize,
+    ) -> OpcodeResult {
+        let stack_len = vm.stack.len();
         let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(n);
         args.extend_from_slice(&vm.stack[base + 1..stack_len]);
         vm.stack.truncate(base);
+        resolve_name_slow(vm, callee, &args, slot)
+    }
 
+    /// Cold path for `OP_CALL_NAME`: args start at `arg_start` and there is no
+    /// callee word on the stack to skip.
+    #[cold]
+    #[inline(never)]
+    fn call_name_slow(
+        vm: &mut VM,
+        n: usize,
+        arg_start: usize,
+        callee: Value,
+        slot: usize,
+    ) -> OpcodeResult {
+        let stack_len = vm.stack.len();
+        let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(n);
+        args.extend_from_slice(&vm.stack[arg_start..stack_len]);
+        vm.stack.truncate(arg_start);
+        resolve_name_slow(vm, callee, &args, slot)
+    }
+
+    /// Resolves a callee name and invokes it. The operand stack is already
+    /// truncated to the slot the result should occupy.
+    #[cold]
+    #[inline(never)]
+    fn resolve_name_slow(vm: &mut VM, callee: Value, args: &[Value], slot: usize) -> OpcodeResult {
         if let Some(name) = callee.as_str() {
             // 1. Check global builtins first
             if let Some(&idx) = vm.global_index.get(name) {
@@ -888,19 +921,68 @@ mod core_ops {
         OpcodeResult::Next
     }
 
-    /// Tail-call: pops args and callee, resolves the function, and reuses the current frame
-    /// instead of pushing a new one. Operand `a` = arg count.
-    #[opcode(code = 123, arity = 0, stack = "n+1 -> 0")]
-    fn op_tail_call(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
+    /// Calls a function or builtin by name. Operand `a` = arg count.
+    #[opcode(code = 32, arity = 0, stack = "n+1 -> 1")]
+    fn op_call(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         let n = instr.a() as usize;
-        let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(n);
-        for _ in 0..n {
-            args.push(vm.pop());
-        }
-        args.reverse();
-        let callee = vm.pop();
+        let stack_len = vm.stack.len();
+        let base = stack_len - n - 1;
+        call_from_stack(vm, n, base)
+    }
 
-        // Resolve the function (same logic as OP_CALL, using the 4-entry cache)
+    /// Fused named call: callee name is embedded in operand `b` (string-table index).
+    /// Operand `a` = arg count. Stack: n -> 1.
+    #[opcode(code = 67, arity = 0, stack = "n -> 1")]
+    fn op_call_name(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
+        let n = instr.a() as usize;
+        let name_idx = instr.b() as usize;
+        // SAFETY: frame at `top` is active during dispatch.
+        let callee = vm.frames[top].code().string_values[name_idx];
+        let arg_start = vm.stack.len() - n;
+
+        let slot = ((callee.0 >> 4) as usize) & crate::runtime::vm::CALL_CACHE_MASK;
+        if callee.0 == vm.call_cache[slot].0.0 {
+            if let Some(f) = vm.call_cache[slot].1.as_func() {
+                return vm.enter_call_args_at(f, arg_start, n);
+            }
+        }
+        call_name_slow(vm, n, arg_start, callee, slot)
+    }
+
+    /// Fused named tail call: callee name is embedded in operand `b` (string-table index).
+    /// Operand `a` = arg count. Stack: n -> 0.
+    #[opcode(code = 68, arity = 0, stack = "n -> 0")]
+    fn op_tail_call_name(
+        vm: &mut VM,
+        _locals: LocalSlice,
+        top: usize,
+        instr: Instr,
+    ) -> OpcodeResult {
+        let n = instr.a() as usize;
+        let name_idx = instr.b() as usize;
+        // SAFETY: frame at `top` is active during dispatch.
+        let callee = vm.frames[top].code().string_values[name_idx];
+
+        // Collect args before any resolution so all paths have them
+        let base = vm.stack.len() - n;
+        let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(n);
+        args.extend_from_slice(&vm.stack[base..base + n]);
+        vm.stack.truncate(base);
+
+        // Fast path: callee is already a function value (unlikely for string_values)
+        if let Some(f) = callee.as_func() {
+            return vm.enter_tail_call(f, &args);
+        }
+
+        // Name cache: use the same slot computation as op_call
+        let slot = ((callee.0 >> 4) as usize) & crate::runtime::vm::CALL_CACHE_MASK;
+        if callee.0 == vm.call_cache[slot].0.0 {
+            if let Some(f) = vm.call_cache[slot].1.as_func() {
+                return vm.enter_tail_call(f, &args);
+            }
+        }
+
+        // Resolve the function (same cold logic as op_tail_call)
         let func = if let Some(name) = callee.as_str() {
             // 1. Check global builtins first
             if let Some(&idx) = vm.global_index.get(name) {
@@ -909,25 +991,21 @@ mod core_ops {
                     if let Some(Some(impl_)) = vm.global_table.get(idx as usize) {
                         let impl_copy = *impl_;
                         let result = impl_copy.call(vm, &args);
-                        // Truncate operand stack and push result
                         if let Some(frame) = vm.frames.last() {
                             vm.stack.truncate(frame.stack_base as usize);
                         }
                         vm.push(result);
-                        // Reuse current frame: reset ip and code
                         if let Some(frame) = vm.frames.last_mut() {
-                            frame.ip = instr.a(); // will be adjusted by caller
+                            frame.ip = instr.a();
                         }
                         return OpcodeResult::Next;
                     }
                 }
-                // Check user-defined globals
                 if idx >= gt_len as u32 {
                     let globals_idx = (idx - gt_len as u32) as usize;
                     if globals_idx < vm.globals.len() {
                         let func_val = vm.globals[globals_idx];
                         if let Some(f) = func_val.as_func() {
-                            let slot = (callee.0 as usize) & 3;
                             vm.call_cache[slot] = (callee, func_val);
                             return vm.enter_tail_call(f, &args);
                         }
@@ -956,15 +1034,113 @@ mod core_ops {
                 .iter()
                 .find_map(|g| g.as_func().filter(|f| &*f.name == name).map(|_| *g));
             if let Some(func_val) = found {
-                let slot = (callee.0 as usize) & 3;
                 vm.call_cache[slot] = (callee, func_val);
                 if let Some(f) = func_val.as_func() {
                     return vm.enter_tail_call(f, &args);
                 }
             }
             None
-        } else if let Some(func) = callee.as_func() {
-            Some(func.clone())
+        } else {
+            None
+        };
+
+        if let Some(f) = func {
+            return vm.enter_tail_call(&f, &args);
+        }
+
+        if let Some(frame) = vm.frames.last() {
+            vm.stack.truncate(frame.stack_base as usize);
+        }
+        vm.push(Value::nil());
+        OpcodeResult::Next
+    }
+
+    /// Tail-call: pops args and callee, resolves the function, and reuses the current frame
+    /// instead of pushing a new one. Operand `a` = arg count.
+    #[opcode(code = 123, arity = 0, stack = "n+1 -> 0")]
+    fn op_tail_call(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
+        let n = instr.a() as usize;
+        let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(n);
+        for _ in 0..n {
+            args.push(vm.pop());
+        }
+        args.reverse();
+        let callee = vm.pop();
+
+        // Fast path: callee is already a function value
+        if let Some(f) = callee.as_func() {
+            return vm.enter_tail_call(f, &args);
+        }
+
+        // Name cache: use the same slot computation as op_call
+        let slot = ((callee.0 >> 4) as usize) & crate::runtime::vm::CALL_CACHE_MASK;
+        if callee.0 == vm.call_cache[slot].0.0 {
+            if let Some(f) = vm.call_cache[slot].1.as_func() {
+                return vm.enter_tail_call(f, &args);
+            }
+        }
+
+        // Resolve the function (same logic as OP_CALL, using the 4-entry cache)
+        let func = if let Some(name) = callee.as_str() {
+            // 1. Check global builtins first
+            if let Some(&idx) = vm.global_index.get(name) {
+                let gt_len = vm.global_table.len();
+                if (idx as usize) < gt_len {
+                    if let Some(Some(impl_)) = vm.global_table.get(idx as usize) {
+                        let impl_copy = *impl_;
+                        let result = impl_copy.call(vm, &args);
+                        // Truncate operand stack and push result
+                        if let Some(frame) = vm.frames.last() {
+                            vm.stack.truncate(frame.stack_base as usize);
+                        }
+                        vm.push(result);
+                        // Reuse current frame: reset ip and code
+                        if let Some(frame) = vm.frames.last_mut() {
+                            frame.ip = instr.a(); // will be adjusted by caller
+                        }
+                        return OpcodeResult::Next;
+                    }
+                }
+                // Check user-defined globals
+                if idx >= gt_len as u32 {
+                    let globals_idx = (idx - gt_len as u32) as usize;
+                    if globals_idx < vm.globals.len() {
+                        let func_val = vm.globals[globals_idx];
+                        if let Some(f) = func_val.as_func() {
+                            vm.call_cache[slot] = (callee, func_val);
+                            return vm.enter_tail_call(f, &args);
+                        }
+                    }
+                }
+            }
+            // 2. Check domain methods
+            if name.split('.').count() == 2 {
+                if let Some(dot_pos) = name.find('.') {
+                    let domain = &name[..dot_pos];
+                    let method = &name[dot_pos + 1..];
+                    if let Some(impl_) = vm.resolve_domain_method(domain, method) {
+                        let impl_copy = *impl_;
+                        let result = impl_copy.call(vm, &args);
+                        if let Some(frame) = vm.frames.last() {
+                            vm.stack.truncate(frame.stack_base as usize);
+                        }
+                        vm.push(result);
+                        return OpcodeResult::Next;
+                    }
+                }
+            }
+            // 3. Fallback: search all globals by name
+            let found = vm
+                .globals
+                .iter()
+                .find_map(|g| g.as_func().filter(|f| &*f.name == name).map(|_| *g));
+            if let Some(func_val) = found {
+                vm.call_cache[slot] = (callee, func_val);
+                if let Some(f) = func_val.as_func() {
+                    return vm.enter_tail_call(f, &args);
+                }
+            }
+            None
         } else {
             None
         };
@@ -986,8 +1162,10 @@ mod core_ops {
     fn op_get_field(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         let field_idx = instr.a() as usize;
         let target = vm.pop();
-        let field = &vm.frames[top].code.string_table[field_idx];
-        let field_val = vm.frames[top].code.string_values[field_idx];
+        // SAFETY: frame at `top` is active during dispatch.
+        let code = vm.frames[top].code();
+        let field = &code.string_table[field_idx];
+        let field_val = code.string_values[field_idx];
 
         // Fast path: use HeapMap::get_fast_value with interned key identity
         if let Some(map_obj) = target.as_map() {
@@ -1122,7 +1300,8 @@ mod core_ops {
     fn op_call_method(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         let field_idx = instr.a() as usize;
         let nargs = instr.b() as usize;
-        let string_table = vm.frames[top].code.string_table.clone();
+        // SAFETY: frame at `top` is active during dispatch.
+        let string_table = vm.frames[top].code().string_table.clone();
         let method_name = &string_table[field_idx];
 
         let mut args = Vec::with_capacity(nargs);
@@ -1437,8 +1616,10 @@ mod core_ops {
         let start_wide_idx = (instr.a() & 0xFFFF) as usize;
         let end_wide_idx = instr.b() as usize;
 
-        let start = f.code.wide_operands[start_wide_idx];
-        let end = f.code.wide_operands[end_wide_idx];
+        // SAFETY: frame at `top` is active during dispatch.
+        let code = f.code();
+        let start = code.wide_operands[start_wide_idx];
+        let end = code.wide_operands[end_wide_idx];
 
         let cur = unsafe { *locals.get_unchecked(var_slot) };
         let cur_val = if cur.is_int() { cur.as_i48() } else { start };
@@ -1453,7 +1634,8 @@ mod core_ops {
         } else {
             // The compiler records the loop exit address in the wide operand
             // when it emits the backward jump, so no scan is needed here.
-            OpcodeResult::Jump(f.code.wide_operands[instr.c() as usize] as u32)
+            // SAFETY: frame at `top` is active during dispatch.
+            OpcodeResult::Jump(f.code().wide_operands[instr.c() as usize] as u32)
         }
     }
 
@@ -1625,7 +1807,8 @@ mod core_ops {
         if val < limit {
             OpcodeResult::Next
         } else {
-            OpcodeResult::Jump(vm.frames[top].code.wide_operands[instr.c() as usize] as u32)
+            // SAFETY: frame at `top` is active during dispatch.
+            OpcodeResult::Jump(vm.frames[top].code().wide_operands[instr.c() as usize] as u32)
         }
     }
 
@@ -1646,7 +1829,8 @@ mod core_ops {
         if eq {
             OpcodeResult::Next
         } else {
-            OpcodeResult::Jump(vm.frames[top].code.wide_operands[instr.c() as usize] as u32)
+            // SAFETY: frame at `top` is active during dispatch.
+            OpcodeResult::Jump(vm.frames[top].code().wide_operands[instr.c() as usize] as u32)
         }
     }
 
@@ -1667,7 +1851,39 @@ mod core_ops {
         if val < limit {
             OpcodeResult::Next
         } else {
-            let exit_ip = f.code.wide_operands[exit_wide_idx] as u32;
+            // SAFETY: frame at `top` is active during dispatch.
+            let exit_ip = f.code().wide_operands[exit_wide_idx] as u32;
+            OpcodeResult::Jump(exit_ip)
+        }
+    }
+
+    /// While local[a] < wide_operands[b]: continue, else jump to wide_operands[c].
+    ///
+    /// Same as [`OP_WHILE_LT_INT`] but the limit does not fit in 16 bits; the
+    /// exit target stays in `c` so the branch metadata is unchanged.
+    #[opcode(code = 69, arity = 0, stack = "0 -> 0", branch = "wide", reads = "a")]
+    fn op_while_lt_int_wide(
+        vm: &mut VM,
+        locals: LocalSlice,
+        top: usize,
+        instr: Instr,
+    ) -> OpcodeResult {
+        use crate::runtime::value::TAG_INT;
+        let f = &mut vm.frames[top];
+        let slot = instr.a() as usize;
+        let limit = f.code().wide_operands[instr.b() as usize];
+        let exit_wide_idx = instr.c() as usize;
+        let v = unsafe { *locals.get_unchecked(slot) };
+        let val = if v.tag() == TAG_INT {
+            v.as_i48()
+        } else {
+            v.as_int()
+        };
+        if val < limit {
+            OpcodeResult::Next
+        } else {
+            // SAFETY: frame at `top` is active during dispatch.
+            let exit_ip = f.code().wide_operands[exit_wide_idx] as u32;
             OpcodeResult::Jump(exit_ip)
         }
     }
@@ -1947,7 +2163,8 @@ mod core_ops {
         if cond {
             OpcodeResult::Next
         } else {
-            let exit_ip = f.code.wide_operands[exit_wide_idx] as u32;
+            // SAFETY: frame at `top` is active during dispatch.
+            let exit_ip = f.code().wide_operands[exit_wide_idx] as u32;
             OpcodeResult::Jump(exit_ip)
         }
     }
@@ -2002,7 +2219,8 @@ mod core_ops {
 
         // Read the object and key before borrowing vm mutably
         let obj = unsafe { *locals.get_unchecked(obj_slot) };
-        let field_val = vm.frames[top].code.string_values[str_idx];
+        // SAFETY: frame at `top` is active during dispatch.
+        let field_val = vm.frames[top].code().string_values[str_idx];
 
         let result = if let Some(map_obj) = obj.as_map() {
             map_obj.get_fast_value(field_val).unwrap_or(Value::nil())
@@ -2059,22 +2277,24 @@ mod core_ops {
         let slot = instr.a() as usize;
         let b = instr.b();
         let kind = instr.c();
+        // SAFETY: frame at `top` is active during dispatch.
+        let code = vm.frames[top].code();
         let val = match kind {
             0 => Value::from_i48(b as i64),
             1 => {
-                let bits = vm.frames[top].code.wide_operands[b as usize];
+                let bits = code.wide_operands[b as usize];
                 Value::from_f64(f64::from_bits(bits as u64))
             }
             2 => {
                 // Interned string constant: reuse the pre-built value instead
                 // of re-allocating the bytes on every execution.
-                vm.frames[top].code.string_values[b as usize]
+                code.string_values[b as usize]
             }
             3 => Value::nil(),
             4 => Value::bool(true),
             5 => Value::bool(false),
             6 => {
-                let v = vm.frames[top].code.wide_operands[b as usize];
+                let v = code.wide_operands[b as usize];
                 Value::from_i48(v)
             }
             _ => Value::nil(),
@@ -2102,9 +2322,10 @@ mod core_ops {
         let field_idx = instr.b() as usize;
         let obj_slot = instr.c() as usize;
 
+        // SAFETY: frame at `top` is active during dispatch.
         let frame = &vm.frames[top];
         let obj = unsafe { *locals.get_unchecked(obj_slot) };
-        let key = frame.code.string_values[field_idx];
+        let key = frame.code().string_values[field_idx];
         let b = if let Some(map_obj) = obj.as_map() {
             map_obj.get_fast_value(key).unwrap_or(Value::nil())
         } else {
@@ -2164,8 +2385,9 @@ mod core_ops {
         instr: Instr,
     ) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
+        // SAFETY: frame at `top` is active during dispatch.
         let frame = &vm.frames[top];
-        let f = f64::from_bits(frame.code.wide_operands[instr.b() as usize] as u64);
+        let f = f64::from_bits(frame.code().wide_operands[instr.b() as usize] as u64);
         let l = &locals;
         let idx = instr.a() as usize;
         let v = unsafe { *l.get_unchecked(idx) };
@@ -2194,8 +2416,9 @@ mod core_ops {
         instr: Instr,
     ) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
+        // SAFETY: frame at `top` is active during dispatch.
         let frame = &vm.frames[top];
-        let f = f64::from_bits(frame.code.wide_operands[instr.b() as usize] as u64);
+        let f = f64::from_bits(frame.code().wide_operands[instr.b() as usize] as u64);
         let l = &locals;
         let idx = instr.a() as usize;
         let v = unsafe { *l.get_unchecked(idx) };
@@ -2224,8 +2447,9 @@ mod core_ops {
         instr: Instr,
     ) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
+        // SAFETY: frame at `top` is active during dispatch.
         let frame = &vm.frames[top];
-        let f = f64::from_bits(frame.code.wide_operands[instr.b() as usize] as u64);
+        let f = f64::from_bits(frame.code().wide_operands[instr.b() as usize] as u64);
         let l = &locals;
         let idx = instr.a() as usize;
         let v = unsafe { *l.get_unchecked(idx) };
@@ -2254,8 +2478,9 @@ mod core_ops {
         instr: Instr,
     ) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
+        // SAFETY: frame at `top` is active during dispatch.
         let frame = &vm.frames[top];
-        let f = f64::from_bits(frame.code.wide_operands[instr.b() as usize] as u64);
+        let f = f64::from_bits(frame.code().wide_operands[instr.b() as usize] as u64);
         let l = &locals;
         let idx = instr.a() as usize;
         let v = unsafe { *l.get_unchecked(idx) };

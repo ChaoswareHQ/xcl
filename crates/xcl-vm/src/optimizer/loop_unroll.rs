@@ -3,21 +3,19 @@
 //! Detects tight loops (small body, no function calls, simple induction variable)
 //! and unrolls them 4x, adjusting the loop counter accordingly.
 
-
 // `alloc` re-exports needed by `no_std` builds (std prelude provides them).
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use alloc::{
-    vec::Vec,
-};
+use alloc::vec::Vec;
 
 use crate::bytecode::{
-    Instr, OP_ADD_INT_LOCAL, OP_CALL, OP_CALL_METHOD, OP_DEC_LOCAL, OP_FOR_ITER_NEXT,
-    OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_INC_LOCAL, OP_SUB_INT_LOCAL, OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,
+    Instr, OP_ADD_INT_LOCAL, OP_CALL, OP_CALL_METHOD, OP_CALL_NAME, OP_DEC_LOCAL, OP_FOR_ITER_NEXT,
+    OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_INC_LOCAL, OP_SUB_INT_LOCAL, OP_TAIL_CALL_NAME,
+    OP_WHILE_LT_INT, OP_WHILE_LT_INT_WIDE, OP_WHILE_LT_LOCAL,
 };
 use crate::runtime::vm::ops::consts::{OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_GLOBAL};
 
-use super::dataflow::{build_basic_blocks, BasicBlock};
+use super::dataflow::{BasicBlock, build_basic_blocks};
 
 /// Maximum loop body size to consider for unrolling.
 const MAX_LOOP_BODY_SIZE: usize = 16;
@@ -32,6 +30,8 @@ fn is_side_effecting(instr: Instr) -> bool {
         instr.op(),
         OP_CALL
             | OP_CALL_METHOD
+            | OP_CALL_NAME
+            | OP_TAIL_CALL_NAME
             | OP_LOAD_GLOBAL
             | OP_FOR_ITER_NEXT
             | OP_FOR_RANGE_NEXT
@@ -41,7 +41,11 @@ fn is_side_effecting(instr: Instr) -> bool {
 
 /// Finds the induction variable in a loop body.
 /// Returns (slot, increment) if the loop uses `$slot = $slot + increment`.
-fn find_induction_variable(code: &[Instr], loop_start: usize, loop_end: usize) -> Option<(u32, i64)> {
+fn find_induction_variable(
+    code: &[Instr],
+    loop_start: usize,
+    loop_end: usize,
+) -> Option<(u32, i64)> {
     for idx in loop_start..=loop_end {
         let instr = code.get(idx)?;
         // Pattern: INC_LOCAL a (increment by 1)
@@ -87,7 +91,7 @@ pub(crate) fn loop_unroll(code: &mut Vec<Instr>, wide: &[i64]) {
             if target < idx {
                 loop_headers.push(target);
             }
-        } else if op == OP_WHILE_LT_INT || op == OP_WHILE_LT_LOCAL {
+        } else if op == OP_WHILE_LT_INT || op == OP_WHILE_LT_INT_WIDE || op == OP_WHILE_LT_LOCAL {
             // These are loop headers themselves
             loop_headers.push(idx);
         }
@@ -134,7 +138,7 @@ fn try_unroll_loop(
                 loop_end = idx;
                 break;
             }
-        } else if op == OP_WHILE_LT_INT || op == OP_WHILE_LT_LOCAL {
+        } else if op == OP_WHILE_LT_INT || op == OP_WHILE_LT_INT_WIDE || op == OP_WHILE_LT_LOCAL {
             // The while opcode IS the loop condition
             loop_end = idx;
             // Find the exit target from wide_operands
@@ -158,7 +162,11 @@ fn try_unroll_loop(
         return false;
     };
 
-    let body_start = if back_target <= header { header } else { back_target };
+    let body_start = if back_target <= header {
+        header
+    } else {
+        back_target
+    };
     let body_end = loop_end;
     let body_size = body_end - body_start + 1;
 

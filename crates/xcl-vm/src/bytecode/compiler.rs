@@ -873,11 +873,16 @@ impl Compiler {
                 // Tail-call optimization: return foo(args) where foo is a plain identifier
                 if let Some(AstNode::Call { callee, args, .. }) = value.as_deref() {
                     if let AstNode::Ident { name, .. } = callee.as_ref() {
-                        // Emit OP_TAIL_CALL: callee string + args, then continue (no new frame)
+                        // Emit OP_TAIL_CALL_NAME: fused tail call with embedded name
                         let i = self.intern(name);
-                        self.emit(Instr::a1(OP_PUSH_STR, i));
-                        self.emit_call_args(args);
-                        self.emit(Instr::a2(OP_TAIL_CALL, args.len() as u32, 0));
+                        if let Ok(name16) = u16::try_from(i) {
+                            self.emit_call_args(args);
+                            self.emit(Instr::make(OP_TAIL_CALL_NAME, args.len() as u32, name16, 0));
+                        } else {
+                            self.emit(Instr::a1(OP_PUSH_STR, i));
+                            self.emit_call_args(args);
+                            self.emit(Instr::a2(OP_TAIL_CALL, args.len() as u32, 0));
+                        }
                         return;
                     }
                 }
@@ -1095,6 +1100,30 @@ impl Compiler {
                                 let exit_ip = self.ip();
                                 self.wide[exit_wide as usize] = exit_ip as i64;
                                 return;
+                            } else if let AstNode::Int { value: limit, .. } = right.as_ref() {
+                                // Limits above `u16::MAX` still fuse: the limit
+                                // moves into `wide_operands` (operand `b`).
+                                let slot = self.local(left_name);
+                                let limit_wide = self.wide(*limit);
+                                let exit_wide = self.wide(0);
+                                if let (Ok(limit_idx), Ok(exit_idx)) =
+                                    (u16::try_from(limit_wide), u8::try_from(exit_wide))
+                                {
+                                    let loop_start = self.ip();
+                                    self.emit(Instr::make(
+                                        OP_WHILE_LT_INT_WIDE,
+                                        slot,
+                                        limit_idx,
+                                        exit_idx,
+                                    ));
+                                    for s in body {
+                                        self.node(s);
+                                    }
+                                    self.emit(Instr::a1(OP_JUMP, loop_start));
+                                    let exit_ip = self.ip();
+                                    self.wide[exit_wide as usize] = exit_ip as i64;
+                                    return;
+                                }
                             } else if let AstNode::Ident {
                                 name: right_name, ..
                             } = right.as_ref()
@@ -1297,11 +1326,19 @@ impl Compiler {
                         self.emit_call_args(args);
                         self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
                     } else {
-                        // It's a domain call: net.tcp.connect or io.read
+                        // Bare or dotted name call. Embed the callee name in the
+                        // opcode so the name push and the call are one dispatch.
+                        // The handler resolves builtins, user functions, and
+                        // domain methods exactly like `OP_CALL`.
                         let i = self.intern(&name);
-                        self.emit(Instr::a1(OP_PUSH_STR, i));
-                        self.emit_call_args(args);
-                        self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
+                        if let Ok(name16) = u16::try_from(i) {
+                            self.emit_call_args(args);
+                            self.emit(Instr::make(OP_CALL_NAME, args.len() as u32, name16, 0));
+                        } else {
+                            self.emit(Instr::a1(OP_PUSH_STR, i));
+                            self.emit_call_args(args);
+                            self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
+                        }
                     }
                 } else if let AstNode::Ident { name, .. } = callee.as_ref() {
                     // If the name was originally a $-prefixed variable, load from local
@@ -1313,12 +1350,20 @@ impl Compiler {
                         .map(|i| i as u32)
                     {
                         self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
+                        self.emit_call_args(args);
+                        self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
                     } else {
+                        // Fused named call: embed the callee name in the opcode
                         let i = self.intern(name);
-                        self.emit(Instr::a1(OP_PUSH_STR, i));
+                        if let Ok(name16) = u16::try_from(i) {
+                            self.emit_call_args(args);
+                            self.emit(Instr::make(OP_CALL_NAME, args.len() as u32, name16, 0));
+                        } else {
+                            self.emit(Instr::a1(OP_PUSH_STR, i));
+                            self.emit_call_args(args);
+                            self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
+                        }
                     }
-                    self.emit_call_args(args);
-                    self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
                 } else {
                     self.node(callee);
                     self.emit_call_args(args);

@@ -14,7 +14,7 @@ use crate::bytecode::Instr;
 use crate::runtime::vm::ops::consts::{
     OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_JUMP,
     OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_GLOBAL, OP_STORE_LOCAL,
-    OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,
+    OP_WHILE_LT_INT, OP_WHILE_LT_INT_WIDE, OP_WHILE_LT_LOCAL,
 };
 use crate::runtime::vm::ops::meta;
 
@@ -132,7 +132,7 @@ fn patch_jump_targets(code: &mut [Instr], wide: &mut [i64], pos: usize, count: u
                     *instr = Instr::make(op, instr.a() - count_u32, instr.b(), instr.c());
                 }
             }
-            OP_WHILE_LT_INT | OP_WHILE_LT_LOCAL | OP_FOR_NUMBER_LOOP => {
+            OP_WHILE_LT_INT | OP_WHILE_LT_INT_WIDE | OP_WHILE_LT_LOCAL | OP_FOR_NUMBER_LOOP => {
                 let w_idx = instr.c() as usize;
                 if let Some(exit_ip) = wide.get_mut(w_idx)
                     && *exit_ip > pos as i64

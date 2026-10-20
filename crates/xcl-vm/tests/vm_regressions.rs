@@ -926,6 +926,21 @@ $count"
     );
 }
 
+// ── Parser: a parenthesized first argument must not end the call ──
+
+#[test]
+fn parenthesized_first_arg_does_not_end_the_call() {
+    // `f (a) b c` used to compile as `f(a)` followed by a discarded `b c`.
+    assert_eq!(eval_i64("f($a, $b) { return $a * 10 + $b }; f (1) 7"), 17);
+    assert_eq!(eval_i64("f($a, $b) { return $a * 10 + $b }; f(1) 7"), 17);
+    assert_eq!(
+        eval_i64("g($a, $b, $c) { return $a + $b + $c }; g (1) 2 3"),
+        6
+    );
+    // A call on its own line still ends at the newline: `5` is a new statement.
+    assert_eq!(eval_i64("h($a) { return $a + 1 }\nh (1)\n5"), 5);
+}
+
 // ── Arena pool: a reused arena must not hand back stale or corrupt bytes ──
 
 #[test]
@@ -992,4 +1007,150 @@ f 41"
         ),
         42
     );
+}
+
+// ── Fused named call / tail call regression tests (vm-tier1-call-dispatch) ──
+
+#[test]
+fn fused_call_name_matches_old_path() {
+    // Call a user function with 0, 1, and 3 args (including recursive Fibonacci)
+    // 0 args
+    assert_eq!(
+        eval("greet() { return \"hi\" }; greet()").as_str(),
+        Some("hi")
+    );
+    // 1 arg
+    assert_eq!(eval_i64("double($x) { return $x * 2 }; double(21)"), 42);
+    // 3 args
+    assert_eq!(
+        eval_i64("sum3($a, $b, $c) { return $a + $b + $c }; sum3(10, 20, 12)"),
+        42
+    );
+    // Recursive Fibonacci
+    assert_eq!(
+        eval_i64(
+            "fib($n) { if $n < 2 { return $n } return (fib ($n - 1)) + (fib ($n - 2)) }; fib 10"
+        ),
+        55
+    );
+}
+
+#[test]
+fn fused_tail_call_mutual_recursion() {
+    // is_even / is_odd at 2000, assert 1
+    assert_eq!(
+        eval_i64(
+            "is_even($n) { if $n == 0 { return 1 } return is_odd ($n - 1) }
+is_odd($n) { if $n == 0 { return 0 } return is_even ($n - 1) }
+is_even 2000"
+        ),
+        1
+    );
+}
+
+#[test]
+fn fused_call_name_builtin() {
+    // There are no builtins registered in global_index without plugins.
+    // The fused opcode correctly falls through the cold path (global_index miss,
+    // domain methods miss, fallback scan miss) and returns nil, which is the
+    // same behavior as the old OP_PUSH_STR + OP_CALL path.
+    let result = eval("$s = \"hello\"; len($s)");
+    assert!(
+        result.is_nil(),
+        "expected nil (no builtins without plugins), got {:?}",
+        result
+    );
+}
+
+#[test]
+fn fused_call_name_on_local_is_unchanged() {
+    // $f = ...; $f() still works (local variable call path is unchanged)
+    assert_eq!(eval_i64("$f = ($x) => $x + 1; $f 6"), 7);
+}
+
+// ── Tier 2: frame code pointer regression tests ──
+
+#[test]
+fn frame_code_pointer_survives_repeated_runs() {
+    // Compile three different programs and run them round-robin 50 times
+    // each on one VM to catch stale pointer issues.
+    let src_recursion = "f($n) { if $n <= 0 { return 1 } return f($n - 1) * 2 }; f(10)";
+    let src_closure = "$f = |$x| $x * 3; $f 7";
+    let src_tail = "ping($n) { if $n <= 0 { return 7 } return pong ($n - 1) }; pong($n) { if $n <= 0 { return 9 } return ping ($n - 1) }; ping 5";
+
+    let tokens1 = xcl_vm::lexer::lex(src_recursion, "<test>");
+    let ast1 = xcl_vm::parser::parse(&tokens1, src_recursion);
+    let bc1 = xcl_vm::bytecode::compile(&ast1);
+
+    let tokens2 = xcl_vm::lexer::lex(src_closure, "<test>");
+    let ast2 = xcl_vm::parser::parse(&tokens2, src_closure);
+    let bc2 = xcl_vm::bytecode::compile(&ast2);
+
+    let tokens3 = xcl_vm::lexer::lex(src_tail, "<test>");
+    let ast3 = xcl_vm::parser::parse(&tokens3, src_tail);
+    let bc3 = xcl_vm::bytecode::compile(&ast3);
+
+    let mut vm = xcl_vm::VM::new();
+    for _ in 0..50 {
+        let r1 = vm.run(&bc1);
+        assert_eq!(r1.as_i48(), 1024, "recursion failed");
+        let r2 = vm.run(&bc2);
+        assert_eq!(r2.as_i48(), 21, "closure failed");
+        let r3 = vm.run(&bc3);
+        assert_eq!(r3.as_i48(), 9, "tail call failed");
+    }
+}
+
+#[test]
+fn tail_call_across_bytecodes_after_run() {
+    // Run a tail-call program, then a different program, then the tail-call
+    // program again on the same VM.
+    let src_tail = "ping($n) { if $n <= 0 { return 7 } return pong ($n - 1) }; pong($n) { if $n <= 0 { return 9 } return ping ($n - 1) }; ping 4";
+    let src_other = "$x = 100; $x + 1";
+
+    let tokens1 = xcl_vm::lexer::lex(src_tail, "<test>");
+    let ast1 = xcl_vm::parser::parse(&tokens1, src_tail);
+    let bc1 = xcl_vm::bytecode::compile(&ast1);
+
+    let tokens2 = xcl_vm::lexer::lex(src_other, "<test>");
+    let ast2 = xcl_vm::parser::parse(&tokens2, src_other);
+    let bc2 = xcl_vm::bytecode::compile(&ast2);
+
+    let mut vm = xcl_vm::VM::new();
+    assert_eq!(vm.run(&bc1).as_i48(), 7, "first tail call");
+    assert_eq!(vm.run(&bc2).as_i48(), 101, "other program");
+    assert_eq!(vm.run(&bc1).as_i48(), 7, "tail call again");
+}
+
+#[test]
+fn call_value_after_run() {
+    // Keep a function Value returned by run, call it via call_value after
+    // the VM has run a different program.
+    let src1 = "$f = |$x| $x + 10; $f";
+    let src2 = "42 * 2";
+
+    let tokens1 = xcl_vm::lexer::lex(src1, "<test>");
+    let ast1 = xcl_vm::parser::parse(&tokens1, src1);
+    let bc1 = xcl_vm::bytecode::compile(&ast1);
+
+    let tokens2 = xcl_vm::lexer::lex(src2, "<test>");
+    let ast2 = xcl_vm::parser::parse(&tokens2, src2);
+    let bc2 = xcl_vm::bytecode::compile(&ast2);
+
+    let mut vm = xcl_vm::VM::new();
+    let func = vm.run(&bc1);
+    assert!(func.as_func().is_some(), "expected function from first run");
+
+    // Run a different program
+    assert_eq!(vm.run(&bc2).as_i48(), 84, "different program");
+
+    // Call the saved function via call_value
+    let result = vm.call_value(func, &[xcl_vm::Value::from_i48(5)]);
+    assert_eq!(result.as_i48(), 15, "call_value after run");
+}
+
+#[test]
+fn vm_is_send() {
+    fn assert_send<T: Send>() {}
+    assert_send::<xcl_vm::VM>();
 }

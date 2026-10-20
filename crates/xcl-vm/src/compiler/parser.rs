@@ -1476,8 +1476,14 @@ impl<'a> Parser<'a> {
         // $-ident calls are handled by expr_stmt at the statement level.
         let prev_is_ident =
             self.pos > 0 && matches!(self.tokens[self.pos - 1].token, Token::IdentPlain);
+        // `f (a) b c` is a three-argument call. The first argument is
+        // parenthesized, so the previous token is `)`, not an identifier; a call
+        // produced by parenthesized arguments must still accept the remaining
+        // space-separated ones. Without this, `hanoi ($n - 1) $from $via $to`
+        // compiles as `hanoi($n - 1)` followed by a discarded call.
+        let call_from_parens = matches!(e, AstNode::Call { .. });
 
-        if prev_is_ident
+        if (prev_is_ident || call_from_parens)
             && matches!(
                 e,
                 AstNode::Ident { .. } | AstNode::FieldAccess { .. } | AstNode::Call { .. }

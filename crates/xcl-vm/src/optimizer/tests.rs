@@ -1,23 +1,24 @@
 //! Unit tests for the optimizer module.
 
+use super::dataflow::build_basic_blocks;
+use super::dead_store::eliminate_dead_stores;
+use super::licm::loop_invariant_code_motion;
 use crate::bytecode::Instr;
 use crate::runtime::vm::ops::consts::{
-    OP_ADD, OP_ADD_FIELD_LOCAL_STORE, OP_ADD_INT_LOCAL, OP_ADD_INT_STORE_LOCAL,
-    OP_ADD_LOCAL_LOCAL, OP_ADD_LOCAL_LOCAL_STORE, OP_ADD_LOCAL_STORE, OP_ADD_FLOAT_LOCAL,
-    OP_ARRAY_PUSH_LOCAL, OP_DEC_LOCAL, OP_DIV_FLOAT_LOCAL, OP_DIV_LOCAL_LOCAL,
-    OP_DIV_LOCAL_LOCAL_STORE, OP_DIV_LOCAL_STORE, OP_FOR_NUMBER_LOOP, OP_GET_FIELD_LOCAL_STORE,
+    OP_ADD, OP_ADD_FIELD_LOCAL_STORE, OP_ADD_FLOAT_LOCAL, OP_ADD_INT_LOCAL, OP_ADD_INT_STORE_LOCAL,
+    OP_ADD_LOCAL_LOCAL, OP_ADD_LOCAL_LOCAL_STORE, OP_ADD_LOCAL_STORE, OP_ARRAY_PUSH_LOCAL,
+    OP_DEC_LOCAL, OP_DIV_FLOAT_LOCAL, OP_DIV_LOCAL_LOCAL, OP_DIV_LOCAL_LOCAL_STORE,
+    OP_DIV_LOCAL_STORE, OP_FOR_NUMBER_LOOP, OP_GET_FIELD_LOCAL_STORE,
     OP_GET_INDEX_LOCAL_LOCAL_STORE, OP_HALT, OP_IF_EQ_INT, OP_IF_LT_INT, OP_INC_LOCAL,
     OP_INC_LOCAL_INT, OP_JUMP, OP_JUMP_IF_FALSE, OP_LOAD_CONST_LOCAL, OP_LOAD_GLOBAL,
     OP_LOAD_LOCAL, OP_LOAD_LOCAL_LOAD_LOCAL, OP_LOAD_LOCAL_PUSH_INT, OP_LOAD_LOCAL_STORE_LOCAL,
     OP_LT_LOCAL_LOCAL, OP_MOD_EQ_INT, OP_MOD_LOCAL_LOCAL_STORE, OP_MUL_FLOAT_LOCAL,
     OP_MUL_INT_LOCAL, OP_MUL_LOCAL_LOCAL, OP_MUL_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_STORE,
     OP_PUSH_INT, OP_STORE_LOCAL, OP_SUB, OP_SUB_FLOAT_LOCAL, OP_SUB_INT_LOCAL, OP_SUB_LOCAL_LOCAL,
-    OP_SUB_LOCAL_LOCAL_STORE, OP_SUB_LOCAL_STORE, OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,
+    OP_SUB_LOCAL_LOCAL_STORE, OP_SUB_LOCAL_STORE, OP_WHILE_LT_INT, OP_WHILE_LT_INT_WIDE,
+    OP_WHILE_LT_LOCAL,
 };
 use crate::runtime::vm::ops::meta;
-use super::dataflow::build_basic_blocks;
-use super::dead_store::eliminate_dead_stores;
-use super::licm::loop_invariant_code_motion;
 
 #[test]
 fn test_basic_blocks_simple() {
@@ -53,8 +54,14 @@ fn test_basic_blocks_while_exit() {
     let blocks = build_basic_blocks(&code, &wide);
     // Block 0: IP 0 (WHILE_LT_INT) - successors should include IP 1 (body) and IP 4 (exit)
     let block0 = &blocks.iter().find(|b| b.start == 0).unwrap();
-    assert!(block0.successors.contains(&1), "WHILE should have body successor");
-    assert!(block0.successors.contains(&4), "WHILE should have exit successor");
+    assert!(
+        block0.successors.contains(&1),
+        "WHILE should have body successor"
+    );
+    assert!(
+        block0.successors.contains(&4),
+        "WHILE should have exit successor"
+    );
 }
 
 #[test]
@@ -81,19 +88,19 @@ fn test_licm_no_change_without_globals() {
         Instr::a1(OP_PUSH_INT, 0),
         Instr::a1(OP_STORE_LOCAL, 1), // $sum = 0
         // Loop header (index 4)
-        Instr::a1(OP_LOAD_LOCAL, 0),  // load $i
+        Instr::a1(OP_LOAD_LOCAL, 0), // load $i
         Instr::a1(OP_PUSH_INT, 100),
         Instr::none(OP_SUB),
         Instr::a1(OP_JUMP_IF_FALSE, 12), // if $i >= 100 jump to exit
         // Loop body (index 8)
-        Instr::a1(OP_LOAD_LOCAL, 1),  // load $sum
+        Instr::a1(OP_LOAD_LOCAL, 1), // load $sum
         Instr::a1(OP_PUSH_INT, 1),
         Instr::none(OP_ADD),
         Instr::a1(OP_STORE_LOCAL, 1), // $sum = $sum + 1
         Instr::a1(OP_LOAD_LOCAL, 0),  // load $i
         Instr::a1(OP_PUSH_INT, 1),
         Instr::none(OP_ADD),
-        Instr::a1(OP_STORE_LOCAL, 0), // $i = $i + 1
+        Instr::a1(OP_STORE_LOCAL, 0),   // $i = $i + 1
         Instr::a1(OP_JUMP_IF_FALSE, 4), // back to header (simulated)
         // Exit (index 12)
         Instr::none(OP_HALT),
@@ -102,7 +109,10 @@ fn test_licm_no_change_without_globals() {
     let mut wide: Vec<i64> = Vec::new();
     loop_invariant_code_motion(&mut code, &mut wide);
     // Should be unchanged — no LOAD_GLOBAL to hoist
-    assert_eq!(code, orig, "LICM should not modify bytecode without LOAD_GLOBAL");
+    assert_eq!(
+        code, orig,
+        "LICM should not modify bytecode without LOAD_GLOBAL"
+    );
 }
 
 #[test]
@@ -112,7 +122,7 @@ fn test_licm_hoists_load_global() {
         Instr::a1(OP_PUSH_INT, 0),
         Instr::a1(OP_STORE_LOCAL, 0), // $i = 0
         // Loop header (index 2)
-        Instr::a1(OP_LOAD_LOCAL, 0),  // load $i
+        Instr::a1(OP_LOAD_LOCAL, 0), // load $i
         Instr::a1(OP_PUSH_INT, 10),
         Instr::none(OP_SUB),
         Instr::a1(OP_JUMP_IF_FALSE, 10), // exit at 10
@@ -124,7 +134,7 @@ fn test_licm_hoists_load_global() {
         Instr::a1(OP_LOAD_LOCAL, 0),  // load $i
         Instr::a1(OP_PUSH_INT, 1),
         Instr::none(OP_ADD),
-        Instr::a1(OP_STORE_LOCAL, 0), // $i = $i + 1
+        Instr::a1(OP_STORE_LOCAL, 0),   // $i = $i + 1
         Instr::a1(OP_JUMP_IF_FALSE, 2), // back to header
         // Exit (index 10)
         Instr::none(OP_HALT),
@@ -145,7 +155,7 @@ fn test_licm_hoists_load_global() {
 #[test]
 fn test_licm_with_real_compiled_bytecode() {
     // Test that a simple while-loop produces correct result
-    use crate::{evaluate, VM};
+    use crate::{VM, evaluate};
 
     let source = r#"
         $i = 0
@@ -163,11 +173,10 @@ fn test_licm_with_real_compiled_bytecode() {
     assert_eq!(result.as_int(), 100, "sum should be 100");
 }
 
-
 #[test]
 fn test_shift_operators() {
     // Test shift left, shift right, and bitwise AND
-    use crate::{evaluate, VM};
+    use crate::{VM, evaluate};
 
     let mut vm = VM::new();
 
@@ -229,10 +238,26 @@ fn test_branch_kind_consistency() {
 
     // Non-branch opcodes must be 0
     assert_eq!(meta::branch_kind(OP_ADD), 0, "OP_ADD must not be a branch");
-    assert_eq!(meta::branch_kind(OP_HALT), 0, "OP_HALT must not be a branch");
-    assert_eq!(meta::branch_kind(OP_LOAD_LOCAL), 0, "OP_LOAD_LOCAL must not be a branch");
-    assert_eq!(meta::branch_kind(OP_STORE_LOCAL), 0, "OP_STORE_LOCAL must not be a branch");
-    assert_eq!(meta::branch_kind(OP_PUSH_INT), 0, "OP_PUSH_INT must not be a branch");
+    assert_eq!(
+        meta::branch_kind(OP_HALT),
+        0,
+        "OP_HALT must not be a branch"
+    );
+    assert_eq!(
+        meta::branch_kind(OP_LOAD_LOCAL),
+        0,
+        "OP_LOAD_LOCAL must not be a branch"
+    );
+    assert_eq!(
+        meta::branch_kind(OP_STORE_LOCAL),
+        0,
+        "OP_STORE_LOCAL must not be a branch"
+    );
+    assert_eq!(
+        meta::branch_kind(OP_PUSH_INT),
+        0,
+        "OP_PUSH_INT must not be a branch"
+    );
 
     // Absolute branch opcodes must be 1
     assert_eq!(
@@ -285,22 +310,35 @@ fn mask_to_slots(mask: u8, instr: Instr) -> Vec<u32> {
 /// Legacy dataflow use-set for an opcode (from the hardcoded match arms).
 fn legacy_dataflow_use(op: u8, instr: Instr) -> Vec<u32> {
     match op {
-        OP_LOAD_LOCAL | OP_LOAD_LOCAL_PUSH_INT | OP_MOD_EQ_INT | OP_WHILE_LT_INT
-        | OP_IF_LT_INT | OP_IF_EQ_INT => vec![instr.a()],
-        OP_ADD_LOCAL_LOCAL | OP_SUB_LOCAL_LOCAL | OP_MUL_LOCAL_LOCAL
-        | OP_DIV_LOCAL_LOCAL | OP_LT_LOCAL_LOCAL | OP_LOAD_LOCAL_LOAD_LOCAL
+        OP_LOAD_LOCAL
+        | OP_LOAD_LOCAL_PUSH_INT
+        | OP_MOD_EQ_INT
+        | OP_WHILE_LT_INT
+        | OP_WHILE_LT_INT_WIDE
+        | OP_IF_LT_INT
+        | OP_IF_EQ_INT => vec![instr.a()],
+        OP_ADD_LOCAL_LOCAL
+        | OP_SUB_LOCAL_LOCAL
+        | OP_MUL_LOCAL_LOCAL
+        | OP_DIV_LOCAL_LOCAL
+        | OP_LT_LOCAL_LOCAL
+        | OP_LOAD_LOCAL_LOAD_LOCAL
         | OP_WHILE_LT_LOCAL => vec![instr.a(), instr.b() as u32],
-        OP_ADD_LOCAL_STORE | OP_SUB_LOCAL_STORE | OP_MUL_LOCAL_STORE
-        | OP_DIV_LOCAL_STORE => vec![instr.a(), instr.b() as u32],
-        OP_ADD_LOCAL_LOCAL_STORE | OP_SUB_LOCAL_LOCAL_STORE | OP_MUL_LOCAL_LOCAL_STORE
-        | OP_DIV_LOCAL_LOCAL_STORE | OP_MOD_LOCAL_LOCAL_STORE
+        OP_ADD_LOCAL_STORE | OP_SUB_LOCAL_STORE | OP_MUL_LOCAL_STORE | OP_DIV_LOCAL_STORE => {
+            vec![instr.a(), instr.b() as u32]
+        }
+        OP_ADD_LOCAL_LOCAL_STORE
+        | OP_SUB_LOCAL_LOCAL_STORE
+        | OP_MUL_LOCAL_LOCAL_STORE
+        | OP_DIV_LOCAL_LOCAL_STORE
+        | OP_MOD_LOCAL_LOCAL_STORE
         | OP_GET_INDEX_LOCAL_LOCAL_STORE => vec![instr.b() as u32, instr.c() as u32],
         OP_GET_FIELD_LOCAL_STORE => vec![instr.c() as u32],
         OP_ADD_FIELD_LOCAL_STORE => vec![instr.a(), instr.c() as u32],
         OP_ARRAY_PUSH_LOCAL => vec![instr.a(), instr.b() as u32],
-        OP_ADD_INT_LOCAL | OP_SUB_INT_LOCAL | OP_MUL_INT_LOCAL
-        | OP_ADD_FLOAT_LOCAL | OP_SUB_FLOAT_LOCAL | OP_MUL_FLOAT_LOCAL | OP_DIV_FLOAT_LOCAL
-        | OP_INC_LOCAL | OP_DEC_LOCAL | OP_INC_LOCAL_INT => vec![instr.a()],
+        OP_ADD_INT_LOCAL | OP_SUB_INT_LOCAL | OP_MUL_INT_LOCAL | OP_ADD_FLOAT_LOCAL
+        | OP_SUB_FLOAT_LOCAL | OP_MUL_FLOAT_LOCAL | OP_DIV_FLOAT_LOCAL | OP_INC_LOCAL
+        | OP_DEC_LOCAL | OP_INC_LOCAL_INT => vec![instr.a()],
         OP_ADD_INT_STORE_LOCAL => vec![instr.b() as u32],
         // LOAD_LOCAL_STORE_LOCAL: reads slot a (src), writes slot b (dest)
         OP_LOAD_LOCAL_STORE_LOCAL => vec![instr.a()],
@@ -312,17 +350,21 @@ fn legacy_dataflow_use(op: u8, instr: Instr) -> Vec<u32> {
 /// Legacy dataflow def-set for an opcode (from the hardcoded match arms).
 fn legacy_dataflow_def(op: u8, instr: Instr) -> Vec<u32> {
     match op {
-        OP_STORE_LOCAL | OP_LOAD_CONST_LOCAL
-        | OP_ADD_INT_LOCAL | OP_SUB_INT_LOCAL | OP_MUL_INT_LOCAL
-        | OP_ADD_FLOAT_LOCAL | OP_SUB_FLOAT_LOCAL | OP_MUL_FLOAT_LOCAL | OP_DIV_FLOAT_LOCAL
-        | OP_INC_LOCAL | OP_DEC_LOCAL | OP_INC_LOCAL_INT => vec![instr.a()],
+        OP_STORE_LOCAL | OP_LOAD_CONST_LOCAL | OP_ADD_INT_LOCAL | OP_SUB_INT_LOCAL
+        | OP_MUL_INT_LOCAL | OP_ADD_FLOAT_LOCAL | OP_SUB_FLOAT_LOCAL | OP_MUL_FLOAT_LOCAL
+        | OP_DIV_FLOAT_LOCAL | OP_INC_LOCAL | OP_DEC_LOCAL | OP_INC_LOCAL_INT => vec![instr.a()],
         // LOAD_LOCAL_STORE_LOCAL: writes slot b (dest)
         OP_LOAD_LOCAL_STORE_LOCAL => vec![instr.b() as u32],
-        OP_ADD_LOCAL_STORE | OP_SUB_LOCAL_STORE | OP_MUL_LOCAL_STORE
-        | OP_DIV_LOCAL_STORE => vec![instr.a()],
-        OP_ADD_LOCAL_LOCAL_STORE | OP_SUB_LOCAL_LOCAL_STORE | OP_MUL_LOCAL_LOCAL_STORE
-        | OP_DIV_LOCAL_LOCAL_STORE | OP_GET_INDEX_LOCAL_LOCAL_STORE
-        | OP_GET_FIELD_LOCAL_STORE | OP_ADD_FIELD_LOCAL_STORE
+        OP_ADD_LOCAL_STORE | OP_SUB_LOCAL_STORE | OP_MUL_LOCAL_STORE | OP_DIV_LOCAL_STORE => {
+            vec![instr.a()]
+        }
+        OP_ADD_LOCAL_LOCAL_STORE
+        | OP_SUB_LOCAL_LOCAL_STORE
+        | OP_MUL_LOCAL_LOCAL_STORE
+        | OP_DIV_LOCAL_LOCAL_STORE
+        | OP_GET_INDEX_LOCAL_LOCAL_STORE
+        | OP_GET_FIELD_LOCAL_STORE
+        | OP_ADD_FIELD_LOCAL_STORE
         | OP_MOD_LOCAL_LOCAL_STORE => vec![instr.a()],
         OP_ARRAY_PUSH_LOCAL => vec![instr.a()],
         OP_ADD_INT_STORE_LOCAL => vec![instr.a()],
@@ -361,8 +403,16 @@ fn slot_metadata_matches_legacy_dataflow() {
     }
 
     // OP_FOR_NUMBER_LOOP must be excluded and asserted separately
-    assert_eq!(meta::reads(OP_FOR_NUMBER_LOOP), 0, "FOR_NUMBER_LOOP must opt out of reads");
-    assert_eq!(meta::writes(OP_FOR_NUMBER_LOOP), 0, "FOR_NUMBER_LOOP must opt out of writes");
+    assert_eq!(
+        meta::reads(OP_FOR_NUMBER_LOOP),
+        0,
+        "FOR_NUMBER_LOOP must opt out of reads"
+    );
+    assert_eq!(
+        meta::writes(OP_FOR_NUMBER_LOOP),
+        0,
+        "FOR_NUMBER_LOOP must opt out of writes"
+    );
 }
 
 /// Legacy constant_prop invalidation set (slots whose constants are invalidated).
@@ -371,12 +421,19 @@ fn legacy_constant_prop_invalidate(op: u8, instr: Instr) -> Vec<u32> {
         OP_STORE_LOCAL => vec![instr.a()],
         OP_LOAD_CONST_LOCAL => vec![instr.a()],
         OP_INC_LOCAL | OP_DEC_LOCAL => vec![instr.a()],
-        OP_ADD_LOCAL_STORE | OP_SUB_LOCAL_STORE | OP_MUL_LOCAL_STORE
-        | OP_DIV_LOCAL_STORE => vec![instr.a()],
-        OP_ADD_LOCAL_LOCAL_STORE | OP_SUB_LOCAL_LOCAL_STORE | OP_MUL_LOCAL_LOCAL_STORE
-        | OP_DIV_LOCAL_LOCAL_STORE | OP_MOD_LOCAL_LOCAL_STORE
-        | OP_GET_INDEX_LOCAL_LOCAL_STORE | OP_GET_FIELD_LOCAL_STORE
-        | OP_ADD_FIELD_LOCAL_STORE | OP_ADD_INT_STORE_LOCAL | OP_INC_LOCAL_INT => {
+        OP_ADD_LOCAL_STORE | OP_SUB_LOCAL_STORE | OP_MUL_LOCAL_STORE | OP_DIV_LOCAL_STORE => {
+            vec![instr.a()]
+        }
+        OP_ADD_LOCAL_LOCAL_STORE
+        | OP_SUB_LOCAL_LOCAL_STORE
+        | OP_MUL_LOCAL_LOCAL_STORE
+        | OP_DIV_LOCAL_LOCAL_STORE
+        | OP_MOD_LOCAL_LOCAL_STORE
+        | OP_GET_INDEX_LOCAL_LOCAL_STORE
+        | OP_GET_FIELD_LOCAL_STORE
+        | OP_ADD_FIELD_LOCAL_STORE
+        | OP_ADD_INT_STORE_LOCAL
+        | OP_INC_LOCAL_INT => {
             vec![instr.a()]
         }
         OP_ARRAY_PUSH_LOCAL => vec![instr.a()],
@@ -409,7 +466,10 @@ fn slot_metadata_matches_legacy_constant_prop() {
             assert!(
                 meta_writes.contains(slot),
                 "OP {} (0x{:02x}): constant_prop invalidates slot {} but meta::writes={:?}",
-                op, op, slot, meta_writes
+                op,
+                op,
+                slot,
+                meta_writes
             );
         }
     }
@@ -421,16 +481,19 @@ fn slot_metadata_matches_legacy_constant_prop() {
 /// Legacy CSE defined_slots (from cse.rs::defined_slots).
 fn legacy_cse_defined_slots(op: u8, instr: Instr) -> Vec<u32> {
     match op {
-        OP_STORE_LOCAL | OP_LOAD_CONST_LOCAL
-        | OP_ADD_LOCAL_STORE | OP_SUB_LOCAL_STORE | OP_MUL_LOCAL_STORE
-        | OP_DIV_LOCAL_STORE | OP_ADD_INT_LOCAL | OP_SUB_INT_LOCAL | OP_MUL_INT_LOCAL
-        | OP_ADD_FLOAT_LOCAL | OP_SUB_FLOAT_LOCAL | OP_MUL_FLOAT_LOCAL | OP_DIV_FLOAT_LOCAL
-        | OP_INC_LOCAL | OP_DEC_LOCAL | OP_INC_LOCAL_INT => vec![instr.a()],
+        OP_STORE_LOCAL | OP_LOAD_CONST_LOCAL | OP_ADD_LOCAL_STORE | OP_SUB_LOCAL_STORE
+        | OP_MUL_LOCAL_STORE | OP_DIV_LOCAL_STORE | OP_ADD_INT_LOCAL | OP_SUB_INT_LOCAL
+        | OP_MUL_INT_LOCAL | OP_ADD_FLOAT_LOCAL | OP_SUB_FLOAT_LOCAL | OP_MUL_FLOAT_LOCAL
+        | OP_DIV_FLOAT_LOCAL | OP_INC_LOCAL | OP_DEC_LOCAL | OP_INC_LOCAL_INT => vec![instr.a()],
         // LOAD_LOCAL_STORE_LOCAL: writes slot b (dest)
         OP_LOAD_LOCAL_STORE_LOCAL => vec![instr.b() as u32],
-        OP_ADD_LOCAL_LOCAL_STORE | OP_SUB_LOCAL_LOCAL_STORE | OP_MUL_LOCAL_LOCAL_STORE
-        | OP_DIV_LOCAL_LOCAL_STORE | OP_GET_INDEX_LOCAL_LOCAL_STORE
-        | OP_GET_FIELD_LOCAL_STORE | OP_ADD_FIELD_LOCAL_STORE
+        OP_ADD_LOCAL_LOCAL_STORE
+        | OP_SUB_LOCAL_LOCAL_STORE
+        | OP_MUL_LOCAL_LOCAL_STORE
+        | OP_DIV_LOCAL_LOCAL_STORE
+        | OP_GET_INDEX_LOCAL_LOCAL_STORE
+        | OP_GET_FIELD_LOCAL_STORE
+        | OP_ADD_FIELD_LOCAL_STORE
         | OP_MOD_LOCAL_LOCAL_STORE => vec![instr.a()],
         OP_ARRAY_PUSH_LOCAL => vec![instr.a()],
         // ADD_INT_STORE_LOCAL: writes slot a (dest)
@@ -466,23 +529,31 @@ fn slot_metadata_matches_legacy_cse() {
 /// Legacy dead_store use-check (from dead_store.rs — which opcodes read a given slot).
 fn legacy_dead_store_reads(op: u8, instr: Instr) -> Vec<u32> {
     match op {
-        OP_LOAD_LOCAL | OP_LOAD_LOCAL_PUSH_INT | OP_WHILE_LT_INT
-        | OP_IF_LT_INT | OP_IF_EQ_INT => vec![instr.a()],
-        OP_ADD_LOCAL_STORE | OP_SUB_LOCAL_STORE | OP_MUL_LOCAL_STORE
-        | OP_DIV_LOCAL_STORE => vec![instr.a(), instr.b() as u32],
-        OP_ADD_LOCAL_LOCAL_STORE | OP_SUB_LOCAL_LOCAL_STORE | OP_MUL_LOCAL_LOCAL_STORE
-        | OP_DIV_LOCAL_LOCAL_STORE | OP_MOD_LOCAL_LOCAL_STORE => {
+        OP_LOAD_LOCAL
+        | OP_LOAD_LOCAL_PUSH_INT
+        | OP_WHILE_LT_INT
+        | OP_WHILE_LT_INT_WIDE
+        | OP_IF_LT_INT
+        | OP_IF_EQ_INT => vec![instr.a()],
+        OP_ADD_LOCAL_STORE | OP_SUB_LOCAL_STORE | OP_MUL_LOCAL_STORE | OP_DIV_LOCAL_STORE => {
+            vec![instr.a(), instr.b() as u32]
+        }
+        OP_ADD_LOCAL_LOCAL_STORE
+        | OP_SUB_LOCAL_LOCAL_STORE
+        | OP_MUL_LOCAL_LOCAL_STORE
+        | OP_DIV_LOCAL_LOCAL_STORE
+        | OP_MOD_LOCAL_LOCAL_STORE => {
             vec![instr.b() as u32, instr.c() as u32]
         }
-        OP_ADD_INT_LOCAL | OP_SUB_INT_LOCAL | OP_MUL_INT_LOCAL
-        | OP_ADD_FLOAT_LOCAL | OP_SUB_FLOAT_LOCAL | OP_MUL_FLOAT_LOCAL | OP_DIV_FLOAT_LOCAL => {
+        OP_ADD_INT_LOCAL | OP_SUB_INT_LOCAL | OP_MUL_INT_LOCAL | OP_ADD_FLOAT_LOCAL
+        | OP_SUB_FLOAT_LOCAL | OP_MUL_FLOAT_LOCAL | OP_DIV_FLOAT_LOCAL => {
             vec![instr.a()]
         }
         OP_INC_LOCAL | OP_DEC_LOCAL | OP_INC_LOCAL_INT => vec![instr.a()],
         // LOAD_LOCAL_STORE_LOCAL: reads slot a (src)
         OP_LOAD_LOCAL_STORE_LOCAL => vec![instr.a()],
-        OP_ADD_LOCAL_LOCAL | OP_SUB_LOCAL_LOCAL | OP_MUL_LOCAL_LOCAL
-        | OP_DIV_LOCAL_LOCAL | OP_LT_LOCAL_LOCAL => vec![instr.a(), instr.b() as u32],
+        OP_ADD_LOCAL_LOCAL | OP_SUB_LOCAL_LOCAL | OP_MUL_LOCAL_LOCAL | OP_DIV_LOCAL_LOCAL
+        | OP_LT_LOCAL_LOCAL => vec![instr.a(), instr.b() as u32],
         OP_GET_INDEX_LOCAL_LOCAL_STORE => vec![instr.b() as u32, instr.c() as u32],
         OP_GET_FIELD_LOCAL_STORE => vec![instr.c() as u32],
         OP_ADD_FIELD_LOCAL_STORE => vec![instr.a(), instr.c() as u32],
