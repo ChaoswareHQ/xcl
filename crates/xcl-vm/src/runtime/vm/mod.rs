@@ -45,13 +45,10 @@ pub mod ops;
 
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-
 // `alloc` re-exports needed by `no_std` builds (std prelude provides them).
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use alloc::{
-    vec::Vec,
-};
+use alloc::vec::Vec;
 
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
@@ -72,10 +69,20 @@ use alloc::vec;
 #[cfg(feature = "std")]
 use std::sync::Arc;
 
-#[cfg(not(feature = "std"))]
-use hashbrown::HashMap;
 #[cfg(feature = "std")]
 use crate::HashMap;
+#[cfg(not(feature = "std"))]
+use hashbrown::HashMap;
+
+// Thread-local bump arena pool for reusing memory across VM instances.
+// Holds at most one `Bump` per thread. When a `VM` is dropped, its arena is
+// reset and returned to this pool (if small enough) so the next `VM::new()`
+// reuses the same pages instead of faulting in fresh memory.
+#[cfg(feature = "std")]
+std::thread_local! {
+    static ARENA_POOL: core::cell::RefCell<Option<bumpalo::Bump>> =
+        const { core::cell::RefCell::new(None) };
+}
 
 use crate::bytecode::*;
 use crate::runtime::value::{
@@ -239,7 +246,6 @@ impl core::ops::IndexMut<usize> for LocalSlice {
     }
 }
 
-
 /// Returns the raw instruction bounds of a frame's bytecode.
 ///
 /// The dispatch loop keeps these in locals; a raw pointer avoids borrowing
@@ -322,6 +328,14 @@ pub struct VM {
     /// separate pool, which moved ~200 bytes three times per call (~20% of all
     /// retired instructions on recursive workloads).
     frame_depth: usize,
+    /// Previously installed bytecode (for idempotent function installation).
+    installed_code: Option<Arc<[Instr]>>,
+    /// Stable slot indices assigned to user functions of the current bytecode.
+    function_slots: Vec<u32>,
+    /// Function names installed in `global_index` (for cleanup on bytecode switch).
+    function_names: Vec<Box<str>>,
+    /// Index in `globals` where the current bytecode's function values start.
+    function_base: u32,
 }
 
 impl Default for VM {
@@ -342,6 +356,17 @@ impl VM {
     /// assert!(vm.stack.is_empty());
     /// ```
     pub fn new() -> Self {
+        // Item 1: Try to reuse a pooled arena from a previous VM.
+        let arena = {
+            #[cfg(feature = "std")]
+            {
+                ARENA_POOL.with(|pool| pool.borrow_mut().take().unwrap_or_else(Bump::new))
+            }
+            #[cfg(not(feature = "std"))]
+            {
+                Bump::new()
+            }
+        };
         Self {
             stack: Vec::with_capacity(64),
             regs: Vec::with_capacity(64),
@@ -355,7 +380,7 @@ impl VM {
             impl_index: Vec::new(),
             native_entries: Vec::new(),
             type_entries: Vec::new(),
-            arena: Bump::new(),
+            arena,
             frames: Vec::with_capacity(16),
             closures: Arc::new([]),
             context_stack: HashMap::new(),
@@ -366,6 +391,10 @@ impl VM {
             script_args: Vec::new(),
             call_cache: [(Value::nil(), Value::nil()); 4],
             frame_depth: 0,
+            installed_code: None,
+            function_slots: Vec::new(),
+            function_names: Vec::new(),
+            function_base: 0,
         }
     }
 
@@ -546,12 +575,19 @@ impl VM {
             frame.code = Arc::clone(bc);
         }
         frame.ip = 0;
-        frame.iter.clear();
+        // Item 3: only clear when non-empty — avoids writing length on every call.
+        if !frame.iter.is_empty() {
+            frame.iter.clear();
+        }
         frame.iter_idx = 0;
         frame.range_cur = 0;
         frame.range_end = 0;
-        frame.defer_stack.clear();
-        frame.argv.clear();
+        if !frame.defer_stack.is_empty() {
+            frame.defer_stack.clear();
+        }
+        if !frame.argv.is_empty() {
+            frame.argv.clear();
+        }
         // `locals`/`local_base` are set by `bind_registers`, which every caller
         // runs next.
         idx
@@ -560,12 +596,34 @@ impl VM {
     /// Allocates `n` registers for frame `idx` at the top of the register file
     /// and binds the frame to them.
     ///
-    /// Any previous contents are dropped: the caller writes parameters into
-    /// `regs[base..]` immediately after this.
+    /// `copied_params` is the number of slots the caller writes immediately
+    /// after this call (parameters taken from the operand stack). Those slots
+    /// are not written here, which removes one store per parameter from the
+    /// call path. The remaining `[copied_params..n)` slots are nil-filled.
+    /// A count of `0` (the root frame) nil-fills everything.
     #[inline(always)]
-    fn bind_registers(&mut self, idx: usize, n: usize) -> usize {
+    // Clippy cannot see that every element is written before it is read; the
+    // SAFETY comment below is the proof. `Value` is `Copy` and has no `Drop`.
+    #[allow(clippy::uninit_vec)]
+    fn bind_registers(&mut self, idx: usize, n: usize, copied_params: usize) -> usize {
         let base = self.regs.len();
-        self.regs.resize(base + n, Value::nil());
+        self.regs.reserve(n);
+        // SAFETY: `Value` is `Copy` and has no `Drop`. `reserve` guarantees
+        // capacity for `base + n`. Every slot in `[base, base + n)` is written
+        // before it can be read: the caller writes
+        // `[0, copied_params)` right after this call, and the loop below
+        // writes the rest. `write` does not read the old (possibly
+        // uninitialised) contents.
+        unsafe {
+            self.regs.set_len(base + n);
+            let start = self.regs.as_mut_ptr().add(base + copied_params.min(n));
+            let end = self.regs.as_mut_ptr().add(base + n);
+            let mut p = start;
+            while p < end {
+                p.write(Value::nil());
+                p = p.add(1);
+            }
+        }
         let frame = unsafe { self.frames.get_unchecked_mut(idx) };
         frame.local_base = base as u32;
         frame.locals = LocalSlice {
@@ -584,10 +642,26 @@ impl VM {
 
     /// Rebinds frame `idx` to `n` registers at `base`, growing the file if the
     /// (tail-called) function needs more slots than the current one.
+    ///
+    /// `copied_params` slots are overwritten by the caller; the tail is
+    /// nil-filled.
     #[inline(always)]
-    fn rebind_registers(&mut self, idx: usize, base: usize, n: usize) {
+    #[allow(clippy::uninit_vec)]
+    fn rebind_registers(&mut self, idx: usize, base: usize, n: usize, copied_params: usize) {
         self.regs.truncate(base);
-        self.regs.resize(base + n, Value::nil());
+        self.regs.reserve(n);
+        // SAFETY: same argument as `bind_registers`: `Value` has no `Drop`, the
+        // capacity is reserved, and every slot is written before it is read.
+        unsafe {
+            self.regs.set_len(base + n);
+            let start = self.regs.as_mut_ptr().add(base + copied_params.min(n));
+            let end = self.regs.as_mut_ptr().add(base + n);
+            let mut p = start;
+            while p < end {
+                p.write(Value::nil());
+                p = p.add(1);
+            }
+        }
         let frame = unsafe { self.frames.get_unchecked_mut(idx) };
         frame.local_base = base as u32;
         frame.locals = LocalSlice {
@@ -719,35 +793,81 @@ impl VM {
     /// let result = vm.run(&bc);
     /// assert_eq!(result.as_i48(), 100);
     /// ```
+    ///
+    /// # Contract
+    ///
+    /// Calling `run()` invalidates any `Value` previously obtained from this VM
+    /// (the arena is reset). The result is escaped before return so it survives
+    /// the next `run()` call.
     pub fn run(&mut self, bc: &Bytecode) -> Value {
         self.stack.clear();
         self.frame_depth = 0;
         if self.frames.len() > 4096 {
             self.frames.truncate(4096);
         }
-        self.closures = Arc::clone(&bc.closures);
+        // Item 2: clear growing state so repeated runs leave nothing behind.
+        self.context_stack.clear();
         self.call_cache = [(Value::nil(), Value::nil()); 4];
+        self.arena.reset();
+        self.closures = Arc::clone(&bc.closures);
 
-        // Pre-allocate globals for enum variants and type names
-        // Preserve existing globals (builtins registered by register_all)
-        let needed = bc.global_names.len().max(self.globals.len());
-        self.globals.resize(needed, Value::nil());
+        // Install (or refresh) the bytecode's top-level functions.
+        //
+        // Slots are stable across runs: `global_index` maps a name to
+        // `global_table.len() + globals_index`, which is exactly what `OP_CALL`
+        // subtracts the table length from. Function values live in the arena,
+        // so they must be rebuilt after the arena reset above.
+        let current_code = bc.instructions.clone();
+        let is_same_bytecode = self
+            .installed_code
+            .as_ref()
+            .map(|prev| Arc::ptr_eq(prev, &current_code))
+            .unwrap_or(false);
 
-        // Register user-defined functions in globals so OP_CALL can find them
-        // Use an offset so indices don't collide with global_table (builtins)
-        let globals_offset = self.global_table.len() as u32;
-        for (name, func) in bc.user_functions.iter() {
-            let idx = globals_offset + self.globals.len() as u32;
-            self.globals
-                .push(Value::from_func_shared(Arc::clone(func), &self.arena));
-            self.global_index.insert(name.as_ref().into(), idx);
+        if !is_same_bytecode {
+            // Drop the previous bytecode's function names and values.
+            for name in self.function_names.drain(..) {
+                self.global_index.remove(&name);
+            }
+            self.function_slots.clear();
+            self.globals.truncate(self.function_base as usize);
+        }
+
+        // Compiler globals (enum variants, type names) occupy slots
+        // `0..global_names.len()` and come before the function values.
+        let compiler_globals = bc.global_names.len();
+        if self.globals.len() < compiler_globals {
+            self.globals.resize(compiler_globals, Value::nil());
+        }
+        let function_base = self.globals.len() as u32;
+
+        if !is_same_bytecode {
+            let table_len = self.global_table.len() as u32;
+            for (i, (name, func)) in bc.user_functions.iter().enumerate() {
+                let slot = function_base + i as u32;
+                self.function_slots.push(slot);
+                self.function_names.push(name.as_ref().into());
+                self.globals
+                    .push(Value::from_func_shared(Arc::clone(func), &self.arena));
+                self.global_index
+                    .insert(name.as_ref().into(), table_len + slot);
+            }
+            self.function_base = function_base;
+            self.installed_code = Some(current_code);
+        } else {
+            // Same bytecode — rewrite each slot with a fresh Value (arena was reset).
+            for (i, (_name, func)) in bc.user_functions.iter().enumerate() {
+                let slot = self.function_slots[i] as usize;
+                self.globals[slot] = Value::from_func_shared(Arc::clone(func), &self.arena);
+            }
         }
 
         let n = bc.local_names.len().max(16);
         let root_code = Arc::new(bc.clone());
         self.regs.clear();
         let root = self.acquire_frame(&root_code);
-        self.bind_registers(root, n);
+        // Item 3: root frame has no parameters, so nil-fill every slot.
+        self.bind_registers(root, n, 0);
         {
             let frame = &mut self.frames[root];
             frame.stack_base = 0;
@@ -860,6 +980,30 @@ impl VM {
     }
 }
 
+/// Item 1: Return the bump arena to the thread-local pool so the next VM
+/// reuses the same pages instead of faulting in fresh memory.
+impl Drop for VM {
+    fn drop(&mut self) {
+        #[cfg(feature = "std")]
+        {
+            let mut arena = core::mem::replace(&mut self.arena, Bump::new());
+            arena.reset();
+            // Only pool arenas ≤ 64 MB; larger arenas are dropped so RSS
+            // cannot grow without bound.
+            if arena.allocated_bytes() <= 64 * 1024 * 1024 {
+                ARENA_POOL.with(|pool| {
+                    pool.borrow_mut().replace(arena);
+                });
+            }
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            // Under no_std the pool is unavailable; the arena is simply dropped.
+            let _ = &self.arena;
+        }
+    }
+}
+
 impl VM {
     fn enter_call(&mut self, func: &crate::runtime::value::FuncValue, args: &[Value]) -> Action {
         let Some(bc) = &func.bytecode else {
@@ -872,7 +1016,7 @@ impl VM {
 
         let idx = self.acquire_frame(bc);
         let copy = func.params.len().min(args.len());
-        let reg_base = self.bind_registers(idx, n);
+        let reg_base = self.bind_registers(idx, n, copy);
         self.regs[reg_base..reg_base + copy].copy_from_slice(&args[..copy]);
 
         let frame = &mut self.frames[idx];
@@ -913,7 +1057,7 @@ impl VM {
 
         let idx = self.acquire_frame(bc);
         let copy = func.params.len().min(nargs);
-        let reg_base = self.bind_registers(idx, n);
+        let reg_base = self.bind_registers(idx, n, copy);
         self.regs[reg_base..reg_base + copy]
             .copy_from_slice(&self.stack[arg_start..arg_start + copy]);
 
@@ -983,7 +1127,7 @@ impl VM {
         // different local count) and write the new arguments.
         let base = frame.local_base as usize;
         let copy = func.params.len().min(args.len());
-        self.rebind_registers(top, base, n);
+        self.rebind_registers(top, base, n, copy);
         self.regs[base..base + copy].copy_from_slice(&args[..copy]);
 
         // Prepare argv (only if function uses special vars)
@@ -1034,10 +1178,9 @@ impl VM {
         let stack_base = self.stack.len() as u32;
 
         let idx = self.acquire_frame(&bc);
-        let reg_base = self.bind_registers(idx, n);
-        for (i, _) in func_ref.params.iter().enumerate() {
-            self.regs[reg_base + i] = args.get(i).copied().unwrap_or(Value::nil());
-        }
+        let copy = func_ref.params.len().min(args.len());
+        let reg_base = self.bind_registers(idx, n, copy);
+        self.regs[reg_base..reg_base + copy].copy_from_slice(&args[..copy]);
         {
             let frame = &mut self.frames[idx];
             frame.stack_base = stack_base;
@@ -1720,5 +1863,64 @@ mod tests {
             &[],
         );
         assert_eq!(result.as_i48(), 42);
+    }
+
+    // ── Item 2 + Item 6: Memory-stability test ──
+
+    #[test]
+    fn test_memory_stability_500_runs() {
+        // Run the same compiled program 500 times on one VM and assert that
+        // globals.len(), global_index.len(), and frames.len() after run 500
+        // equal their values after run 2.
+        let src = r#"
+            f($n) {
+                if $n <= 0 { return 0 }
+                return f($n - 1) + 1
+            }
+            $a = [1, 2, 3]
+            $a = $a + [4]
+            f(10)
+        "#;
+        let tokens = lex(src, "<test>");
+        let ast = parse(&tokens, src);
+        let bc = compile(&ast);
+        let mut vm = VM::new();
+
+        // Sample the state after the second run on the *same* VM. Anything that
+        // grows per run (globals, function registrations, frames) shows up here.
+        let mut after_second: Option<(usize, usize, usize)> = None;
+        for run in 1..=500 {
+            let _ = vm.run(&bc);
+            if run == 2 {
+                after_second = Some((vm.globals.len(), vm.global_index.len(), vm.frames.len()));
+            }
+        }
+        let (globals_2, global_index_2, frames_2) = after_second.expect("two runs");
+
+        assert_eq!(
+            vm.globals.len(),
+            globals_2,
+            "globals.len() after 500 runs ({}) must equal after 2 runs ({})",
+            vm.globals.len(),
+            globals_2
+        );
+        assert_eq!(
+            vm.global_index.len(),
+            global_index_2,
+            "global_index.len() after 500 runs ({}) must equal after 2 runs ({})",
+            vm.global_index.len(),
+            global_index_2
+        );
+        assert_eq!(
+            vm.frames.len(),
+            frames_2,
+            "frames.len() after 500 runs ({}) must equal after 2 runs ({})",
+            vm.frames.len(),
+            frames_2
+        );
+        assert!(
+            vm.context_stack.is_empty(),
+            "context_stack must be empty after repeated runs"
+        );
     }
 }

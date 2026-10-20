@@ -43,7 +43,12 @@ fn returned_values_survive_vm_drop() {
 
     // Map with a string value.
     let m = run_and_drop("{ name: \"xcl\", n: 3 }");
-    assert_eq!(m.as_map().and_then(|m| m.get("name")).and_then(|v| v.as_str()), Some("xcl"));
+    assert_eq!(
+        m.as_map()
+            .and_then(|m| m.get("name"))
+            .and_then(|v| v.as_str()),
+        Some("xcl")
+    );
 }
 
 fn eval_f64(src: &str) -> f64 {
@@ -780,23 +785,13 @@ fn map_cache_index_loop_read() {
 #[test]
 fn map_cache_two_maps_same_key() {
     // Two different maps with the same key — cache must not mix them
-    assert_eq!(
-        eval_i64(
-            "$a = {x: 10}; $b = {x: 20}; $a.x + $b.x"
-        ),
-        30
-    );
+    assert_eq!(eval_i64("$a = {x: 10}; $b = {x: 20}; $a.x + $b.x"), 30);
 }
 
 #[test]
 fn map_cache_same_map_two_keys() {
     // Same map, two different keys — cache must distinguish them
-    assert_eq!(
-        eval_i64(
-            "$m = {a: 1, b: 2}; $m.a + $m.b"
-        ),
-        3
-    );
+    assert_eq!(eval_i64("$m = {a: 1, b: 2}; $m.a + $m.b"), 3);
 }
 
 #[test]
@@ -882,7 +877,9 @@ fn large_map_via_from_map_boxed() {
     let v = eval("$m = {a:1, b:2, c:3, d:4, e:5, f:6, g:7, h:8, i:9}; $m[\"i\"]");
     assert_eq!(v.as_i48(), 9);
     // Verify as_map().get() works on Large maps
-    let v = eval("$m = {tag: \"Result\", ok: 42, extra: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7}; $m");
+    let v = eval(
+        "$m = {tag: \"Result\", ok: 42, extra: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7}; $m",
+    );
     let map = v.as_map().unwrap();
     assert_eq!(map.len(), 9);
     assert!(map.contains_key("tag"));
@@ -926,5 +923,73 @@ while $i < 500 {
 $count"
         ),
         1
+    );
+}
+
+// ── Arena pool: a reused arena must not hand back stale or corrupt bytes ──
+
+#[test]
+fn pooled_arena_reuse_is_safe() {
+    let src = "$s = \"\"\n$i = 0\nwhile $i < 1000 { $s = $s + \"x\"\n $i = $i + 1 }\n$s";
+    let tokens = xcl_vm::lexer::lex(src, "<test>");
+    let ast = xcl_vm::parser::parse(&tokens, src);
+    let bc = xcl_vm::bytecode::compile(&ast);
+
+    // New VM per iteration, as the benchmark harness does: the thread-local
+    // pool hands the previous arena back on the next `VM::new`.
+    for round in 0..50 {
+        let mut vm = xcl_vm::VM::new();
+        let v = vm.run(&bc);
+        assert_eq!(v.as_str().map(str::len), Some(1000), "round {round}");
+        drop(vm);
+    }
+
+    // Same VM, repeated runs: `run` resets the arena and must rebuild the
+    // function values that lived in it.
+    let mut vm = xcl_vm::VM::new();
+    for round in 0..50 {
+        let v = vm.run(&bc);
+        assert_eq!(
+            v.as_str().map(str::len),
+            Some(1000),
+            "same-vm round {round}"
+        );
+    }
+}
+
+// ── Item 5: No silent operand truncation — 300 locals regression ──
+
+#[test]
+fn function_with_300_locals() {
+    // A function with more than 255 locals must not silently truncate slot
+    // indices. We build 300 locals, write 1..300, then return the last one.
+    let mut src = String::from("f() {\n");
+    for i in 0..300 {
+        src.push_str(&format!("    $l{} = {}\n", i, i + 1));
+    }
+    src.push_str("    $sum = $l299 - $l0\n");
+    src.push_str("    return $sum\n");
+    src.push_str("}\n");
+    src.push_str("f()");
+    let result = eval(&src);
+    assert_eq!(
+        result.as_i48(),
+        299,
+        "arithmetic on slots above 255 must not truncate"
+    );
+}
+
+#[test]
+fn type_global_and_function_coexist() {
+    // A top-level type definition occupies compiler global slots. Declared
+    // functions must be installed *after* those slots, not overlapping them.
+    // (Record syntax: the sum-type parser consumes following identifiers.)
+    assert_eq!(
+        eval_i64(
+            "Shape = { x: int }
+f($x) { return $x + 1 }
+f 41"
+        ),
+        42
     );
 }

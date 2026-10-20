@@ -7,9 +7,7 @@
 // `alloc` re-exports needed by `no_std` builds (std prelude provides them).
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use alloc::{
-    string::String,
-};
+use alloc::string::String;
 
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
@@ -33,7 +31,10 @@ use super::Bytecode;
 use super::instr::Instr;
 use super::opcodes::*;
 use super::peephole::peephole_optimize_once;
-use crate::compiler::ast::{AstNode, BinaryOperator, CallArg, SpecialVarKind, TypeKind, UnaryOperator};
+use crate::HashMap;
+use crate::compiler::ast::{
+    AstNode, BinaryOperator, CallArg, SpecialVarKind, TypeKind, UnaryOperator,
+};
 use crate::compiler::span::Span;
 use crate::runtime::value::{FuncValue, Value};
 
@@ -151,6 +152,10 @@ struct Compiler {
     inline_counter: u64,
     /// Stack of function names currently being inlined (recursion guard).
     inline_stack: Vec<String>,
+    // Item 4: side maps for O(1) lookup instead of O(n) Vec::position scans.
+    string_index: HashMap<Box<str>, u32>,
+    local_index: HashMap<Box<str>, u32>,
+    global_index: HashMap<Box<str>, u32>,
 }
 
 impl Compiler {
@@ -167,6 +172,9 @@ impl Compiler {
             inline_map: BTreeMap::new(),
             inline_counter: 0,
             inline_stack: Vec::new(),
+            string_index: HashMap::new(),
+            local_index: HashMap::new(),
+            global_index: HashMap::new(),
         }
     }
 
@@ -191,30 +199,33 @@ impl Compiler {
 
     #[inline]
     fn intern(&mut self, s: &str) -> u32 {
-        if let Some(i) = self.strings.iter().position(|x| &**x == s) {
-            return i as u32;
+        if let Some(&i) = self.string_index.get(s) {
+            return i;
         }
         let i = self.strings.len() as u32;
+        self.string_index.insert(s.into(), i);
         self.strings.push(s.into());
         i
     }
 
     #[inline]
     fn local(&mut self, name: &str) -> u32 {
-        if let Some(i) = self.locals.iter().position(|x| &**x == name) {
-            return i as u32;
+        if let Some(&i) = self.local_index.get(name) {
+            return i;
         }
         let i = self.locals.len() as u32;
+        self.local_index.insert(name.into(), i);
         self.locals.push(name.into());
         i
     }
 
     #[inline]
     fn global(&mut self, name: &str) -> u32 {
-        if let Some(i) = self.globals.iter().position(|x| &**x == name) {
-            return i as u32;
+        if let Some(&i) = self.global_index.get(name) {
+            return i;
         }
         let i = self.globals.len() as u32;
+        self.global_index.insert(name.into(), i);
         self.globals.push(name.into());
         i
     }
@@ -222,7 +233,7 @@ impl Compiler {
     /// Check if a name is a registered global (enum variant, type name, etc.)
     #[inline]
     fn is_global(&self, name: &str) -> bool {
-        self.globals.iter().any(|x| &**x == name)
+        self.global_index.contains_key(name)
     }
 
     #[inline]
@@ -271,18 +282,30 @@ impl Compiler {
                 let dst = self.temp_slot(temp_depth);
                 // Inline small values directly in operand b (kind=0)
                 // For larger values, store in wide_operands (kind=6)
-                if u16::try_from(*value).is_ok() {
-                    self.emit(Instr::make(OP_LOAD_CONST_LOCAL, dst, *value as u16, 0));
+                if let Ok(v) = u16::try_from(*value) {
+                    self.emit(Instr::make(OP_LOAD_CONST_LOCAL, dst, v, 0));
                 } else {
                     let w = self.wide(*value);
-                    self.emit(Instr::make(OP_LOAD_CONST_LOCAL, dst, w as u16, 6));
+                    // Item 5: fall back to unfused push + store when wide index overflows u16.
+                    if let Ok(wu) = u16::try_from(w) {
+                        self.emit(Instr::make(OP_LOAD_CONST_LOCAL, dst, wu, 6));
+                    } else {
+                        self.emit(Instr::a1(OP_PUSH_INT_WIDE, w));
+                        self.emit(Instr::make(OP_STORE_LOCAL, dst, 0, 0));
+                    }
                 }
                 dst
             }
             AstNode::Float { value, .. } => {
                 let dst = self.temp_slot(temp_depth);
                 let w = self.wide(value.to_bits() as i64);
-                self.emit(Instr::make(OP_LOAD_CONST_LOCAL, dst, w as u16, 1));
+                // Item 5: fall back to unfused push + store when wide index overflows u16.
+                if let Ok(wu) = u16::try_from(w) {
+                    self.emit(Instr::make(OP_LOAD_CONST_LOCAL, dst, wu, 1));
+                } else {
+                    self.emit(Instr::a1(OP_PUSH_FLOAT, w));
+                    self.emit(Instr::make(OP_STORE_LOCAL, dst, 0, 0));
+                }
                 dst
             }
             AstNode::UnaryOp {
@@ -297,25 +320,40 @@ impl Compiler {
                         self.emit(Instr::make(OP_LOAD_CONST_LOCAL, dst, neg as u16, 0));
                     } else {
                         let w = self.wide(neg);
-                        self.emit(Instr::make(OP_LOAD_CONST_LOCAL, dst, w as u16, 6));
+                        // Item 5: fall back to unfused push + store when wide index overflows u16.
+                        if let Ok(wu) = u16::try_from(w) {
+                            self.emit(Instr::make(OP_LOAD_CONST_LOCAL, dst, wu, 6));
+                        } else {
+                            self.emit(Instr::a1(OP_PUSH_INT_WIDE, w));
+                            self.emit(Instr::make(OP_STORE_LOCAL, dst, 0, 0));
+                        }
                     }
                     return dst;
                 }
                 if let AstNode::Float { value, .. } = operand.as_ref() {
                     let dst = self.temp_slot(temp_depth);
                     let w = self.wide((-*value).to_bits() as i64);
-                    self.emit(Instr::make(OP_LOAD_CONST_LOCAL, dst, w as u16, 1));
+                    // Item 5: fall back to unfused push + store when wide index overflows u16.
+                    if let Ok(wu) = u16::try_from(w) {
+                        self.emit(Instr::make(OP_LOAD_CONST_LOCAL, dst, wu, 1));
+                    } else {
+                        self.emit(Instr::a1(OP_PUSH_FLOAT, w));
+                        self.emit(Instr::make(OP_STORE_LOCAL, dst, 0, 0));
+                    }
                     return dst;
                 }
                 let zero_slot = self.temp_slot(temp_depth);
                 self.emit(Instr::make(OP_LOAD_CONST_LOCAL, zero_slot, 0, 0));
                 let src = self.emit_expr_to_slot(operand, temp_depth + 1);
-                self.emit(Instr::make(
-                    OP_SUB_LOCAL_LOCAL_STORE,
-                    zero_slot,
-                    src as u16,
-                    zero_slot as u8,
-                ));
+                // Item 5: fall back to unfused sequence when operands overflow.
+                if let (Ok(src16), Ok(z8)) = (u16::try_from(src), u8::try_from(zero_slot)) {
+                    self.emit(Instr::make(OP_SUB_LOCAL_LOCAL_STORE, zero_slot, src16, z8));
+                } else {
+                    self.emit(Instr::a1(OP_LOAD_LOCAL, zero_slot));
+                    self.emit(Instr::a1(OP_LOAD_LOCAL, src));
+                    self.emit(Instr::none(OP_SUB));
+                    self.emit(Instr::a1(OP_STORE_LOCAL, zero_slot));
+                }
                 zero_slot
             }
             AstNode::Index { target, index, .. } => {
@@ -326,35 +364,42 @@ impl Compiler {
                     let t_slot = self.emit_expr_to_slot(target, temp_depth);
                     let field_idx = self.intern(value);
                     let dst = self.temp_slot(temp_depth);
-                    self.emit(Instr::make(
-                        OP_GET_FIELD_LOCAL_STORE,
-                        dst,
-                        field_idx as u16,
-                        t_slot as u8,
-                    ));
+                    // Item 5: fall back to unfused sequence when operands overflow.
+                    if let (Ok(fi16), Ok(t8)) = (u16::try_from(field_idx), u8::try_from(t_slot)) {
+                        self.emit(Instr::make(OP_GET_FIELD_LOCAL_STORE, dst, fi16, t8));
+                    } else {
+                        self.emit(Instr::a1(OP_LOAD_LOCAL, t_slot));
+                        self.emit(Instr::a1(OP_GET_FIELD, field_idx));
+                        self.emit(Instr::a1(OP_STORE_LOCAL, dst));
+                    }
                     return dst;
                 }
                 let t_slot = self.emit_expr_to_slot(target, temp_depth);
                 let i_slot = self.emit_expr_to_slot(index, temp_depth + 1);
                 let dst = self.temp_slot(temp_depth);
-                self.emit(Instr::make(
-                    OP_GET_INDEX_LOCAL_LOCAL_STORE,
-                    dst,
-                    i_slot as u16,
-                    t_slot as u8,
-                ));
+                // Item 5: fall back to unfused sequence when operands overflow.
+                if let (Ok(is16), Ok(t8)) = (u16::try_from(i_slot), u8::try_from(t_slot)) {
+                    self.emit(Instr::make(OP_GET_INDEX_LOCAL_LOCAL_STORE, dst, is16, t8));
+                } else {
+                    self.emit(Instr::a1(OP_LOAD_LOCAL, t_slot));
+                    self.emit(Instr::a1(OP_LOAD_LOCAL, i_slot));
+                    self.emit(Instr::none(OP_GET_INDEX));
+                    self.emit(Instr::a1(OP_STORE_LOCAL, dst));
+                }
                 dst
             }
             AstNode::FieldAccess { target, field, .. } => {
                 let t_slot = self.emit_expr_to_slot(target, temp_depth);
                 let field_idx = self.intern(field);
                 let dst = self.temp_slot(temp_depth);
-                self.emit(Instr::make(
-                    OP_GET_FIELD_LOCAL_STORE,
-                    dst,
-                    field_idx as u16,
-                    t_slot as u8,
-                ));
+                // Item 5: fall back to unfused sequence when operands overflow.
+                if let (Ok(fi16), Ok(t8)) = (u16::try_from(field_idx), u8::try_from(t_slot)) {
+                    self.emit(Instr::make(OP_GET_FIELD_LOCAL_STORE, dst, fi16, t8));
+                } else {
+                    self.emit(Instr::a1(OP_LOAD_LOCAL, t_slot));
+                    self.emit(Instr::a1(OP_GET_FIELD, field_idx));
+                    self.emit(Instr::a1(OP_STORE_LOCAL, dst));
+                }
                 dst
             }
             AstNode::BinaryOp {
@@ -366,7 +411,15 @@ impl Compiler {
                 let Some(opc) = local_local_store_opcode(*op) else {
                     unreachable!()
                 };
-                self.emit(Instr::make(opc, dst, r_slot as u16, l_slot as u8));
+                // Item 5: fall back to unfused sequence when operands overflow.
+                if let (Ok(rs16), Ok(ls8)) = (u16::try_from(r_slot), u8::try_from(l_slot)) {
+                    self.emit(Instr::make(opc, dst, rs16, ls8));
+                } else {
+                    self.emit(Instr::a1(OP_LOAD_LOCAL, l_slot));
+                    self.emit(Instr::a1(OP_LOAD_LOCAL, r_slot));
+                    self.emit(Instr::none(binop_opcode(*op)));
+                    self.emit(Instr::a1(OP_STORE_LOCAL, dst));
+                }
                 dst
             }
             _ => unreachable!(),
@@ -385,7 +438,10 @@ impl Compiler {
     }
 
     fn try_emit_arg_fused(&mut self, node: &AstNode) -> bool {
-        let AstNode::BinaryOp { left, op, right, .. } = node else {
+        let AstNode::BinaryOp {
+            left, op, right, ..
+        } = node
+        else {
             return false;
         };
         let AstNode::Ident { name, .. } = left.as_ref() else {
@@ -439,8 +495,12 @@ impl Compiler {
             {
                 let rslot = self.local(rn);
                 if let Some(opc) = local_store_opcode(*op) {
-                    self.emit(Instr::a2(opc, dest_slot, rslot as u16));
-                    return true;
+                    // Item 5: only emit fused opcode when rslot fits in u16.
+                    if let Ok(r16) = u16::try_from(rslot) {
+                        self.emit(Instr::a2(opc, dest_slot, r16));
+                        return true;
+                    }
+                    // Fall through to unfused path.
                 }
             }
             if let AstNode::Int { value, .. } = right.as_ref() {
@@ -469,11 +529,10 @@ impl Compiler {
         {
             let lslot = self.local(ln);
             let rslot = self.local(rn);
-            if lslot < 256 {
-                let c_src1 = (lslot & 0xFF) as u8;
-                let b_src2 = (rslot & 0xFFFF) as u16;
+            // Item 5: only emit fused opcode when both operands fit.
+            if let (Ok(l8), Ok(r16)) = (u8::try_from(lslot), u16::try_from(rslot)) {
                 if let Some(opc) = local_local_store_opcode(*op) {
-                    self.emit(Instr::make(opc, dest_slot, b_src2, c_src1));
+                    self.emit(Instr::make(opc, dest_slot, r16, l8));
                     return true;
                 }
             }
@@ -514,14 +573,11 @@ impl Compiler {
                         && !self.is_global(obj_name)
                     {
                         let obj_slot = self.local(obj_name);
-                        if obj_slot < 256 {
-                            let field_idx = self.intern(field);
-                            self.emit(Instr::make(
-                                OP_ADD_FIELD_LOCAL_STORE,
-                                dest_slot,
-                                field_idx as u16,
-                                obj_slot as u8,
-                            ));
+                        // Item 5: only emit fused opcode when operands fit.
+                        if let (Ok(o8), Ok(fi16)) =
+                            (u8::try_from(obj_slot), u16::try_from(self.intern(field)))
+                        {
+                            self.emit(Instr::make(OP_ADD_FIELD_LOCAL_STORE, dest_slot, fi16, o8));
                             return true;
                         }
                     }
@@ -531,17 +587,22 @@ impl Compiler {
                 let Some(opc) = local_store_opcode(*op) else {
                     unreachable!()
                 };
-                self.emit(Instr::a2(opc, dest_slot, r_slot as u16));
-                return true;
+                // Item 5: only emit fused opcode when r_slot fits in u16.
+                if let Ok(r16) = u16::try_from(r_slot) {
+                    self.emit(Instr::a2(opc, dest_slot, r16));
+                    return true;
+                }
+                // Fall through to unfused path below.
             }
 
             let l_slot = self.emit_expr_to_slot(left, 0);
             let r_slot = self.emit_expr_to_slot(right, 1);
-            if l_slot < 256 {
+            // Item 5: only emit fused opcode when both operands fit.
+            if let (Ok(l8), Ok(r16)) = (u8::try_from(l_slot), u16::try_from(r_slot)) {
                 let Some(opc) = local_local_store_opcode(*op) else {
                     unreachable!()
                 };
-                self.emit(Instr::make(opc, dest_slot, r_slot as u16, l_slot as u8));
+                self.emit(Instr::make(opc, dest_slot, r16, l8));
                 return true;
             }
         }
@@ -657,41 +718,45 @@ impl Compiler {
                     match value.as_ref() {
                         AstNode::Index { target, index, .. } => {
                             let t_slot = self.emit_expr_to_slot(target, 0);
-                            if t_slot < 256 {
-                                // `$obj["literal"]` is a field read with an
-                                // interned key: no need to materialize the key.
-                                if let AstNode::Str { value, .. } = index.as_ref() {
-                                    let field_idx = self.intern(value);
+                            // `$obj["literal"]` is a field read with an
+                            // interned key: no need to materialize the key.
+                            if let AstNode::Str { value, .. } = index.as_ref() {
+                                let field_idx = self.intern(value);
+                                // Item 5: only emit fused opcode when operands fit.
+                                if let (Ok(fi16), Ok(t8)) =
+                                    (u16::try_from(field_idx), u8::try_from(t_slot))
+                                {
                                     self.emit(Instr::make(
                                         OP_GET_FIELD_LOCAL_STORE,
                                         slot,
-                                        field_idx as u16,
-                                        t_slot as u8,
+                                        fi16,
+                                        t8,
                                     ));
                                     return;
                                 }
                             }
                             let i_slot = self.emit_expr_to_slot(index, 1);
-                            if t_slot < 256 {
+                            // Item 5: only emit fused opcode when operands fit.
+                            if let (Ok(is16), Ok(t8)) =
+                                (u16::try_from(i_slot), u8::try_from(t_slot))
+                            {
                                 self.emit(Instr::make(
                                     OP_GET_INDEX_LOCAL_LOCAL_STORE,
                                     slot,
-                                    i_slot as u16,
-                                    t_slot as u8,
+                                    is16,
+                                    t8,
                                 ));
                                 return;
                             }
                         }
                         AstNode::FieldAccess { target, field, .. } => {
                             let t_slot = self.emit_expr_to_slot(target, 0);
-                            if t_slot < 256 {
-                                let field_idx = self.intern(field);
-                                self.emit(Instr::make(
-                                    OP_GET_FIELD_LOCAL_STORE,
-                                    slot,
-                                    field_idx as u16,
-                                    t_slot as u8,
-                                ));
+                            let field_idx = self.intern(field);
+                            // Item 5: only emit fused opcode when operands fit.
+                            if let (Ok(fi16), Ok(t8)) =
+                                (u16::try_from(field_idx), u8::try_from(t_slot))
+                            {
+                                self.emit(Instr::make(OP_GET_FIELD_LOCAL_STORE, slot, fi16, t8));
                                 return;
                             }
                         }
@@ -730,12 +795,11 @@ impl Compiler {
                                     {
                                         // $x = $x + $y â†’ OP_ADD_LOCAL_STORE (direct local-to-local)
                                         let right_slot = self.local(right_name);
-                                        self.emit(Instr::a2(
-                                            OP_ADD_LOCAL_STORE,
-                                            slot,
-                                            right_slot as u16,
-                                        ));
-                                        return;
+                                        // Item 5: only emit fused opcode when slot fits.
+                                        if let Ok(rs16) = u16::try_from(right_slot) {
+                                            self.emit(Instr::a2(OP_ADD_LOCAL_STORE, slot, rs16));
+                                            return;
+                                        }
                                     }
                                 }
                                 BinaryOperator::Sub => {
@@ -749,31 +813,32 @@ impl Compiler {
                                     {
                                         // $x = $x - $y â†’ OP_SUB_LOCAL_STORE
                                         let right_slot = self.local(right_name);
-                                        self.emit(Instr::a2(
-                                            OP_SUB_LOCAL_STORE,
-                                            slot,
-                                            right_slot as u16,
-                                        ));
-                                        return;
+                                        // Item 5: only emit fused opcode when slot fits.
+                                        if let Ok(rs16) = u16::try_from(right_slot) {
+                                            self.emit(Instr::a2(OP_SUB_LOCAL_STORE, slot, rs16));
+                                            return;
+                                        }
                                     }
                                 }
                                 BinaryOperator::Mul => {
                                     if let AstNode::Int { value: c, .. } = right.as_ref() {
                                         // $x = $x * c â†’ OP_MUL_INT_LOCAL
-                                        self.emit(Instr::a2(OP_MUL_INT_LOCAL, slot, *c as u16));
-                                        return;
+                                        // Item 5: only emit when constant fits in u16.
+                                        if let Ok(c16) = u16::try_from(*c) {
+                                            self.emit(Instr::a2(OP_MUL_INT_LOCAL, slot, c16));
+                                            return;
+                                        }
                                     } else if let AstNode::Ident {
                                         name: right_name, ..
                                     } = right.as_ref()
                                     {
                                         // $x = $x * $y â†’ OP_MUL_LOCAL_STORE
                                         let right_slot = self.local(right_name);
-                                        self.emit(Instr::a2(
-                                            OP_MUL_LOCAL_STORE,
-                                            slot,
-                                            right_slot as u16,
-                                        ));
-                                        return;
+                                        // Item 5: only emit fused opcode when slot fits.
+                                        if let Ok(rs16) = u16::try_from(right_slot) {
+                                            self.emit(Instr::a2(OP_MUL_LOCAL_STORE, slot, rs16));
+                                            return;
+                                        }
                                     }
                                 }
                                 BinaryOperator::Div => {
@@ -792,12 +857,12 @@ impl Compiler {
                     {
                         let lslot = self.local(ln);
                         let rslot = self.local(rn);
-                        let c_src1 = (lslot & 0xFF) as u8;
-                        let b_src2 = (rslot & 0xFFFF) as u16;
-                        let opc = local_local_store_opcode(*op);
-                        if let Some(opc) = opc {
-                            self.emit(Instr::make(opc, slot, b_src2, c_src1));
-                            return;
+                        // Item 5: only emit fused opcode when both operands fit.
+                        if let (Ok(l8), Ok(r16)) = (u8::try_from(lslot), u16::try_from(rslot)) {
+                            if let Some(opc) = local_local_store_opcode(*op) {
+                                self.emit(Instr::make(opc, slot, r16, l8));
+                                return;
+                            }
                         }
                     }
                 }
@@ -834,31 +899,27 @@ impl Compiler {
                 // `if $x < N` / `if $x == N` fuse the compare and the branch
                 // into one dispatch. The branch target goes in the wide table.
                 let fused = match condition.as_ref() {
-                    AstNode::BinaryOp { left, op, right, .. } => {
-                        match (left.as_ref(), right.as_ref()) {
-                            (AstNode::Ident { name, .. }, AstNode::Int { value, .. })
-                                if !self.is_global(name)
-                                    && *value >= 0
-                                    && *value <= u16::MAX as i64 =>
-                            {
-                                let slot = self
-                                    .locals
-                                    .iter()
-                                    .position(|n| &**n == name)
-                                    .map(|i| i as u32);
-                                slot.and_then(|slot| match op {
-                                    BinaryOperator::Lt => {
-                                        Some((OP_IF_LT_INT, slot, *value as u16))
-                                    }
-                                    BinaryOperator::Eq => {
-                                        Some((OP_IF_EQ_INT, slot, *value as u16))
-                                    }
-                                    _ => None,
-                                })
-                            }
-                            _ => None,
+                    AstNode::BinaryOp {
+                        left, op, right, ..
+                    } => match (left.as_ref(), right.as_ref()) {
+                        (AstNode::Ident { name, .. }, AstNode::Int { value, .. })
+                            if !self.is_global(name)
+                                && *value >= 0
+                                && *value <= u16::MAX as i64 =>
+                        {
+                            let slot = self
+                                .locals
+                                .iter()
+                                .position(|n| &**n == name)
+                                .map(|i| i as u32);
+                            slot.and_then(|slot| match op {
+                                BinaryOperator::Lt => Some((OP_IF_LT_INT, slot, *value as u16)),
+                                BinaryOperator::Eq => Some((OP_IF_EQ_INT, slot, *value as u16)),
+                                _ => None,
+                            })
                         }
-                    }
+                        _ => None,
+                    },
                     _ => None,
                 };
 
@@ -1077,7 +1138,8 @@ impl Compiler {
             AstNode::FunctionDef {
                 body, name, params, ..
             } => {
-                let mut sub = Compiler::new().with_inline_map(core::mem::take(&mut self.inline_map));
+                let mut sub =
+                    Compiler::new().with_inline_map(core::mem::take(&mut self.inline_map));
                 for p in params {
                     sub.local(&p.name);
                 }
@@ -1152,10 +1214,13 @@ impl Compiler {
                                         self.inline_counter += 1;
                                         let old_name = local_name.clone();
                                         local_map.push((old_name.clone(), fresh.clone()));
-                                        fresh_subs.push((old_name, AstNode::Ident {
-                                            name: fresh.clone(),
-                                            span: Span::empty(),
-                                        }));
+                                        fresh_subs.push((
+                                            old_name,
+                                            AstNode::Ident {
+                                                name: fresh.clone(),
+                                                span: Span::empty(),
+                                            },
+                                        ));
                                     }
 
                                     // Push this function onto the inline stack
@@ -1586,29 +1651,27 @@ fn is_pure_block_expr(node: &AstNode, inlineable_fns: &BTreeSet<String>) -> bool
         | AstNode::Str { .. }
         | AstNode::Bool { .. }
         | AstNode::Nil { .. } => true,
-        AstNode::UnaryOp { operand, .. } => {
-            is_pure_block_expr(operand, inlineable_fns)
-        }
+        AstNode::UnaryOp { operand, .. } => is_pure_block_expr(operand, inlineable_fns),
         AstNode::BinaryOp { left, right, .. } => {
-            is_pure_block_expr(left, inlineable_fns)
-                && is_pure_block_expr(right, inlineable_fns)
+            is_pure_block_expr(left, inlineable_fns) && is_pure_block_expr(right, inlineable_fns)
         }
-        AstNode::FieldAccess { target, .. } => {
-            is_pure_block_expr(target, inlineable_fns)
-        }
+        AstNode::FieldAccess { target, .. } => is_pure_block_expr(target, inlineable_fns),
         AstNode::Index { target, index, .. } => {
-            is_pure_block_expr(target, inlineable_fns)
-                && is_pure_block_expr(index, inlineable_fns)
+            is_pure_block_expr(target, inlineable_fns) && is_pure_block_expr(index, inlineable_fns)
         }
-        AstNode::ArrayLit { elements, .. } => {
-            elements.iter().all(|e| is_pure_block_expr(e, inlineable_fns))
-        }
-        AstNode::DictLit { entries, .. } => {
-            entries.iter().all(|(_, v)| is_pure_block_expr(v, inlineable_fns))
-        }
+        AstNode::ArrayLit { elements, .. } => elements
+            .iter()
+            .all(|e| is_pure_block_expr(e, inlineable_fns)),
+        AstNode::DictLit { entries, .. } => entries
+            .iter()
+            .all(|(_, v)| is_pure_block_expr(v, inlineable_fns)),
         AstNode::Range { start, end, .. } => {
-            start.as_ref().map_or(true, |s| is_pure_block_expr(s.as_ref(), inlineable_fns))
-                && end.as_ref().map_or(true, |e| is_pure_block_expr(e.as_ref(), inlineable_fns))
+            start
+                .as_ref()
+                .map_or(true, |s| is_pure_block_expr(s.as_ref(), inlineable_fns))
+                && end
+                    .as_ref()
+                    .map_or(true, |e| is_pure_block_expr(e.as_ref(), inlineable_fns))
         }
         AstNode::Call { callee, args, .. } => {
             // Call is allowed only if callee is an identifier matching an inlineable function
@@ -1619,7 +1682,8 @@ fn is_pure_block_expr(node: &AstNode, inlineable_fns: &BTreeSet<String>) -> bool
             } else {
                 return false;
             }
-            args.iter().all(|a| is_pure_block_expr(&a.value, inlineable_fns))
+            args.iter()
+                .all(|a| is_pure_block_expr(&a.value, inlineable_fns))
         }
         // Impure constructs
         AstNode::Assign { .. }
@@ -1659,12 +1723,14 @@ fn is_pure_expr_no_call(node: &AstNode) -> bool {
             is_pure_expr_no_call(target) && is_pure_expr_no_call(index)
         }
         AstNode::ArrayLit { elements, .. } => elements.iter().all(is_pure_expr_no_call),
-        AstNode::DictLit { entries, .. } => {
-            entries.iter().all(|(_, v)| is_pure_expr_no_call(v))
-        }
+        AstNode::DictLit { entries, .. } => entries.iter().all(|(_, v)| is_pure_expr_no_call(v)),
         AstNode::Range { start, end, .. } => {
-            start.as_ref().map_or(true, |s| is_pure_expr_no_call(s.as_ref()))
-                && end.as_ref().map_or(true, |e| is_pure_expr_no_call(e.as_ref()))
+            start
+                .as_ref()
+                .map_or(true, |s| is_pure_expr_no_call(s.as_ref()))
+                && end
+                    .as_ref()
+                    .map_or(true, |e| is_pure_expr_no_call(e.as_ref()))
         }
         _ => false,
     }
@@ -1743,18 +1809,31 @@ fn substitute(node: &AstNode, subs: &[(String, AstNode)]) -> AstNode {
             operand: Box::new(substitute(operand, subs)),
             span: span.clone(),
         },
-        AstNode::BinaryOp { left, op, right, span } => AstNode::BinaryOp {
+        AstNode::BinaryOp {
+            left,
+            op,
+            right,
+            span,
+        } => AstNode::BinaryOp {
             left: Box::new(substitute(left, subs)),
             op: *op,
             right: Box::new(substitute(right, subs)),
             span: span.clone(),
         },
-        AstNode::FieldAccess { target, field, span } => AstNode::FieldAccess {
+        AstNode::FieldAccess {
+            target,
+            field,
+            span,
+        } => AstNode::FieldAccess {
             target: Box::new(substitute(target, subs)),
             field: field.clone(),
             span: span.clone(),
         },
-        AstNode::Index { target, index, span } => AstNode::Index {
+        AstNode::Index {
+            target,
+            index,
+            span,
+        } => AstNode::Index {
             target: Box::new(substitute(target, subs)),
             index: Box::new(substitute(index, subs)),
             span: span.clone(),
@@ -1803,9 +1882,15 @@ fn collect_inlineable(ast: &[AstNode]) -> BTreeMap<String, InlineFn> {
     let single_expr_fns: BTreeSet<String> = ast
         .iter()
         .filter_map(|node| {
-            if let AstNode::FunctionDef { name, params, body, .. } = node {
+            if let AstNode::FunctionDef {
+                name, params, body, ..
+            } = node
+            {
                 if body.len() == 1 {
-                    if let AstNode::Return { value: Some(expr), .. } = &body[0] {
+                    if let AstNode::Return {
+                        value: Some(expr), ..
+                    } = &body[0]
+                    {
                         let param_names: Vec<String> =
                             params.iter().map(|p| p.name.clone()).collect();
                         let mut idents = Vec::new();
@@ -1823,12 +1908,18 @@ fn collect_inlineable(ast: &[AstNode]) -> BTreeMap<String, InlineFn> {
         .collect();
 
     for node in ast {
-        if let AstNode::FunctionDef { name, params, body, .. } = node {
+        if let AstNode::FunctionDef {
+            name, params, body, ..
+        } = node
+        {
             let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
 
             // Try single-expression form first
             if body.len() == 1 {
-                if let AstNode::Return { value: Some(expr), .. } = &body[0] {
+                if let AstNode::Return {
+                    value: Some(expr), ..
+                } = &body[0]
+                {
                     if is_pure_expr(expr) {
                         let mut idents = Vec::new();
                         collect_idents(expr, &mut idents);
@@ -1856,7 +1947,11 @@ fn collect_inlineable(ast: &[AstNode]) -> BTreeMap<String, InlineFn> {
             if !body.is_empty() {
                 // Last statement must be Return { value: Some(result) }
                 let last = &body[body.len() - 1];
-                let AstNode::Return { value: Some(result), .. } = last else {
+                let AstNode::Return {
+                    value: Some(result),
+                    ..
+                } = last
+                else {
                     continue;
                 };
 
@@ -1866,7 +1961,12 @@ fn collect_inlineable(ast: &[AstNode]) -> BTreeMap<String, InlineFn> {
                 let mut ok = true;
 
                 for stmt in &body[..body.len() - 1] {
-                    if let AstNode::Assign { name: aname, value: aval, .. } = stmt {
+                    if let AstNode::Assign {
+                        name: aname,
+                        value: aval,
+                        ..
+                    } = stmt
+                    {
                         // Name must not be a parameter
                         if param_names.contains(aname) {
                             ok = false;
@@ -1889,8 +1989,9 @@ fn collect_inlineable(ast: &[AstNode]) -> BTreeMap<String, InlineFn> {
                 }
 
                 // Check purity of all assigned expressions and the result
-                let all_assigns_pure =
-                    assigns.iter().all(|(_, expr)| is_pure_block_expr(expr, &single_expr_fns));
+                let all_assigns_pure = assigns
+                    .iter()
+                    .all(|(_, expr)| is_pure_block_expr(expr, &single_expr_fns));
                 if !all_assigns_pure {
                     continue;
                 }
@@ -1929,7 +2030,10 @@ fn collect_inlineable(ast: &[AstNode]) -> BTreeMap<String, InlineFn> {
                         name.clone(),
                         InlineFn {
                             params: param_names,
-                            body: InlineBody::Block { assigns, result: result.as_ref().clone() },
+                            body: InlineBody::Block {
+                                assigns,
+                                result: result.as_ref().clone(),
+                            },
                         },
                     );
                 }
@@ -1943,17 +2047,73 @@ fn collect_inlineable(ast: &[AstNode]) -> BTreeMap<String, InlineFn> {
 fn is_known_global(name: &str) -> bool {
     matches!(
         name,
-        "i8" | "i16" | "i32" | "i64" | "i128" | "u8" | "u16" | "u32" | "u64" | "u128"
-            | "isize" | "usize" | "f32" | "f64" | "bool" | "str" | "string" | "char"
-            | "none" | "None" | "Some" | "Ok" | "Err" | "Result" | "Option"
-            | "Array" | "Map" | "Dict" | "Range" | "Vec"
-            | "print" | "println" | "input" | "len" | "range" | "enumerate"
-            | "zip" | "filter" | "map" | "reduce" | "fold" | "sort" | "reverse"
-            | "to_string" | "to_int" | "to_float" | "trim" | "split" | "join"
-            | "contains" | "starts_with" | "ends_with" | "replace"
-            | "abs" | "min" | "max" | "sqrt" | "pow" | "sin" | "cos" | "tan"
-            | "log" | "exp" | "round" | "floor" | "ceil"
-            | "true" | "false"
+        "i8" | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "isize"
+            | "usize"
+            | "f32"
+            | "f64"
+            | "bool"
+            | "str"
+            | "string"
+            | "char"
+            | "none"
+            | "None"
+            | "Some"
+            | "Ok"
+            | "Err"
+            | "Result"
+            | "Option"
+            | "Array"
+            | "Map"
+            | "Dict"
+            | "Range"
+            | "Vec"
+            | "print"
+            | "println"
+            | "input"
+            | "len"
+            | "range"
+            | "enumerate"
+            | "zip"
+            | "filter"
+            | "map"
+            | "reduce"
+            | "fold"
+            | "sort"
+            | "reverse"
+            | "to_string"
+            | "to_int"
+            | "to_float"
+            | "trim"
+            | "split"
+            | "join"
+            | "contains"
+            | "starts_with"
+            | "ends_with"
+            | "replace"
+            | "abs"
+            | "min"
+            | "max"
+            | "sqrt"
+            | "pow"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "log"
+            | "exp"
+            | "round"
+            | "floor"
+            | "ceil"
+            | "true"
+            | "false"
     )
 }
 
