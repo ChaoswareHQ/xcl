@@ -467,7 +467,7 @@ fn map_literal_string_field() {
 #[test]
 fn int_string_concatenation() {
     // int + string concatenation must still work
-    let result = eval("$x = 42; $s = $x + \" items\"");
+    let result = eval("$x = 42; $s = $x + \" items\"; $s");
     assert!(
         result.as_str().is_some(),
         "expected string, got {:?}",
@@ -1323,8 +1323,210 @@ fn item_named_argument_overrides_shared_one() {
 }
 
 #[test]
+fn comma_continues_named_arguments_on_the_next_line() {
+    // An explicit comma is a continuation, so a newline after it is allowed.
+    let src = "pick($x, $o) { return $o.a }\npick a: \"x\",\n    b: \"y\"\n{ 1; 2 }";
+    assert_eq!(eval(src).as_str(), Some("x"));
+}
+
+#[test]
+fn expansion_items_may_be_separated_by_newlines() {
+    let src = "last($x) { return $x }\nlast {\n    1\n    2\n}";
+    assert_eq!(eval_i64(src), 2);
+}
+
+#[test]
+fn expansion_after_a_trailing_comma() {
+    let src = "pick($x, $o) { return $x }\npick t: \"t\",\n{\n    1\n}";
+    assert_eq!(eval_i64(src), 1);
+}
+
+#[test]
 fn field_read_on_a_local_stays_a_field_read() {
     // The zero-argument domain-call lowering must not turn `$m.a` into a call.
     let src = "$m = { a: 7 }\nidentity($v) { return $v }\nidentity ($m.a)";
     assert_eq!(eval_i64(src), 7);
+}
+
+// ── Statement-boundary calls and pipelines ──
+
+#[test]
+fn zero_argument_function_at_a_statement_boundary_is_called() {
+    // Regression: the leading-token scan walked one token too far, so `work`
+    // compiled to a read of an uninitialized local instead of a call.
+    assert_eq!(eval_i64("work() { return 41 }\nwork"), 41);
+}
+
+#[test]
+fn zero_argument_function_before_another_statement_is_called() {
+    // The following line must not be mistaken for an argument list.
+    assert_eq!(
+        eval_i64("work() { return 41 }\nwork\n$after = 1\n$after + 1"),
+        2
+    );
+}
+
+#[test]
+fn pipeline_passes_the_accumulator_as_the_first_argument() {
+    // Regression: the callee word used to be pushed above the accumulator, so
+    // `5 |> double` called `5` instead of `double`.
+    assert_eq!(eval_i64("double($x) { return $x * 2 }\n5 |> double"), 10);
+}
+
+#[test]
+fn chained_pipeline_threads_the_result() {
+    assert_eq!(
+        eval_i64("double($x) { return $x * 2 }\n3 |> double |> double"),
+        12
+    );
+}
+
+#[test]
+fn pipeline_stage_argument_follows_the_accumulator() {
+    assert_eq!(eval_i64("add($a, $b) { return $a + $b }\n10 |> add 5"), 15);
+}
+
+// ── Function values are callable in expressions ──
+
+#[test]
+fn function_value_call_in_assignment() {
+    assert_eq!(eval_i64("$double = |$x| $x * 2\n$r = $double 21\n$r"), 42);
+}
+
+#[test]
+fn function_value_call_in_return_is_a_tail_call() {
+    assert_eq!(
+        eval_i64("apply($f, $v) { return $f $v }\napply (|$x| $x + 1) 41"),
+        42
+    );
+}
+
+#[test]
+fn local_variable_beats_a_same_named_function() {
+    // `$f` is a value; the global function `f` must not shadow it.
+    let src = "f($x) { return $x + 1000 }\n$f = |$x| $x + 1\n$r = $f 41\n$r";
+    assert_eq!(eval_i64(src), 42);
+}
+
+// ── Parenthesized value calls ──
+
+#[test]
+fn parenthesized_value_call_takes_a_list() {
+    assert_eq!(
+        eval_i64("$f = |$a, $b| $a * 10 + $b\n$r = $f(1, 2)\n$r"),
+        12
+    );
+}
+
+#[test]
+fn parenthesized_value_call_can_be_empty() {
+    // `$f()` is a zero-argument call, not a grouped expression.
+    assert_eq!(eval_i64("$f = |$a| 7\n$r = $f()\n$r"), 7);
+}
+
+#[test]
+fn parenthesized_value_call_args_are_full_expressions() {
+    assert_eq!(
+        eval_i64("$f = |$a, $b| $a * 10 + $b\n$r = $f(1 + 2, 3)\n$r"),
+        33
+    );
+}
+
+#[test]
+fn value_call_keeps_operator_precedence() {
+    // `$f 1 + 2` is `($f 1) + 2`, not `$f(1 + 2)`.
+    assert_eq!(eval_i64("$f = |$a| $a * 10\n$r = $f 1 + 2\n$r"), 12);
+}
+
+#[test]
+fn value_call_in_condition_does_not_consume_the_body() {
+    let src = "pick($f) { if $f 1 { return 1 } return 0 }\npick (|$x| $x > 0)";
+    assert_eq!(eval_i64(src), 1);
+}
+
+#[test]
+fn value_call_condition_with_false_result() {
+    let src = "pick($f) { if $f 0 { return 1 } return 0 }\npick (|$x| $x > 0)";
+    assert_eq!(eval_i64(src), 0);
+}
+
+#[test]
+fn zero_argument_function_condition_is_called() {
+    // `if ready` must call `ready`, not read a variable called `ready`.
+    let src = "ready() { return true }\npick() { if ready { return 1 } return 0 }\npick()";
+    assert_eq!(eval_i64(src), 1);
+}
+
+#[test]
+fn negated_zero_argument_function_condition_is_called() {
+    let src = "ready() { return false }\npick() { if not ready { return 1 } return 0 }\npick()";
+    assert_eq!(eval_i64(src), 1);
+}
+
+#[test]
+fn zero_argument_function_iterable_is_called() {
+    let src = "items() { return [1, 2, 3] }\ntotal() { $s = 0\n for $i in items { $s = $s + $i }\n return $s }\ntotal()";
+    assert_eq!(eval_i64(src), 6);
+}
+
+#[test]
+fn while_condition_call_does_not_consume_the_body() {
+    let src = "run($f) { $i = 0\n while $f $i { $i = $i + 1 }\n return $i }\nrun (|$x| $x < 3)";
+    assert_eq!(eval_i64(src), 3);
+}
+
+// ── Top-level variables are visible from functions and lambdas ──
+
+#[test]
+fn top_level_variable_is_visible_in_functions() {
+    assert_eq!(eval_i64("$x = 5\nget() { return $x }\nget()"), 5);
+}
+
+#[test]
+fn top_level_array_is_visible_in_functions() {
+    let src = "$items = [1, 2, 3]\ntotal() { $s = 0\n for $i in $items { $s = $s + $i }\n return $s }\ntotal()";
+    assert_eq!(eval_i64(src), 6);
+}
+
+#[test]
+fn parameter_shadows_top_level_variable() {
+    assert_eq!(eval_i64("$x = 5\nget($x) { return $x }\nget 9"), 9);
+}
+
+#[test]
+fn local_assignment_shadows_top_level_variable() {
+    // A name assigned in the body is a local for the whole body, so the
+    // top-level `$x` is not modified.
+    let src = "$x = 5\nset() { $x = 9\n return $x }\n$local = set()\n$x + $local";
+    assert_eq!(eval_i64(src), 14);
+}
+
+// ── Closures capture by value ──
+
+#[test]
+fn lambda_captures_enclosing_parameter() {
+    assert_eq!(
+        eval_i64("make($n) { return |$x| $x + $n }\n$g = make 10\n$g 1"),
+        11
+    );
+}
+
+#[test]
+fn lambda_captures_enclosing_local() {
+    let src = "outer() { $n = 10\n return |$x| $x + $n }\n$g = outer()\n$g 1";
+    assert_eq!(eval_i64(src), 11);
+}
+
+#[test]
+fn nested_lambda_captures_transitively() {
+    let src = "mk($a) { return |$b| (|$c| $a + $b + $c) }\n$f = mk 1\n$g = $f 2\n$g 3";
+    assert_eq!(eval_i64(src), 6);
+}
+
+#[test]
+fn closure_captures_by_value() {
+    // Rebinding the captured variable after the closure is created does not
+    // affect the closure.
+    let src = "$n = 100\n$f = |$x| $x + $n\n$n = 200\n$f 1";
+    assert_eq!(eval_i64(src), 101);
 }

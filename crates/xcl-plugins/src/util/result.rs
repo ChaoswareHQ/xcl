@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use xcl_macros::{Xcl, xcl_impl};
+use xcl_macros::{Xcl, xcl_fn, xcl_impl};
 use xcl_vm::{SUBTYPE_RESULT, VARIANT_ERR, VARIANT_OK, Value};
 
 use super::Util;
@@ -132,9 +132,83 @@ impl Util {
     }
 }
 
+/// Method-syntax aliases.
+///
+/// `$r.is_ok` is an `OP_CALL_METHOD`, and method dispatch on a value maps the
+/// `Result` subtype to the domain named `result`. The helpers above live in the
+/// `util` domain, so they are mirrored here to make `$r.is_ok`, `$r.unwrap()`
+/// and friends resolve. Extra arguments follow the receiver, so
+/// `$e.unwrap_or(0)` works too.
+#[xcl_fn(name = "result.is_result")]
+pub fn result_is_result(value: Value) -> Value {
+    Value::bool(Util::is_result(value))
+}
+
+/// True for a successful result: `$r.is_ok`.
+#[xcl_fn(name = "result.is_ok")]
+pub fn result_is_ok(value: Value) -> Value {
+    Value::bool(Util::is_ok(value))
+}
+
+/// True for a failed result: `$r.is_err`.
+#[xcl_fn(name = "result.is_err")]
+pub fn result_is_err(value: Value) -> Value {
+    Value::bool(Util::is_err(value))
+}
+
+/// The success payload, or a panic: `$r.unwrap`.
+#[xcl_fn(name = "result.unwrap")]
+pub fn result_unwrap(value: Value) -> Value {
+    Util::unwrap(value)
+}
+
+/// The success payload, or a default: `$r.unwrap_or(0)`.
+#[xcl_fn(name = "result.unwrap_or")]
+pub fn result_unwrap_or(value: Value, default: Value) -> Value {
+    Util::unwrap_or(value, default)
+}
+
+/// The success payload, or `none`: `$r.ok_value`.
+#[xcl_fn(name = "result.ok_value")]
+pub fn result_ok_value(value: Value) -> Value {
+    Util::ok_value(value)
+}
+
+/// The failure payload, or `none`: `$e.err_value`.
+#[xcl_fn(name = "result.err_value")]
+pub fn result_err_value(value: Value) -> Value {
+    Util::err_value(value)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::evaluate_new;
+
+    #[test]
+    fn result_method_syntax() {
+        // `$r.is_ok` dispatches through the `result` domain; the `util` helpers
+        // are mirrored there so method syntax resolves.
+        assert!(evaluate_new("$r = util.ok 5\n$r.is_ok").as_bool());
+        assert!(!evaluate_new("$r = util.ok 5\n$r.is_err").as_bool());
+        assert_eq!(evaluate_new("$r = util.ok 5\n$r.unwrap").as_i48(), 5);
+
+        let e = evaluate_new("$e = util.err \"bad\"\n$e.err_value");
+        assert_eq!(e.as_str(), Some("bad"));
+    }
+
+    #[test]
+    fn result_method_in_condition() {
+        let src = "$r = util.ok 5\npick() { if $r.is_ok { return 1 } return 0 }\npick()";
+        assert_eq!(evaluate_new(src).as_i48(), 1);
+    }
+
+    #[test]
+    fn result_method_with_argument() {
+        assert_eq!(
+            evaluate_new("$e = util.err \"bad\"\n($e.unwrap_or 0)").as_i48(),
+            0
+        );
+    }
 
     #[test]
     fn result_round_trip() {

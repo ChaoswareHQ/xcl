@@ -138,6 +138,22 @@ mod core_ops {
         OpcodeResult::Next
     }
 
+    /// Loads a variable from the **top-level frame's** slot `a`.
+    ///
+    /// Function bodies use this to read top-level variables: the root frame's
+    /// locals are the first registers of the shared register file, so this is a
+    /// plain indexed load that does not depend on the caller's frame.
+    #[opcode(code = 40, arity = 0, stack = "0 -> 1")]
+    fn op_load_root(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
+        let v = vm
+            .regs
+            .get(instr.a() as usize)
+            .copied()
+            .unwrap_or(Value::nil());
+        vm.push(v);
+        OpcodeResult::Next
+    }
+
     // ── Arithmetic ──
 
     /// Pops two values, adds them, and pushes the result.
@@ -570,7 +586,16 @@ mod core_ops {
     fn op_load_lambda(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         let idx = instr.a() as usize;
         // SAFETY: frame at `top` is active during dispatch.
-        let func = vm.frames[top].code().closures[idx].clone();
+        let mut func = vm.frames[top].code().closures[idx].clone();
+        let count = func.closure_captures.len();
+        if count > 0 {
+            // The creation site pushed one value per capture, in order.
+            let mut values = vec![Value::nil(); count];
+            for i in (0..count).rev() {
+                values[i] = vm.pop();
+            }
+            func.closure_env = func.closure_captures.iter().cloned().zip(values).collect();
+        }
         vm.push(Value::from_func(func, &vm.arena));
         OpcodeResult::Next
     }
@@ -1258,9 +1283,15 @@ mod core_ops {
         _instr: Instr,
     ) -> OpcodeResult {
         let iterable = vm.pop();
+        let is_range = iterable.map_subtype() == Some(crate::runtime::value::SUBTYPE_RANGE);
         let f = &mut vm.frames[top];
         f.iter.clear();
-        if let Some(arr) = iterable.as_array() {
+        f.iter_is_range = is_range;
+        if is_range {
+            let map = iterable.as_map().expect("range subtype implies a map");
+            f.range_cur = map.get("start").map(|v| v.as_int()).unwrap_or(0);
+            f.range_end = map.get("end").map(|v| v.as_int()).unwrap_or(0);
+        } else if let Some(arr) = iterable.as_array() {
             f.iter.extend_from_slice(arr);
         }
         f.iter_idx = 0;
@@ -1276,6 +1307,15 @@ mod core_ops {
         instr: Instr,
     ) -> OpcodeResult {
         let f = &mut vm.frames[top];
+        if f.iter_is_range {
+            if f.range_cur < f.range_end {
+                let v = f.range_cur;
+                f.range_cur += 1;
+                vm.push(Value::from_i48(v));
+                return OpcodeResult::Next;
+            }
+            return OpcodeResult::Jump(instr.a());
+        }
         if (f.iter_idx as usize) < f.iter.len() {
             let v = f.iter[f.iter_idx as usize];
             f.iter_idx += 1;

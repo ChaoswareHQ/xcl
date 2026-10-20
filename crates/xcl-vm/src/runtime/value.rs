@@ -116,6 +116,8 @@ pub const SUBTYPE_RESULT: u16 = 1;
 pub const SUBTYPE_ERROR: u16 = 2;
 /// Subtype constant indicating an OS resource handle.
 pub const SUBTYPE_HANDLE: u16 = 3;
+/// Subtype constant indicating a numeric range value (`start..end`).
+pub const SUBTYPE_RANGE: u16 = 4;
 /// Base offset for user-defined custom record and sum types.
 pub const SUBTYPE_USER_BASE: u16 = 100;
 
@@ -1501,7 +1503,16 @@ impl Value {
                 out
             }
             Some(KIND_FUNC) => match v.as_func() {
-                Some(f) => Self::from_func_boxed(f.clone()),
+                Some(f) => {
+                    // Captured values may live in the arena too.
+                    let mut f = f.clone();
+                    if !f.closure_env.is_empty() {
+                        for (_, value) in f.closure_env.iter_mut() {
+                            *value = Self::escape_inner(*value, memo);
+                        }
+                    }
+                    Self::from_func_boxed(f)
+                }
                 None => v,
             },
             _ => v,

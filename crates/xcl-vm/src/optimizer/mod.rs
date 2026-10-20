@@ -10,22 +10,19 @@
 // `alloc` re-exports needed by `no_std` builds (std prelude provides them).
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use alloc::{
-    vec::Vec,
-};
+use alloc::vec::Vec;
 
-
-mod cse;
 mod constant_prop;
+mod cse;
 mod dataflow;
 mod dead_store;
 mod licm;
 mod loop_unroll;
 
 /// Run all data flow optimization passes on bytecode.
-pub fn optimize(code: &mut Vec<crate::bytecode::Instr>, wide: &mut [i64]) {
+pub fn optimize(code: &mut Vec<crate::bytecode::Instr>, wide: &mut [i64], pinned: u32) {
     // Dead store elimination
-    dead_store::eliminate_dead_stores(code, wide);
+    dead_store::eliminate_dead_stores(code, wide, pinned);
 
     // Constant propagation
     constant_prop::constant_propagation(code, wide);

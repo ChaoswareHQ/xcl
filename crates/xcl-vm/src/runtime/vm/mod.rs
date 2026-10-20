@@ -209,6 +209,9 @@ pub(crate) struct Frame {
     /// allocated per call depth and touched on every call/return.
     iter: Vec<Value>,
     iter_idx: u32,
+    /// True when `iter` is a numeric range rather than an array; the bounds live
+    /// in `range_cur`/`range_end`.
+    iter_is_range: bool,
     range_cur: i64,
     range_end: i64,
     stack_base: u32,
@@ -841,6 +844,7 @@ impl VM {
                 ip: 0,
                 iter: Vec::new(),
                 iter_idx: 0,
+                iter_is_range: false,
                 range_cur: 0,
                 range_end: 0,
                 stack_base: 0,
@@ -858,6 +862,7 @@ impl VM {
             frame.iter.clear();
         }
         frame.iter_idx = 0;
+        frame.iter_is_range = false;
         frame.range_cur = 0;
         frame.range_end = 0;
         if !frame.defer_stack.is_empty() {
@@ -974,6 +979,28 @@ impl VM {
             ptr: unsafe { self.regs.as_mut_ptr().add(base) },
             len: n as u32,
         };
+    }
+
+    /// Writes a closure's captured values into the callee frame's capture
+    /// slots, which sit immediately after its parameters.
+    #[inline]
+    fn install_captures(
+        &mut self,
+        reg_base: usize,
+        n: usize,
+        func: &crate::runtime::value::FuncValue,
+    ) {
+        if func.closure_env.is_empty() {
+            return;
+        }
+        let start = reg_base + func.params.len();
+        let limit = reg_base + n;
+        for (i, (_, value)) in func.closure_env.iter().enumerate() {
+            let slot = start + i;
+            if slot < limit {
+                self.regs[slot] = *value;
+            }
+        }
     }
 
     /// Reads a local variable from the current frame.
@@ -1423,6 +1450,7 @@ impl VM {
         let copy = func.params.len().min(args.len());
         let reg_base = self.bind_registers(idx, n, copy);
         self.regs[reg_base..reg_base + copy].copy_from_slice(&args[..copy]);
+        self.install_captures(reg_base, n, func);
 
         let frame = &mut self.frames[idx];
         frame.ip = 0;
@@ -1465,6 +1493,7 @@ impl VM {
         let reg_base = self.bind_registers(idx, n, copy);
         self.regs[reg_base..reg_base + copy]
             .copy_from_slice(&self.stack[arg_start..arg_start + copy]);
+        self.install_captures(reg_base, n, func);
 
         {
             let frame = &mut self.frames[idx];
@@ -1505,6 +1534,7 @@ impl VM {
         let reg_base = self.bind_registers(idx, n, copy);
         self.regs[reg_base..reg_base + copy]
             .copy_from_slice(&self.stack[arg_start..arg_start + copy]);
+        self.install_captures(reg_base, n, func);
 
         {
             let frame = &mut self.frames[idx];
@@ -1563,6 +1593,7 @@ impl VM {
         frame.ip = 0;
         frame.iter.clear();
         frame.iter_idx = 0;
+        frame.iter_is_range = false;
         frame.range_cur = 0;
         frame.range_end = 0;
         frame.defer_stack.clear();
@@ -1573,6 +1604,7 @@ impl VM {
         let copy = func.params.len().min(args.len());
         self.rebind_registers(top, base, n, copy);
         self.regs[base..base + copy].copy_from_slice(&args[..copy]);
+        self.install_captures(base, n, func);
 
         // Prepare argv (only if function uses special vars)
         let frame = &mut self.frames[top];
@@ -1625,6 +1657,7 @@ impl VM {
         let copy = func_ref.params.len().min(args.len());
         let reg_base = self.bind_registers(idx, n, copy);
         self.regs[reg_base..reg_base + copy].copy_from_slice(&args[..copy]);
+        self.install_captures(reg_base, n, func_ref);
         {
             let frame = &mut self.frames[idx];
             frame.stack_base = stack_base;

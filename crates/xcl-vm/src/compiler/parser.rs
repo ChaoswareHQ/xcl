@@ -64,6 +64,9 @@ struct Parser<'a> {
     /// Depth of positional call arguments being parsed. A parenthesized call at
     /// depth > 0 must not absorb the enclosing call's remaining arguments.
     arg_depth: usize,
+    /// When false, a `{` after a call is a control-flow body, not a block-lambda
+    /// argument (`if ready { ... }`, `while $f $i { ... }`, `for $i in range 3 { ... }`).
+    brace_arg_allowed: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -74,6 +77,7 @@ impl<'a> Parser<'a> {
             source,
             pipeline_depth: 0,
             arg_depth: 0,
+            brace_arg_allowed: true,
         }
     }
 
@@ -476,7 +480,8 @@ impl<'a> Parser<'a> {
     /// before it. `provider "ctx" { ... }` has a positional argument and stays a
     /// domain block-lambda; `print { ... }` expands.
     fn try_expansion(&mut self, args: &[CallArg]) -> Option<Vec<DomainItem>> {
-        if !self.at(Token::LBrace) {
+        // A brace in a control-flow header is the body, never an expansion.
+        if !self.brace_arg_allowed || !self.at(Token::LBrace) {
             return None;
         }
         if !args.iter().all(|a| a.name.is_some()) {
@@ -596,7 +601,9 @@ impl<'a> Parser<'a> {
         }
 
         self.expect(Token::Assign);
+        let start_pos = self.pos;
         let value = self.expr();
+        let value = self.attach_call_args(value, start_pos);
         let value = Box::new(self.bare_call_to_zero_arg(value));
         AstNode::Assign {
             span,
@@ -623,6 +630,39 @@ impl<'a> Parser<'a> {
         e
     }
 
+    /// Attaches trailing positional arguments to a `$`-variable callee parsed
+    /// in an expression position: `$f 1 2` becomes `Call($f, [1, 2])`.
+    ///
+    /// Only applies when the expression starts with a `$`-variable and the next
+    /// token starts an argument on the same line; `$a + $b`, `$a` at end of
+    /// line, and plain identifiers are left alone.
+    fn attach_call_args(&mut self, callee: AstNode, start_pos: usize) -> AstNode {
+        let is_dollar_ident = matches!(
+            self.tokens.get(start_pos).map(|t| &t.token),
+            Some(Token::Ident)
+        );
+        if !is_dollar_ident
+            || !matches!(&callee, AstNode::Ident { .. })
+            || !self.starts_positional_arg()
+            || self.has_newline_before_current()
+        {
+            return callee;
+        }
+        let span = self.span();
+        let mut args = match self.paren_value_args() {
+            Some(list) => list,
+            None => vec![self.call_arg()],
+        };
+        while self.starts_positional_arg() && !self.has_newline_before_current() {
+            args.push(self.call_arg());
+        }
+        AstNode::Call {
+            span,
+            callee: Box::new(callee),
+            args,
+        }
+    }
+
     fn ret(&mut self) -> AstNode {
         let span = self.span();
         self.consume();
@@ -633,7 +673,9 @@ impl<'a> Parser<'a> {
             if is_fn_def {
                 None
             } else {
+                let start_pos = self.pos;
                 let e = self.expr();
+                let e = self.attach_call_args(e, start_pos);
                 Some(Box::new(self.bare_call_to_zero_arg(e)))
             }
         } else {
@@ -645,22 +687,12 @@ impl<'a> Parser<'a> {
     fn if_expr(&mut self) -> AstNode {
         let span = self.span();
         self.consume();
+        let allowed = self.brace_arg_allowed;
+        self.brace_arg_allowed = false;
+        let start = self.pos;
         let condition = self.expr();
-        // If the condition is a bare FieldAccess on a $-variable (like `$r.is_ok`),
-        // convert it to a zero-arg method call so `.is_ok` works as a method.
-        let condition = if let AstNode::FieldAccess { target, .. } = &condition {
-            if let AstNode::Ident { .. } = target.as_ref() {
-                AstNode::Call {
-                    span: self.span(),
-                    callee: Box::new(condition),
-                    args: vec![],
-                }
-            } else {
-                condition
-            }
-        } else {
-            condition
-        };
+        self.brace_arg_allowed = allowed;
+        let condition = self.condition_call(condition, start);
         let then_branch = self.block();
         let else_branch = self.else_branch();
         AstNode::If {
@@ -689,8 +721,12 @@ impl<'a> Parser<'a> {
         self.consume();
         let variable = self.consume().text.trim_start_matches('$').to_string();
         self.expect(Token::In);
+        let allowed = self.brace_arg_allowed;
+        self.brace_arg_allowed = false;
+        let start = self.pos;
         let iterable = self.expr();
-        let iterable = Box::new(self.bare_call_to_zero_arg(iterable));
+        self.brace_arg_allowed = allowed;
+        let iterable = Box::new(self.condition_call(iterable, start));
         let body = self.block();
         AstNode::For {
             span,
@@ -703,13 +739,54 @@ impl<'a> Parser<'a> {
     fn while_expr(&mut self) -> AstNode {
         let span = self.span();
         self.consume();
+        let allowed = self.brace_arg_allowed;
+        self.brace_arg_allowed = false;
+        let start = self.pos;
         let condition = self.expr();
-        let condition = Box::new(self.bare_call_to_zero_arg(condition));
+        self.brace_arg_allowed = allowed;
+        let condition = Box::new(self.condition_call(condition, start));
         let body = self.block();
         AstNode::While {
             span,
             condition,
             body,
+        }
+    }
+
+    /// Resolves an `if`/`while` condition or `for` iterable.
+    ///
+    /// A bare plain identifier in this position is a zero-argument call
+    /// (`if ready { }`), while `$variables` stay value reads. A bare field
+    /// access on a `$`-variable is a zero-argument method call (`$r.is_ok`).
+    fn condition_call(&self, e: AstNode, start_pos: usize) -> AstNode {
+        let plain_at = |i: usize| {
+            matches!(
+                self.tokens.get(i).map(|t| &t.token),
+                Some(Token::IdentPlain)
+            )
+        };
+        match e {
+            AstNode::Ident { .. } if plain_at(start_pos) => AstNode::Call {
+                span: self.span(),
+                callee: Box::new(e),
+                args: Vec::new(),
+            },
+            AstNode::UnaryOp { span, op, operand }
+                if matches!(op, UnaryOperator::Not)
+                    && plain_at(start_pos + 1)
+                    && matches!(operand.as_ref(), AstNode::Ident { .. }) =>
+            {
+                AstNode::UnaryOp {
+                    span,
+                    op,
+                    operand: Box::new(AstNode::Call {
+                        span: self.span(),
+                        callee: operand,
+                        args: Vec::new(),
+                    }),
+                }
+            }
+            other => self.bare_call_to_zero_arg(other),
         }
     }
 
@@ -867,6 +944,9 @@ impl<'a> Parser<'a> {
     }
 
     fn expr_stmt(&mut self) -> AstNode {
+        // The first token of the statement's expression, needed to tell a plain
+        // identifier (`fs.cwd`, `work`) from a `$`-variable (`$m.key`).
+        let start_pos = self.pos;
         let e = self.expr();
         // $f $x call pattern: if expression is a plain $-ident (not FieldAccess)
         // and next token starts a positional arg, treat it as a call
@@ -875,7 +955,10 @@ impl<'a> Parser<'a> {
             && !self.has_newline_before_current()
         {
             let callee = e;
-            let mut args = vec![self.call_arg()];
+            let mut args = match self.paren_value_args() {
+                Some(list) => list,
+                None => vec![self.call_arg()],
+            };
             while self.starts_positional_arg() && !self.has_newline_before_current() {
                 args.push(self.call_arg());
             }
@@ -894,8 +977,6 @@ impl<'a> Parser<'a> {
         // NOT to $-variables (Ident) like `$m.key`.
         // The expression must have NO Call nodes inside (e.g., `cloud.config ().region`
         // is NOT a bare call because it contains a Call).
-        // We check the token stream: walk backwards from current position to find
-        // the first token of this expression and verify it's IdentPlain.
         fn contains_call(node: &AstNode) -> bool {
             match node {
                 AstNode::Call { .. } => true,
@@ -907,26 +988,20 @@ impl<'a> Parser<'a> {
                 _ => true,
             }
         }
-        // Walk backwards through tokens to find the first token of this expression.
-        // Skip over Dot, OptionalDot, Ident, and IdentPlain tokens (part of FieldAccess chain).
-        let first_token_is_ident_plain = if self.pos > 0 {
-            let mut pos = self.pos - 1;
-            while matches!(
-                self.tokens[pos].token,
-                Token::Dot | Token::OptionalDot | Token::Ident | Token::IdentPlain
-            ) && pos > 0
-            {
-                pos -= 1;
-            }
-            matches!(self.tokens[pos].token, Token::IdentPlain)
-        } else {
-            false
-        };
+        // The statement's leading token tells us whether the expression is a plain
+        // (domain/function) name or a `$`-variable reference.
+        let first_token_is_ident_plain = matches!(
+            self.tokens.get(start_pos).map(|t| &t.token),
+            Some(Token::IdentPlain)
+        );
+        // Arguments must be on the same line as the callee; a newline means the
+        // next identifier starts a new statement, not an argument list.
+        let takes_args = self.starts_positional_arg() && !self.has_newline_before_current();
         // Bare domain function call: `cloudflare.config` at statement boundary
         if matches!(&e, AstNode::Ident { .. } | AstNode::FieldAccess { .. })
             && first_token_is_ident_plain
             && !contains_call(&e)
-            && !self.starts_positional_arg()
+            && !takes_args
             && (self.at_eof()
                 || self.at(Token::Semi)
                 || self.at(Token::RBrace)
@@ -942,25 +1017,15 @@ impl<'a> Parser<'a> {
             };
         }
         // Bare method call on $-variable: `$r.is_ok` at statement boundary
-        // Walk backwards to check if the expression started with a $-variable (Token::Ident)
-        let first_token_is_dollar_ident = if self.pos > 0 {
-            let mut pos = self.pos - 1;
-            while matches!(
-                self.tokens[pos].token,
-                Token::Dot | Token::OptionalDot | Token::Ident | Token::IdentPlain
-            ) && pos > 0
-            {
-                pos -= 1;
-            }
-            matches!(self.tokens[pos].token, Token::Ident)
-        } else {
-            false
-        };
+        let first_token_is_dollar_ident = matches!(
+            self.tokens.get(start_pos).map(|t| &t.token),
+            Some(Token::Ident)
+        );
         if let AstNode::FieldAccess { target, .. } = &e {
             if let AstNode::Ident { .. } = target.as_ref() {
                 if first_token_is_dollar_ident
                     && !contains_call(&e)
-                    && !self.starts_positional_arg()
+                    && !takes_args
                     && (self.at_eof()
                         || self.at(Token::Semi)
                         || self.at(Token::RBrace)
@@ -1479,31 +1544,18 @@ impl<'a> Parser<'a> {
     }
 
     fn postfix(&mut self) -> AstNode {
+        // The first token of this expression. It cannot be recovered by walking
+        // backwards afterwards: the last token of the primary is the one before
+        // the scan starts, so the scan lands on the previous statement.
+        let start_pos = self.pos;
         let mut e = self.primary();
         // Track whether this expression starts with a domain function (IdentPlain)
         // Domain functions like `collections.map` should not have [ ] index operations
         // because [ ] after them is a call arg (array literal), not an index.
-        let starts_with_ident_plain = {
-            // Walk backwards from current position to find the first token of this expression
-            if self.pos > 0 {
-                let mut pos = self.pos - 1;
-                while pos < self.tokens.len()
-                    && matches!(
-                        self.tokens.get(pos).map(|t| &t.token),
-                        Some(Token::Dot | Token::OptionalDot | Token::Ident | Token::IdentPlain)
-                    )
-                    && pos > 0
-                {
-                    pos -= 1;
-                }
-                matches!(
-                    self.tokens.get(pos).map(|t| &t.token),
-                    Some(Token::IdentPlain)
-                )
-            } else {
-                false
-            }
-        };
+        let starts_with_ident_plain = matches!(
+            self.tokens.get(start_pos).map(|t| &t.token),
+            Some(Token::IdentPlain)
+        );
 
         loop {
             match self.current().map(|t| &t.token) {
@@ -1515,6 +1567,22 @@ impl<'a> Parser<'a> {
                         target: Box::new(e),
                         field,
                     };
+                }
+                Some(Token::LParen) if !starts_with_ident_plain && self.adjacent_to_previous() => {
+                    // `$f(...)` and `$obj.method(...)` are calls on a value, so
+                    // the parentheses hold an argument list. A plain `f(...)` is
+                    // a definition form and is left to the call detection below,
+                    // and `$f (x)` (with a space) stays a grouped argument.
+                    match self.paren_value_args() {
+                        Some(args) => {
+                            e = AstNode::Call {
+                                span: self.span(),
+                                callee: Box::new(e),
+                                args,
+                            };
+                        }
+                        None => break,
+                    }
                 }
                 Some(Token::LBracket) => {
                     // Lookahead: if [ is followed by ] or by expr,], it's an index.
@@ -1538,11 +1606,18 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // Space-separated call after a bare dotted path.
-        // Only apply when the previous token was an IdentPlain (not $-ident).
-        // $-ident calls are handled by expr_stmt at the statement level.
+        // Space-separated call after a bare dotted path or a `$`-value.
+        // `prev_is_ident` covers plain/dotted names; `dollar_callee` covers
+        // `$f 1` so the call is built here, with normal operator precedence.
         let prev_is_ident =
             self.pos > 0 && matches!(self.tokens[self.pos - 1].token, Token::IdentPlain);
+        let dollar_callee = self.arg_depth == 0
+            && !self.at(Token::LBrace)
+            && matches!(
+                self.tokens.get(start_pos).map(|t| &t.token),
+                Some(Token::Ident)
+            )
+            && matches!(e, AstNode::Ident { .. });
         // `f (a) b c` is a three-argument call. The first argument is
         // parenthesized, so the previous token is `)`, not an identifier; a call
         // produced by parenthesized arguments must still accept the remaining
@@ -1555,7 +1630,8 @@ impl<'a> Parser<'a> {
         // `unwrap_or(err(9, 3))`.
         let call_from_parens = self.arg_depth == 0 && matches!(e, AstNode::Call { .. });
 
-        if (prev_is_ident || call_from_parens)
+        if (prev_is_ident || dollar_callee || call_from_parens)
+            && (!self.at(Token::LBrace) || self.brace_arg_allowed)
             && matches!(
                 e,
                 AstNode::Ident { .. } | AstNode::FieldAccess { .. } | AstNode::Call { .. }
@@ -1620,7 +1696,15 @@ impl<'a> Parser<'a> {
                 } else {
                     Box::new(e)
                 };
+                // A parenthesized argument list is allowed for a dotted callee
+                // (`math.sqrt(16)`, `$obj.method(1, 2)`). For a plain identifier
+                // `f(...)` keeps its definition meaning, so it is not handled here.
+                let paren_ok = matches!(callee.as_ref(), AstNode::FieldAccess { .. });
                 while self.starts_positional_arg() && !self.has_newline_before_current() {
+                    if self.at(Token::LBrace) && !self.brace_arg_allowed {
+                        // The brace is the body of the enclosing `if`/`while`/`for`.
+                        break;
+                    }
                     if let Some(items) = self.try_expansion(&args) {
                         return AstNode::DomainCall {
                             span: self.span(),
@@ -1629,11 +1713,27 @@ impl<'a> Parser<'a> {
                             items,
                         };
                     }
+                    if args.is_empty() && paren_ok && self.at(Token::LParen) {
+                        if let Some(mut list) = self.paren_value_args() {
+                            args.append(&mut list);
+                            continue;
+                        }
+                    }
                     args.push(self.call_arg());
                 }
                 while self.at(Token::Comma) {
                     self.consume();
-                    if self.starts_positional_arg() && !self.has_newline_before_current() {
+                    // An explicit comma continues the argument list across a
+                    // newline: `f a: 1,\n  b: 2`.
+                    if let Some(items) = self.try_expansion(&args) {
+                        return AstNode::DomainCall {
+                            span: self.span(),
+                            callee,
+                            args,
+                            items,
+                        };
+                    }
+                    if self.starts_positional_arg() {
                         args.push(self.call_arg());
                     }
                 }
@@ -1683,6 +1783,62 @@ impl<'a> Parser<'a> {
         let value = self.unary();
         self.arg_depth -= 1;
         CallArg { value, name: None }
+    }
+
+    /// One element of a parenthesized argument list. Unlike [`Self::call_arg`],
+    /// the parentheses already delimit the expression, so a full expression is
+    /// allowed: `$f(1 + 2)` passes one argument.
+    fn paren_arg(&mut self) -> CallArg {
+        if self.at(Token::IdentPlain)
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|t| &t.token),
+                Some(Token::Colon)
+            )
+        {
+            let name = self.consume().text.clone();
+            self.consume();
+            self.arg_depth += 1;
+            let value = self.expr();
+            self.arg_depth -= 1;
+            return CallArg {
+                value,
+                name: Some(name),
+            };
+        }
+        self.arg_depth += 1;
+        let value = self.expr();
+        self.arg_depth -= 1;
+        CallArg { value, name: None }
+    }
+
+    /// Parses a parenthesized argument list for a function value or method
+    /// call: `$f()`, `$f(1)`, `$f(a, b)`, `$f(tag: "x", 1)`.
+    ///
+    /// Returns `None` with the position restored when the parentheses do not
+    /// form a list, so the caller can fall back to the grouped-expression form.
+    fn paren_value_args(&mut self) -> Option<Vec<CallArg>> {
+        if !self.at(Token::LParen) {
+            return None;
+        }
+        let start = self.pos;
+        self.consume(); // `(`
+        let mut args = Vec::new();
+        while !self.at(Token::RParen) && !self.at_eof() {
+            args.push(self.paren_arg());
+            if self.at(Token::Comma) {
+                self.consume();
+            } else {
+                break;
+            }
+        }
+        if !self.at(Token::RParen) {
+            // Not a well-formed argument list; let the normal grouped-expression
+            // parser handle (and report) it.
+            self.pos = start;
+            return None;
+        }
+        self.consume(); // `)`
+        Some(args)
     }
 
     fn primary(&mut self) -> AstNode {
@@ -1808,6 +1964,10 @@ impl<'a> Parser<'a> {
                 // Space-separated domain-style call: `domain func arg`
                 let mut args = Vec::new();
                 while self.looks_like_arg() {
+                    // In a control-flow header the brace belongs to the body.
+                    if self.at(Token::LBrace) && !self.brace_arg_allowed {
+                        break;
+                    }
                     if let Some(items) = self.try_expansion(&args) {
                         return AstNode::DomainCall {
                             span: span.clone(),
@@ -1823,6 +1983,9 @@ impl<'a> Parser<'a> {
                 }
                 while self.at(Token::Comma) {
                     self.consume();
+                    if self.at(Token::LBrace) && !self.brace_arg_allowed {
+                        break;
+                    }
                     if self.looks_like_arg() {
                         args.push(self.call_arg());
                     }
@@ -1933,7 +2096,10 @@ impl<'a> Parser<'a> {
                 } else {
                     // Not lambda params, parse as regular parenthesized expr
                     self.pos = save_pos;
+                    let start = self.pos;
                     let e = self.expr();
+                    // `($f 1)` is a call of the value `$f`.
+                    let e = self.attach_call_args(e, start);
                     self.expect(Token::RParen);
                     return e;
                 }
@@ -2057,6 +2223,19 @@ impl<'a> Parser<'a> {
         } else {
             false
         }
+    }
+
+    /// True when the current token starts exactly where the previous token ends
+    /// (no spaces or newlines between them).
+    #[inline]
+    fn adjacent_to_previous(&self) -> bool {
+        let Some(prev) = self.pos.checked_sub(1).and_then(|i| self.tokens.get(i)) else {
+            return false;
+        };
+        let Some(cur) = self.current() else {
+            return false;
+        };
+        prev.byte_offset + prev.text.len() == cur.byte_offset
     }
 
     /// Like `looks_like_arg`, but excludes `{` after control-flow keywords

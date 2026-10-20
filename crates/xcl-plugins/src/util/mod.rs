@@ -30,6 +30,7 @@ mod input;
 mod metadata;
 mod panic;
 mod print;
+mod range;
 mod result;
 mod rule;
 

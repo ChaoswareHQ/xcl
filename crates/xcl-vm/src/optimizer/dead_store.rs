@@ -2,22 +2,18 @@
 //!
 //! Uses live variable analysis from [`super::dataflow`] to identify dead stores.
 
-
 // `alloc` re-exports needed by `no_std` builds (std prelude provides them).
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use alloc::{
-    vec::Vec,
-};
+use alloc::vec::Vec;
 
 use crate::bytecode::Instr;
 use crate::runtime::vm::ops::consts::{
-    OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_JUMP,
-    OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_GLOBAL, OP_STORE_LOCAL,
-    OP_WHILE_LT_INT, OP_WHILE_LT_INT_WIDE, OP_WHILE_LT_LOCAL,
+    OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_JUMP, OP_JUMP_IF_FALSE,
+    OP_JUMP_IF_NIL, OP_LOAD_GLOBAL, OP_STORE_LOCAL, OP_WHILE_LT_INT, OP_WHILE_LT_INT_WIDE,
+    OP_WHILE_LT_LOCAL,
 };
 use crate::runtime::vm::ops::meta;
-
 
 use super::dataflow::{build_basic_blocks, live_variables};
 
@@ -25,7 +21,7 @@ use super::dataflow::{build_basic_blocks, live_variables};
 ///
 /// A store is dead if the stored variable is never loaded before being
 /// redefined. Also eliminates dead LOAD_GLOBAL instructions whose result is never used.
-pub fn eliminate_dead_stores(code: &mut Vec<Instr>, wide: &mut [i64]) {
+pub fn eliminate_dead_stores(code: &mut Vec<Instr>, wide: &mut [i64], pinned: u32) {
     if code.len() <= 1 {
         return;
     }
@@ -40,6 +36,12 @@ pub fn eliminate_dead_stores(code: &mut Vec<Instr>, wide: &mut [i64]) {
         match instr.op() {
             OP_STORE_LOCAL => {
                 let slot = instr.a();
+                // Top-level variables are read from other functions through
+                // `OP_LOAD_ROOT`, which this pass cannot see; never remove
+                // their stores.
+                if slot < pinned {
+                    continue;
+                }
                 // Check if this slot is live after this instruction
                 // Look at the next instruction's live set
                 let is_live = if i + 1 < code.len() {

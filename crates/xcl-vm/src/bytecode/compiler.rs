@@ -38,6 +38,10 @@ use crate::compiler::ast::{
 use crate::compiler::span::Span;
 use crate::runtime::value::{FuncValue, Value};
 
+/// Temp-slot namespace for pipeline accumulators. Ordinary expression temps use
+/// small depths, so this range cannot collide with them.
+const PIPE_TEMP_BASE: u32 = 1 << 20;
+
 /// Opcode for a general binary expression.
 #[inline(always)]
 fn binop_opcode(op: BinaryOperator) -> u8 {
@@ -152,6 +156,16 @@ struct Compiler {
     inline_counter: u64,
     /// Stack of function names currently being inlined (recursion guard).
     inline_stack: Vec<String>,
+    /// Nesting depth of pipelines being compiled (temp slots for long
+    /// string tables must not collide across nested pipelines).
+    pipeline_depth: u32,
+    /// Top-level variable names mapped to their root-frame slot. Function and
+    /// lambda bodies have their own locals, so a read of one of these names is
+    /// compiled to `OP_LOAD_ROOT` instead of creating a fresh local.
+    root_slots: HashMap<Box<str>, u32>,
+    /// Number of leading local slots (the root variables) whose stores must
+    /// survive dead-store elimination because functions read them by slot.
+    pinned_slots: u32,
     // Item 4: side maps for O(1) lookup instead of O(n) Vec::position scans.
     string_index: HashMap<Box<str>, u32>,
     local_index: HashMap<Box<str>, u32>,
@@ -172,6 +186,9 @@ impl Compiler {
             inline_map: BTreeMap::new(),
             inline_counter: 0,
             inline_stack: Vec::new(),
+            pipeline_depth: 0,
+            root_slots: HashMap::new(),
+            pinned_slots: 0,
             string_index: HashMap::new(),
             local_index: HashMap::new(),
             global_index: HashMap::new(),
@@ -181,6 +198,40 @@ impl Compiler {
     fn with_inline_map(mut self, map: BTreeMap<String, InlineFn>) -> Self {
         self.inline_map = map;
         self
+    }
+
+    /// Seeds the compiler with the top-level variable slots. The main compiler
+    /// treats them as its own locals (the root frame); bodies read them through
+    /// [`OP_LOAD_ROOT`].
+    fn with_root_vars(mut self, names: &[String]) -> Self {
+        for name in names {
+            let i = self.locals.len() as u32;
+            self.local_index.insert(name.as_str().into(), i);
+            self.locals.push(name.as_str().into());
+            self.root_slots.insert(name.as_str().into(), i);
+        }
+        self.pinned_slots = self.locals.len() as u32;
+        self
+    }
+
+    /// Creates a compiler for a function or lambda body. The body has its own
+    /// locals but can read the top-level frame's variables.
+    fn body_compiler(&self) -> Self {
+        let mut c = Compiler::new();
+        c.root_slots = self.root_slots.clone();
+        c
+    }
+
+    /// Slot of a top-level variable read from inside a function body.
+    ///
+    /// Returns `None` when the name is a local of the current body (parameters
+    /// and assigned names shadow the root), or when it is not a top-level name.
+    #[inline]
+    fn root_read_slot(&self, name: &str) -> Option<u32> {
+        if self.local_index.contains_key(name) {
+            return None;
+        }
+        self.root_slots.get(name).copied()
     }
 
     #[inline(always)]
@@ -268,7 +319,9 @@ impl Compiler {
 
     fn can_emit_to_slot(&self, node: &AstNode) -> bool {
         match node {
-            AstNode::Ident { name, .. } => !self.is_global(name),
+            AstNode::Ident { name, .. } => {
+                !self.is_global(name) && self.root_read_slot(name).is_none()
+            }
             AstNode::Int { .. } | AstNode::Float { .. } => true,
             AstNode::UnaryOp {
                 op: UnaryOperator::Neg,
@@ -296,7 +349,17 @@ impl Compiler {
 
     fn emit_expr_to_slot(&mut self, node: &AstNode, temp_depth: u32) -> u32 {
         match node {
-            AstNode::Ident { name, .. } => self.local(name),
+            AstNode::Ident { name, .. } => {
+                if let Some(slot) = self.root_read_slot(name) {
+                    // Top-level variable read from a function body: load it and
+                    // park the value in this expression's temp slot.
+                    let dst = self.temp_slot(temp_depth);
+                    self.emit(Instr::a1(OP_LOAD_ROOT, slot));
+                    self.emit(Instr::a1(OP_STORE_LOCAL, dst));
+                    return dst;
+                }
+                self.local(name)
+            }
             AstNode::Int { value, .. } => {
                 let dst = self.temp_slot(temp_depth);
                 // Inline small values directly in operand b (kind=0)
@@ -712,7 +775,7 @@ impl Compiler {
         peephole_optimize_once(&mut code, &mut self.wide);
 
         // Run data flow analysis to eliminate dead stores
-        crate::optimizer::optimize(&mut code, &mut self.wide);
+        crate::optimizer::optimize(&mut code, &mut self.wide, self.pinned_slots);
 
         let strings = core::mem::take(&mut self.strings);
         let string_values: Vec<Value> = strings
@@ -923,9 +986,19 @@ impl Compiler {
                 self.emit(Instr::a1(OP_STORE_LOCAL, slot));
             }
             AstNode::Return { value, .. } => {
-                // Tail-call optimization: return foo(args) where foo is a plain identifier
+                // Tail-call optimization: `return foo(args)`.
                 if let Some(AstNode::Call { callee, args, .. }) = value.as_deref() {
                     if let AstNode::Ident { name, .. } = callee.as_ref() {
+                        // A `$`-variable callee is a value, not a global name:
+                        // load it and use the value tail call.
+                        if let Some(slot) =
+                            self.locals.iter().position(|n| n.as_ref() == name.as_str())
+                        {
+                            self.emit(Instr::a1(OP_LOAD_LOCAL, slot as u32));
+                            let n = self.emit_call_args(args);
+                            self.emit(Instr::a2(OP_TAIL_CALL, n as u32, 0));
+                            return;
+                        }
                         // Emit OP_TAIL_CALL_NAME: fused tail call with embedded name
                         let i = self.intern(name);
                         if let Ok(name16) = u16::try_from(i) {
@@ -1220,10 +1293,21 @@ impl Compiler {
             AstNode::FunctionDef {
                 body, name, params, ..
             } => {
-                let mut sub =
-                    Compiler::new().with_inline_map(core::mem::take(&mut self.inline_map));
+                let mut sub = self
+                    .body_compiler()
+                    .with_inline_map(core::mem::take(&mut self.inline_map));
                 for p in params {
                     sub.local(&p.name);
+                }
+                // Names assigned anywhere in the body are locals for the whole
+                // body, so they shadow same-named top-level variables.
+                let mut reads = Vec::new();
+                let mut writes = Vec::new();
+                for s in body {
+                    scan_vars(s, &mut reads, &mut writes);
+                }
+                for w in &writes {
+                    sub.local(w);
                 }
                 for s in body {
                     sub.node(s);
@@ -1248,11 +1332,17 @@ impl Compiler {
             AstNode::Call { callee, args, .. } => {
                 // Try to inline: if callee is a plain identifier matching an inlineable function
                 if let AstNode::Ident { name, .. } = callee.as_ref() {
+                    // A `$`-variable with the same name shadows the global function,
+                    // so the call must stay dynamic.
+                    let shadowed = self.locals.iter().any(|n| n.as_ref() == name.as_str());
                     // Clone the inline body out to avoid borrow conflicts with self
-                    let inline_body = self
-                        .inline_map
-                        .get(name)
-                        .map(|f| (f.params.clone(), f.body.clone()));
+                    let inline_body = if shadowed {
+                        None
+                    } else {
+                        self.inline_map
+                            .get(name)
+                            .map(|f| (f.params.clone(), f.body.clone()))
+                    };
 
                     if let Some((params, body)) = &inline_body {
                         // Criterion: arg count must match
@@ -1352,6 +1442,11 @@ impl Compiler {
                     // Strip $ prefix from base for local variable lookup
                     let base_unprefixed = base.strip_prefix('$').unwrap_or(base);
                     let is_local = self.locals.iter().any(|n| n.as_ref() == base_unprefixed);
+                    let root_slot = if is_local {
+                        None
+                    } else {
+                        self.root_read_slot(base_unprefixed)
+                    };
                     if is_local && parts.len() > 1 {
                         // It's a method call on a local value: $x.method()
                         // Compile as OP_CALL_METHOD: load receiver, push args, CALL_METHOD
@@ -1367,6 +1462,14 @@ impl Compiler {
                             self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
                         }
                         // Push args
+                        let n = self.emit_call_args(args);
+                        self.emit(Instr::a2(OP_CALL_METHOD, field_idx, n as u16));
+                    } else if let Some(slot) = root_slot.filter(|_| parts.len() > 1) {
+                        // Method call on a top-level variable read from a
+                        // function body: `$r.is_ok`.
+                        let method_name = parts.last().copied().unwrap_or(&name);
+                        let field_idx = self.intern(method_name);
+                        self.emit(Instr::a1(OP_LOAD_ROOT, slot));
                         let n = self.emit_call_args(args);
                         self.emit(Instr::a2(OP_CALL_METHOD, field_idx, n as u16));
                     } else if is_local && parts.len() == 1 {
@@ -1500,6 +1603,8 @@ impl Compiler {
                 if self.is_global(name) {
                     let g_slot = self.global(name);
                     self.emit(Instr::a1(OP_LOAD_GLOBAL, g_slot));
+                } else if let Some(slot) = self.root_read_slot(name) {
+                    self.emit(Instr::a1(OP_LOAD_ROOT, slot));
                 } else {
                     let slot = self.local(name);
                     if !self.try_fuse_load_load(slot) {
@@ -1600,9 +1705,36 @@ impl Compiler {
             }
 
             AstNode::Lambda { params, body, .. } => {
-                let mut sub = Compiler::new();
+                // Resolve the body's free names against the enclosing scope:
+                // values that live in this frame are captured by value.
+                let mut reads = Vec::new();
+                let mut writes = Vec::new();
+                scan_vars(body, &mut reads, &mut writes);
+                let mut capture_names: Vec<String> = Vec::new();
+                let mut capture_slots: Vec<u32> = Vec::new();
+                for name in &reads {
+                    if params.contains(name) || writes.iter().any(|w| w == name) {
+                        continue;
+                    }
+                    if let Some(&slot) = self.local_index.get(name.as_str()) {
+                        capture_names.push(name.clone());
+                        capture_slots.push(slot);
+                    }
+                    // Top-level variables are read through `OP_LOAD_ROOT` and
+                    // do not need to be captured.
+                }
+
+                let mut sub = self.body_compiler();
                 for p in params {
                     sub.local(p);
+                }
+                // Captures occupy the slots right after the parameters; the VM
+                // writes their values there when the closure is entered.
+                for c in &capture_names {
+                    sub.local(c);
+                }
+                for w in &writes {
+                    sub.local(w);
                 }
                 sub.node(body);
                 sub.emit(Instr::none(OP_RETURN));
@@ -1613,27 +1745,50 @@ impl Compiler {
                     name: "lambda".into(),
                     bytecode: Some(Arc::new(bc)),
                     params: params.clone(),
-                    closure_captures: Vec::new(),
+                    closure_captures: capture_names,
                     closure_env: Vec::new(),
                     uses_special_vars: sub.uses_special_vars,
                 };
                 let idx = self.closures.len() as u32;
                 self.closures.push(f);
+                // Push the captured values, then build the closure from them.
+                for slot in capture_slots {
+                    self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
+                }
                 self.emit(Instr::a1(OP_LOAD_LAMBDA, idx));
             }
 
             AstNode::Pipeline { input, stages, .. } => {
+                // A pipeline passes the accumulator as the first argument. The
+                // stage is a named callee, so `OP_CALL_NAME` is the direct
+                // encoding: `[acc, arg]` plus the name in the opcode.
                 self.node(input);
+                let depth = self.pipeline_depth;
+                self.pipeline_depth += 1;
                 for stage in stages {
-                    let i = self.intern(&stage.name);
-                    self.emit(Instr::a1(OP_PUSH_STR, i));
                     if let Some(a) = &stage.arg {
                         self.node(a);
                     } else {
                         self.emit(Instr::none(OP_PUSH_NIL));
                     }
-                    self.emit(Instr::a2(OP_CALL, 2, 0));
+                    let i = self.intern(&stage.name);
+                    if let Ok(name16) = u16::try_from(i) {
+                        self.emit(Instr::make(OP_CALL_NAME, 2, name16, 0));
+                    } else {
+                        // String-table overflow: rebuild `[callee, acc, arg]`
+                        // explicitly (more than 65535 distinct strings).
+                        let base = PIPE_TEMP_BASE + depth * 2;
+                        let arg = self.temp_slot(base);
+                        self.emit(Instr::a1(OP_STORE_LOCAL, arg));
+                        let acc = self.temp_slot(base + 1);
+                        self.emit(Instr::a1(OP_STORE_LOCAL, acc));
+                        self.emit(Instr::a1(OP_PUSH_STR, i));
+                        self.emit(Instr::a1(OP_LOAD_LOCAL, acc));
+                        self.emit(Instr::a1(OP_LOAD_LOCAL, arg));
+                        self.emit(Instr::a2(OP_CALL, 2, 0));
+                    }
                 }
+                self.pipeline_depth = depth;
             }
 
             // Type definition: compile body (fields + methods), register type name as a global
@@ -1724,6 +1879,165 @@ impl Compiler {
 /// Recursively collect a dotted name from a chain of FieldAccess nodes.
 /// e.g., FieldAccess(FieldAccess(Ident("net"), "tcp"), "connect") -> Some("net.tcp.connect")
 /// Returns None if the chain contains anything other than Ident + FieldAccess.
+/// Walks one statement or expression, collecting variable reads (first-use
+/// order) and the names assigned in this scope.
+///
+/// Nested function and lambda bodies are skipped: their free variables are
+/// resolved when those bodies are compiled.
+fn scan_vars(node: &AstNode, reads: &mut Vec<String>, writes: &mut Vec<String>) {
+    match node {
+        AstNode::Assign { name, value, .. } => {
+            if !writes.iter().any(|n| n == name) {
+                writes.push(name.clone());
+            }
+            scan_vars(value, reads, writes);
+        }
+        AstNode::For {
+            variable,
+            iterable,
+            body,
+            ..
+        } => {
+            if !writes.iter().any(|n| n == variable) {
+                writes.push(variable.clone());
+            }
+            scan_vars(iterable, reads, writes);
+            for s in body {
+                scan_vars(s, reads, writes);
+            }
+        }
+        AstNode::Return { value: Some(v), .. } => scan_vars(v, reads, writes),
+        AstNode::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            scan_vars(condition, reads, writes);
+            for s in then_branch {
+                scan_vars(s, reads, writes);
+            }
+            if let Some(b) = else_branch {
+                for s in b {
+                    scan_vars(s, reads, writes);
+                }
+            }
+        }
+        AstNode::While {
+            condition, body, ..
+        } => {
+            scan_vars(condition, reads, writes);
+            for s in body {
+                scan_vars(s, reads, writes);
+            }
+        }
+        AstNode::Block { statements, .. } => {
+            for s in statements {
+                scan_vars(s, reads, writes);
+            }
+        }
+        AstNode::Call { callee, args, .. } => {
+            scan_vars(callee, reads, writes);
+            for a in args {
+                scan_vars(&a.value, reads, writes);
+            }
+        }
+        AstNode::DomainCall {
+            callee,
+            args,
+            items,
+            ..
+        } => {
+            scan_vars(callee, reads, writes);
+            for a in args {
+                scan_vars(&a.value, reads, writes);
+            }
+            for item in items {
+                scan_vars(&item.value, reads, writes);
+                for (_, v) in &item.named {
+                    scan_vars(v, reads, writes);
+                }
+            }
+        }
+        AstNode::Ident { name, .. } => {
+            if !reads.iter().any(|n| n == name) {
+                reads.push(name.clone());
+            }
+        }
+        AstNode::BinaryOp { left, right, .. } => {
+            scan_vars(left, reads, writes);
+            scan_vars(right, reads, writes);
+        }
+        AstNode::UnaryOp { operand, .. } => scan_vars(operand, reads, writes),
+        AstNode::Index { target, index, .. } => {
+            scan_vars(target, reads, writes);
+            scan_vars(index, reads, writes);
+        }
+        AstNode::FieldAccess { target, .. } => scan_vars(target, reads, writes),
+        AstNode::Pipeline { input, stages, .. } => {
+            scan_vars(input, reads, writes);
+            for stage in stages {
+                if let Some(a) = &stage.arg {
+                    scan_vars(a, reads, writes);
+                }
+            }
+        }
+        AstNode::ArrayLit { elements, .. } => {
+            for e in elements {
+                scan_vars(e, reads, writes);
+            }
+        }
+        AstNode::DictLit { entries, .. } => {
+            for (_, v) in entries {
+                scan_vars(v, reads, writes);
+            }
+        }
+        AstNode::Range { start, end, .. } => {
+            if let Some(s) = start {
+                scan_vars(s, reads, writes);
+            }
+            if let Some(e) = end {
+                scan_vars(e, reads, writes);
+            }
+        }
+        AstNode::TypeTest { value, .. } | AstNode::TypeCast { value, .. } => {
+            scan_vars(value, reads, writes);
+        }
+        // A nested lambda's free variables are also free here (unless one of
+        // its parameters or body locals binds them), so they must be captured
+        // by this scope too.
+        AstNode::Lambda { params, body, .. } => {
+            let mut inner_reads = Vec::new();
+            let mut inner_writes = Vec::new();
+            scan_vars(body, &mut inner_reads, &mut inner_writes);
+            for name in inner_reads {
+                if params.contains(&name) || inner_writes.iter().any(|w| w == &name) {
+                    continue;
+                }
+                if !reads.iter().any(|n| n == &name) {
+                    reads.push(name);
+                }
+            }
+        }
+        // Named function bodies resolve free names through the root frame, not
+        // through captures, so they are not part of this scope.
+        AstNode::FunctionDef { .. } => {}
+        _ => {}
+    }
+}
+
+/// Names assigned in the top-level frame, in first-appearance order.
+///
+/// These are the variables a function body may read through `OP_LOAD_ROOT`.
+fn collect_top_level_vars(ast: &[AstNode]) -> Vec<String> {
+    let mut reads = Vec::new();
+    let mut writes = Vec::new();
+    for node in ast {
+        scan_vars(node, &mut reads, &mut writes);
+    }
+    writes
+}
+
 fn collect_dotted_name(node: &AstNode) -> Option<String> {
     match node {
         AstNode::Ident { name, .. } => Some(name.clone()),
@@ -2283,6 +2597,9 @@ fn is_known_global(name: &str) -> bool {
 
 pub fn compile(ast: &[AstNode]) -> Bytecode {
     let inline_map = collect_inlineable(ast);
-    let mut c = Compiler::new().with_inline_map(inline_map);
+    let root_vars = collect_top_level_vars(ast);
+    let mut c = Compiler::new()
+        .with_root_vars(&root_vars)
+        .with_inline_map(inline_map);
     c.compile(ast)
 }

@@ -1,6 +1,17 @@
 # XCL
 
-XCL is a scripting language built on a fast, stack-based virtual machine written in Rust. It features NaN-boxed value representation, bump allocation for fast temporary objects, a rich standard library organized into domains, auto-import for convenient bare-identifier calls, and a pipeline-friendly syntax inspired by Rust and functional languages.
+XCL is a scripting language built on a fast, register-based virtual machine written in Rust. It uses NaN-boxed values, a bump arena for temporaries, a standard library organized into domains, and a plugin system that can register native functions, types, and even **opcodes** at compile time. An optional Cranelift JIT compiles hot loops.
+
+```xcl
+# name: hello
+# version: 1.0
+
+greet($name) {
+    print fg_color: "BrightCyan" "Hello, " + $name + "!"
+}
+
+greet "world"
+```
 
 ## Quick Start
 
@@ -11,30 +22,32 @@ cargo run -p xcl-cli -- script.xcl
 # Evaluate an expression inline
 cargo run -p xcl-cli -- -e 'print "Hello, world!"'
 
-# Debug parser issues
-cargo run -p xcl-debug -- --tree script.xcl
+# Inspect tokens and the AST
+cargo run -p xcl-debug --bin xcl-debug -- --tree script.xcl
+
+# Disassemble bytecode
+cargo run -p xcl-debug --bin xcl-bytecode -- disassemble script.xcl
 ```
 
 ## Language Walkthrough
 
-This section walks through the XCL language from basic values to advanced features.
-
 ### Values and Types
 
-XCL uses **NaN-boxing** to represent all values in a single 64-bit word. Primitive types — integers, floats, booleans, and `none` — require no heap allocation.
+XCL uses **NaN-boxing** to represent every value in a single 64-bit word. Integers, floats, booleans, and `none` need no heap allocation.
 
 | Type | Description | Examples |
 |---|---|---|
-| Integer | 48-bit two's complement | `42`, `0xFF`, `0b1010`, `0o755`, `1_000_000` |
-| Float | IEEE-754 double precision | `3.14159`, `0.5` |
-| Boolean | True or false | `true`, `false` |
-| String | UTF-8 text | `"hello"`, `r"raw\path"`, `"""multiline"""` |
-| None | Absence of a value | `none` |
-| Array | Ordered list | `[1, 2, 3]` |
+| `int` | 48-bit signed integer | `42`, `0xFF`, `0b1010`, `0o755`, `1_000_000` |
+| `float` | IEEE-754 double | `3.14159`, `0.5` |
+| `bool` | `true` / `false` | `true`, `false` |
+| `str` | UTF-8 text | `"hello"`, `r"raw\path"`, `"""multiline"""` |
+| `none` | Absence of a value | `none` |
+| `array` | Ordered list | `[1, 2, 3]` |
 | Map | Key-value store | `{ name: "Alice", age: 30 }` |
-| Function | Callable block | `add($a, $b) { $a + $b }` |
+| Range | Numeric interval | `0..10` |
+| Function | Callable value | `add($a, $b) { $a + $b }` |
 
-**Integer overflow:** When integer arithmetic exceeds 48 bits, XCL automatically falls back to floating-point representation without raising an error.
+Integer arithmetic that exceeds the 48-bit range automatically continues as a float.
 
 ```xcl
 $x = 42
@@ -43,135 +56,135 @@ $flag = true
 $empty = none
 ```
 
-### Primitive Type Keywords
+### Variables
 
-XCL supports Rust-like primitive type keywords for type annotations and type tests:
+Variables are prefixed with `$` and assigned with `=`:
 
-| Keyword | Type | Description |
-|---|---|---|
-| `i8` | Signed 8-bit integer | -128 to 127 |
-| `i16` | Signed 16-bit integer | -32,768 to 32,767 |
-| `i32` | Signed 32-bit integer | Standard integer size |
-| `i64` | Signed 64-bit integer | Large signed integers |
-| `u8` | Unsigned 8-bit integer | 0 to 255 |
-| `u16` | Unsigned 16-bit integer | 0 to 65,535 |
-| `u32` | Unsigned 32-bit integer | Standard unsigned size |
-| `u64` | Unsigned 64-bit integer | Large unsigned integers |
-| `f32` | 32-bit float | Single precision |
-| `f64` | 64-bit float | Double precision |
-| `str` | String | UTF-8 text |
-| `bool` | Boolean | true/false |
-| `any` | Dynamic | Any type |
+```xcl
+$name = "Alice"
+$count = 10
+$count += 5        # $count = $count + 5
+```
+
+Supported compound assignments: `+=`, `-=`, `*=`, `/=`, `**=`, `|=`, `^=`, `??=`.
+
+Type annotations use `:` between the name and the value:
 
 ```xcl
 $count: i32 = 42
 $price: f64 = 19.99
 $name: str = "Alice"
-$active: bool = true
 ```
 
-### Variables
+### Special Variables
 
-Variables are prefixed with `$` and assigned with `=`. The `:=` operator creates a new binding declaration.
+Inside a function, `$1`…`$N`, `$#`, `$@`, and `$*` refer to that function's arguments. `$0` is the script name. `$self` is the receiver of a method call; `$super` is the parent record of `$self` (or `none`).
 
 ```xcl
-$name = "Alice"
-$count = 10
-$count := 20       # re-declare binding
-$count += 5        # compound assignment
+show() {
+    println $#        # number of arguments
+    println $@        # arguments as an array
+}
+show "a" "b"          # 2, [a, b]
 ```
 
-XCL supports compound assignment operators: `+=`, `-=`, `*=`, `/=`.
+Special variables are read-only. The shell-style variables `$$`, `$?`, `$!`, and `$-` are deliberately unsupported and produce a clear error.
 
 ### Operators
 
-**Arithmetic:**
+**Arithmetic and comparison:**
 
 ```xcl
-$a = 10 + 3    # addition
-$b = 10 - 3    # subtraction
-$c = 10 * 3    # multiplication
-$d = 10 / 3    # division
-$e = 10 % 3    # modulo
-```
-
-**Comparison:**
-
-```xcl
-$x == $y    # equal
-$x != $y    # not equal
-$x < $y     # less than
-$x > $y     # greater than
-$x <= $y    # less than or equal
-$x >= $y    # greater than or equal
+$a = 10 + 3     $b = 10 - 3     $c = 10 * 3
+$d = 10 / 3     $e = 10 % 3     $f = 2 ** 10
+$x == $y        $x != $y        $x < $y         $x >= $y
 ```
 
 **Logical:**
 
 ```xcl
-$flag1 and $flag2    # logical AND
-$flag1 or $flag2     # logical OR
-not $flag            # logical NOT
-
-# C-style operators are also supported
-$flag1 && $flag2
-$flag1 || $flag2
+$flag1 and $flag2
+$flag1 or $flag2
+not $flag
+$flag1 && $flag2    # same as `and`
+$flag1 || $flag2    # same as `or`
 ```
 
-**Null coalescing:** The `??` operator returns the right-hand value when the left-hand value is `none`.
+**Bitwise:** `|`, `^`, `&`, `~`, `<<`, `>>`.
+
+```xcl
+$mask = 0xF0 | 0x0F
+$flip = $flags ^ 1
+$low  = $value & 0xFF
+$not  = ~$value
+$half = $value >> 1
+```
+
+**Null coalescing and safe navigation:**
 
 ```xcl
 $name = $input ?? "default"
-$config ??= loadConfig()
+$config ??= load_defaults()
+$city = $user?.address?.city      # none instead of a crash
 ```
 
-**Safe navigation:** The `?.` operator short-circuits to `none` if the left-hand value is `none`.
+**Conditional expression** (no `?:` operator):
 
 ```xcl
-$city = $user?.address?.city
+$label = "WEEKEND" if $day > 5 else "Workday"
 ```
 
-**Pipeline:** The `|>` operator passes the left-hand value as the first argument to the right-hand function.
+**Pipeline** — the left value becomes the first argument of the named stage:
 
 ```xcl
-"hello" |> string.uppercase |> print
+$root = 16 |> math.sqrt
+$text = 9 |> math.sqrt |> math.floor
+$sum = 10 |> add 5      # `add` is defined in the Functions section
 ```
+
+**Range, membership, tests, casts:**
+
+```xcl
+for $i in 0..10 { ... }
+if $key in $map { ... }
+$value as f64
+```
+
+Operator precedence, lowest to highest: conditional (`x if c else y`), `|>`, `??`, `or`/`||`, `and`/`&&`, `==`/`!=`, `|`, `^`, `&`, comparisons and `in`/`is`/`as`, `..`, `+`/`-`, `<<`/`>>`, `*`/`/`/`%`, `**`, unary, postfix, primary.
+
+> **Note:** `|` is bitwise OR, so a pipe lambda passed as an argument must be parenthesized: `f (|$x| $x + 1)`.
 
 ### Strings
 
-XCL supports three string literal forms:
-
 ```xcl
-$normal = "Hello\nWorld"          # escape sequences processed
+$normal = "Hello\nWorld"          # escapes processed
 $raw = r"C:\path\to\file"         # no escape processing
 $multi = """Line 1
-Line 2"""                        # multiline string
+Line 2"""                         # multiline
 ```
 
-Strings can be concatenated with `+`:
+Concatenate with `+`. There is no interpolation — `"$name"` is literal:
 
 ```xcl
 $greeting = "Hello, " + $name + "!"
 ```
 
-For formatted output, use the `format` function:
-
-```xcl
-print format("Name: {}, Age: {}" $name $age)
-```
-
 ### Comments
 
-Single-line comments start with `#`:
+```xcl
+# A comment
+$x = 42  # inline comment
+```
+
+A **leading** block of `# key: value` lines is script metadata (see [Metadata](#metadata)):
 
 ```xcl
-# This is a comment
-$x = 42  # Inline comment
+# name: deploy
+# version: 2.1.0
+# author: ada
 ```
 
 ### Control Flow
-
-**Conditionals:**
 
 ```xcl
 if $x > 10 {
@@ -181,37 +194,33 @@ if $x > 10 {
 } else {
     print "small"
 }
-```
 
-**For loops** iterate over ranges or collections:
-
-```xcl
 for $i in 0..10 {
+    if $i == 5 { break }
+    if $i % 2 == 0 { continue }
     print $i
 }
-```
 
-**While loops** repeat while a condition is true:
-
-```xcl
 while $x > 0 {
     $x = $x - 1
 }
 ```
 
-Use `break` to exit a loop and `continue` to skip to the next iteration:
+`defer { ... }` registers a closure that runs when the current frame returns, in LIFO order, including on an early `return`:
 
 ```xcl
-for $i in 0..100 {
-    if $i == 42 { break }
-    if $i % 2 == 0 { continue }
-    print $i
+work() {
+    defer { println "cleanup" }
+    println "body"
 }
+work
+# body
+# cleanup
 ```
 
 ### Functions
 
-Declare functions without any keyword — just the name, parameters, and body block:
+Declare a function with its name, parameters, and body — no keyword:
 
 ```xcl
 add($a, $b) {
@@ -221,72 +230,169 @@ add($a, $b) {
 greet($name) {
     return "Hello, " + $name
 }
-
-$result = add 3 4
 ```
 
-Functions support typed parameters and return type annotations:
+Parameters and return types may be annotated:
 
 ```xcl
 calculate($a: i32, $b: f64) -> f64 {
-    $result = $a + $b
-    return $result
+    return $a + $b
 }
 ```
 
-**Lambda functions** use pipe syntax only:
+Calls use **space-separated arguments**:
 
 ```xcl
-# Pipe lambda — single param
+$result = add 3 4
+```
+
+A parenthesized argument list is also accepted, with `,` between arguments; `()` is a zero-argument call and each element is a full expression:
+
+```xcl
+add(3, 4)
+status()
+math.sqrt(16)
+add(1 + 2, 3)
+
+$double(21)            # value calls: ...( ...) must follow the callee directly
+```
+
+With a space before the parenthesis the group is one expression, so `$double (21)` is the same single argument and `g 0 ($f 2)` passes the result of `$f 2`.
+
+`name(...)` followed by `{` or `->` is a definition, so the two forms never conflict.
+
+A zero-argument function is called by writing its name at a statement boundary, or in a condition:
+
+```xcl
+status() {
+    return "ok"
+}
+
+status
+if status { print "ready" }
+```
+
+Function values are called with `$callee args`:
+
+```xcl
+$double = |$x| $x * 2
+$result = $double 21          # 42
+$result = $double(21)         # 42, parenthesized form
+
+apply($f, $v) {
+    return $f $v
+}
+apply (|$x| $x + 1) 41        # 42
+```
+
+**Lambdas** use pipes:
+
+```xcl
 $square = |$x| $x * $x
-
-# Pipe lambda — multiple params
 $add = |$a, $b| $a + $b
-
-# Block lambda — for multi-statement bodies
-$complex = { |$x, $y| $x + $y }
+$block = { |$x, $y| $x + $y }   # block lambda
 ```
 
-Lambdas can capture variables from their enclosing scope:
+Lambdas capture values from the enclosing scope **by value**: the value is fixed when the lambda is created, so rebinding the outer variable later does not affect the closure. Parameters and names assigned in the lambda's body shadow the captured names, and all parameters must be declared explicitly.
 
 ```xcl
-$multiplier = 10
-$scale = |$x| $x * $multiplier
+make_adder($n) { return |$x| $x + $n }
+$add10 = make_adder 10
+$add10 5                       # 15
 ```
 
-**Note:** All lambda parameters must be declared explicitly.
+### Top-Level Variables in Functions
+
+Top-level variables are visible inside functions and lambdas:
+
+```xcl
+$limit = 10
+below($n) { return $n < $limit }
+below 5                        # true
+```
+
+They are read-only from a function body. Assigning the same name inside a function creates a local that shadows the top-level variable for the whole body:
+
+```xcl
+$x = 5
+set() { $x = 9; return $x }
+set()                          # 9
+$x                             # still 5
+```
+
+### Named Arguments
+
+Named arguments use `name: value` and may be mixed with positional ones:
+
+```xcl
+println bg_color: "red", fg_color: "black" "hello"
+```
+
+At the call site all named arguments are packed into **one trailing map**, so a native receives them as its last positional argument (relevant when writing plugins). Because `:` introduces a name, `=` is unambiguously assignment.
+
+An explicit `,` continues the argument list, so it may span lines:
+
+```xcl
+println bg_color: "red",
+        fg_color: "black" "hello"
+```
+
+### Brace Expansion
+
+A brace group with no `key:` pairs after a call expands into one call per item, separated by `;` or a newline:
+
+```xcl
+print { "this"; "here" }        # two calls
+```
+
+A `,` after an item introduces that item's own named arguments, which override the call-level ones:
+
+```xcl
+print bg_color: "red", fg_color: "black" {
+    "hello", fg_color: "red"    # black text on red
+    "hi"                        # red text on red
+}
+```
+
+The group is an expansion only when every argument before it is named (or there are none) and the braces contain no `key: value` pairs. Otherwise the braces keep their meaning: a map literal or a block-lambda.
 
 ### Arrays
 
-Arrays are zero-indexed ordered collections:
-
 ```xcl
 $scores = [3, 2, 5]
-print $scores[0]   # 3
-print $scores[1]   # 2
+print $scores[0]      # 3
+$scores = $scores + [7]
 ```
 
-Negative indices access elements from the end:
+Negative indices are not supported.
+
+### Ranges
+
+`start..end` is a value in expression position and a fused numeric loop in a `for` header:
 
 ```xcl
-print $scores[-1]  # 5 (last element)
+for $i in 0..4 { print $i }   # 0 1 2 3
+
+$r = 0..4                     # a value: {start: 0, end: 4}
+for $i in $r { print $i }     # 0 1 2 3
+
+bounds($n) { return 0..$n }
+for $i in (bounds 3) { print $i }
 ```
+
+A range is a map with `start` (inclusive) and `end` (exclusive) fields.
 
 ### Maps
 
-Maps store key-value pairs and support dot notation access:
-
 ```xcl
 $person = { name: "Alice", age: 30 }
-print $person.name   # "Alice"
-print $person.age    # 30
+print $person.name      # "Alice"
+print $person["age"]    # 30
 ```
 
 ### Custom Types
 
-XCL supports defining custom types through **record types**, **sum types** (tagged unions/enums), and **traits** (interfaces) — all without any special keywords.
-
-**Record types** use assignment syntax to define structured data with named, typed fields:
+**Record types** list named, typed fields:
 
 ```xcl
 Point = {
@@ -294,338 +400,247 @@ Point = {
     y: f64
 }
 
-Person = {
-    name: str
-    age: i64
-}
+$p = { x: 1.0, y: 2.0 }
+print $p.x
 ```
 
-**Sum types** (enums/tagged unions) define a type that can be one of several variants using the `|` separator:
+**Sum types** (tagged unions) use `|`:
 
 ```xcl
-# Simple unit variants
 Direction = Left | Right | Up | Down
-
-# Enum with associated data
-Message = Text { content: str } | Image { url: str, width: u32 } | Empty
-
-# Mixed variants
-Command = Stop | Move { x: i32, y: i32 } | Jump { height: f64 }
+Message = Text { content: str } | Image { url: str } | Empty
 ```
 
-Each variant can carry its own set of fields, or be unit-like (e.g., `Stop` with no fields).
+Sum-type values carry a `tag` field, which is what `is` tests:
 
-**Traits** (interfaces) are defined as types containing only method signatures (no fields):
+```xcl
+$msg = { tag: "Text", content: "hi" }
+if $msg is Text { print $msg.content }
+```
+
+**Traits** are types containing only method signatures, implemented with `is`:
 
 ```xcl
 Drawable = {
     draw() { }
-    resize(width: u32, height: u32) { }
-}
-```
-
-**Trait implementation** uses the `is` keyword. Multiple traits are listed with commas:
-
-```xcl
-Clickable = {
-    click() { }
 }
 
-# Single trait
 Button is Drawable {
-    draw() {
-        print "drawing button"
-    }
-    resize(w: u32, h: u32) {
-        print "resizing"
-    }
-}
-
-# Multiple traits
-Widget is Drawable, Clickable {
-    draw() { print "drawing" }
-    resize(w: u32, h: u32) { print "resizing" }
-    click() { print "clicked" }
-}
-```
-
-### Type Annotations
-
-Annotate variables and function parameters with explicit types using the `:` syntax:
-
-```xcl
-# Variable type annotation
-$name: str = "Alice"
-$count: i32 = 42
-
-# Function parameter types — params must use $ prefix
-greet($name: str, $age: i32) {
-    print "Hello, " + $name
-}
-
-# Return type annotation
-add($a: i32, $b: i32) -> i32 {
-    $a + $b
-}
-```
-
-Type annotations help document intent and enable the compiler to perform type checks.
-
-### Type Testing
-
-Check the runtime type of a value with the `is` operator:
-
-```xcl
-if $value is str {
-    print "it's a string"
-}
-
-if $number is i32 {
-    print "it's an integer"
-}
-
-# Enum variant test
-$dir = Left
-if $dir is Left {
-    print "going left"
+    draw() { print "drawing button" }
 }
 ```
 
 ### Type Casting
 
-Use the `as` operator to cast between types:
-
 ```xcl
-$raw = 42
-$casted = $raw as i32
-$float_cast = $raw as f64
+$float_value = $raw as f64
+$int_value = $raw as i32
 ```
+
+`is` tests the `tag` of a map (how sum-type values are represented); it does not test primitive types.
 
 ### Domains
 
-XCL organizes standard library functions into **domains** (namespaces). Functions are called using dot notation:
+The standard library is organized into **domains** (namespaces):
 
 ```xcl
-io.print "Hello, world!"
-net.https.get "https://api.example.com/data"
-encoding.json.parse '{"key": "value"}'
+fs.read "config.json"
+math.sqrt 16
+json.parse "{\"ok\": true}"
+https.get "https://example.com"
 ```
 
 ### Auto-Import
 
-Certain domains support **auto-import**, allowing their methods to be called as bare identifiers without the domain prefix. This is enabled for commonly-used domains like `io` and `fs`:
+Methods marked `auto_import` are also available as bare identifiers. This applies to `util` (the print/input family) and `fs`:
 
 ```xcl
-# These work without domain prefix (auto-import enabled)
-print "Hello, world!"      # Same as io.print
-$input = input "Name: "    # Same as io.input
-$content = read "file.txt" # Same as fs.read
-write "out.txt" $content   # Same as fs.write
-
-# These require full qualification (auto-import disabled to avoid conflicts)
-net.https.get "https://api.example.com/data"
-net.tcp.connect "127.0.0.1" 8080
+print "Hello"                 # util.print
+println "Hello"               # util.println
+$line = input "name: "        # util.input
+$text = read "config.txt"     # fs.read
+write "out.txt" $text         # fs.write
+if exists "config.json" { ... }   # fs.exists
 ```
 
-Domains like `net.https` disable auto-import because method names like `get`, `post` are too common and would conflict with other code.
+Because `fs` and `util` share names, the bare forms `read` and `write` resolve to the **filesystem** versions. Use `util.read` to read all of stdin and `util.write` to write raw text to stdout.
 
-### Domain Expansion
+Other domains must be qualified: `math.sqrt`, `json.parse`, `https.get`.
 
-Domain expansion lets you set a context for a block of code, so the domain methods are available without repeating the full path. This is especially useful for cloud providers and services that require configuration.
+## Standard Library
 
-**Domain blocks** establish a context scope with a configuration value:
+All of this lives in `xcl-plugins`; `xcl-vm` itself contains only primitives and the language axioms (`$self`, `$super`, special variables).
 
-```xcl
-cloud "aws" "us-east-1" {
-    $config = cloud.config
-    print "Region:" $config.region
-}
-```
-
-**Nested domain blocks** allow switching contexts within a scope:
-
-```xcl
-cloud "aws" "us-east-1" {
-    cloud "aws" "eu-west-1" {
-        $config = cloud.config
-        print "Nested region:" $config.region  # eu-west-1
-    }
-    $config = cloud.config
-    print "Restored region:" $config.region    # us-east-1
-}
-```
-
-**Domain values** can be set and retrieved using `domain.run` and `domain.get`:
-
-```xcl
-domain.run "bucket.name" "my-test-bucket" {
-    $bucket = domain.get "bucket.name"
-    print "Bucket context:" $bucket  # my-test-bucket
-}
-```
-
-**Bare calls** at statement boundaries automatically expand to zero-argument calls:
-
-```xcl
-cloud "aws" "us-east-1" {
-    $config = cloud.config    # equivalent to cloud.config()
-}
-```
-
-### Standard Library Domains
-
-| Domain | Purpose | Auto-Import |
+| Domain | Purpose | Auto-import |
 |---|---|---|
-| `io` | Console I/O: `print`, `println`, `input`, file read/write/seek | ✓ Yes |
-| `fs` | Filesystem: `read`, `write`, `exists`, `copy`, `remove`, `mkdir`, `list_dir` | ✓ Yes |
-| `net.https` | HTTPS client: `get`, `post`, `put`, `delete`, `patch`, `head`, `options` | ✗ No |
-| `net.http` | HTTP client (non-TLS) | ✗ No |
-| `net.tcp` | TCP socket: `connect`, `listen`, `accept`, `send`, `recv` | ✗ No |
-| `net.udp` | UDP socket: `bind`, `send_to`, `recv_from` | ✗ No |
-| `net.tls` | TLS connections | ✗ No |
-| `net.dns` | DNS resolution | ✗ No |
-| `net.ssh` | SSH connections | ✗ No |
-| `encoding.json` | JSON: `parse`, `stringify`, `pretty` | ✗ No |
-| `encoding.yaml` | YAML: `parse`, `stringify` | ✗ No |
-| `encoding.toml` | TOML: `parse`, `stringify` | ✗ No |
-| `encoding.csv` | CSV: `parse`, `stringify` | ✗ No |
-| `encoding.xml` | XML: `parse`, `stringify` | ✗ No |
-| `cloud` | Cloud providers: AWS, Azure, GCP, Alibaba, OCI, IBM, GitHub | ✗ No |
-| `collections.arr` | Array utilities: `map`, `filter`, `reduce`, `sort`, `reverse`, `first`, `last`, `flatten`, `unique`, `chunk`, `zip`, `concat`, `slice`, `contains`, `index_of`, `join`, `sum`, `min`, `max`, `avg` | ✗ No |
-| `collections.dict` | Dictionary utilities: `keys`, `values`, `entries`, `get`, `set`, `has`, `size`, `merge`, `filter`, `map` | ✗ No |
-| `collections.defer` | Deferred execution | ✗ No |
-| `core.result` | Result type: `ok`, `err`, `is_ok`, `is_err`, `unwrap`, `unwrap_or`, `map`, `map_err`, `and_then`, `or_else` | ✗ No |
-| `domain` | Domain context management: `run`, `get`, `set`, `clear` | ✗ No |
-| `math.scalar` | Scalar math: `sqrt`, `abs`, `min`, `max`, `round`, `floor`, `ceil`, `pow`, `log`, `sin`, `cos`, `tan`, `pi`, `random` | ✗ No |
-| `math.complex` | Complex numbers | ✗ No |
-| `math.vec` | Vector math | ✗ No |
-| `math.mat` | Matrix math | ✗ No |
-| `math.quat` | Quaternion math | ✗ No |
-| `text.str` | String manipulation: `upper`, `lower`, `trim`, `split`, `join`, `replace`, `contains`, `starts_with`, `ends_with`, `length` | ✗ No |
-| `sys.env` | Environment variables: `get`, `set`, `list` | ✗ No |
-| `sys.os` | OS information: `name`, `version`, `arch` | ✗ No |
-| `sys.process` | Process management: `spawn`, `kill`, `pid` | ✗ No |
-| `sys.time` | Time utilities: `now`, `sleep`, `timestamp` | ✗ No |
-| `sys.signal` | Signal handling | ✗ No |
-| `sys.thread` | Thread management | ✗ No |
-| `sys.socket` | Low-level socket operations | ✗ No |
-| `sys.syscall` | System calls | ✗ No |
-| `ffi` | Foreign Function Interface: `load`, `call`, `symbol`, `free` | ✗ No |
-| `lang` | Language introspection | ✗ No |
-| `plugin` | Plugin system | ✗ No |
-| `proc` | Process execution | ✗ No |
-| `util` | Cross-platform utilities | ✗ No |
+| `util` | Fast console I/O, input, colours, `defer`, `panic`, `Result`, policy aliases | `print`, `println`, `eprint`, `eprintln`, `error`, `input`, `readline`, `prompt`, `defer`, `panic`, `read`, `write`, `flush`, `fg_color`, `bg_color` |
+| `fs` | Filesystem: `read`, `write`, `append`, `exists`, `is_file`, `is_dir`, `list`, `mkdir`, `remove`, `remove_dir`, `copy`, `move_`, `cwd`, `chdir`, `temp_dir`, `join`, `extension`, `basename`, `dirname`, `absolute`, `read_bytes`, `write_bytes` | yes |
+| `math` | `sqrt`, `sin`, `cos`, `tan`, `exp`, `log`, `abs`, `floor`, `ceil`, `round`, `tanh`, `log2`, `log10`, `cbrt` | no |
+| `json` | `parse`, `stringify`, `pretty` | no |
+| `https` | `get`, `post`, `put`, `delete`, `patch`, `head`, `request`, `parse_url`, `build_url` | no |
+| `io` | Namespaced console I/O aliases (`print`, `readline`, `read`, `write`, `flush`, `prompt`, `error`) | no |
+| `metadata` | `get`, `all`, `has` | no |
+| `rule` | `allow`, `deny`, `deny_all`, `reset`, `is_allowed`, `message`, `list` | no |
 
-**Example — I/O (auto-imported):**
+Cargo features in `xcl-plugins` control which domains compile: `io`, `fs`, `math`, `net` (the `https` domain), and `encoding` (the `json` domain). All are enabled by default.
+
+### Output and Colours
+
+`print` and friends are variadic and accept two named style arguments, `fg_color` and `bg_color`:
 
 ```xcl
-print "Enter your name: "
-$name = input
-print "Hello, " + $name
+print "plain"
+println "two" "values"
+
+println fg_color: "BrightCyan" "cyan text"
+println bg_color: "red", fg_color: "black" "warning"
+println fg_color: "#00ff88" "hex colour"
 ```
 
-**Example — Filesystem (auto-imported):**
+Colour names include `Black`, `Red`, `Green`, `Yellow`, `Blue`, `Magenta`, `Cyan`, `White`, their `Bright*` variants, `Dark*`, and `Gray`/`DarkGray`; hex codes may be `#rrggbb`, `rrggbb`, or `#rgb`.
+
+The same colours are available as ordinary functions:
 
 ```xcl
-$content = read "data.txt"
-write "output.txt" $content
-if exists "config.json" {
-    print "Config found"
+$text = util.fg_color "Red" "error"
+$bar  = util.bg_color "Blue" " "
+```
+
+### Input
+
+```xcl
+$name = input "name: "       # prompt, one line
+$line = util.readline         # one line, no prompt
+$all  = util.read             # everything until EOF
+```
+
+`input`, `readline`, and `read` return `none` at end of input.
+
+### Defer, Panic
+
+```xcl
+copy_with_cleanup() {
+    defer { fs.remove "temp.txt" }
+    fs.write "temp.txt" "data"
+    return true
+}
+
+if $fatal {
+    panic "cannot continue"
 }
 ```
 
-**Example — HTTPS:**
+`panic` writes `panic: <message>` to stderr and exits with status 101 (Rust's panic code), after flushing stdout.
+
+### Metadata
+
+The leading `# key: value` block is available at runtime:
 
 ```xcl
-$response = net.https.get "https://api.example.com/users"
-print $response.body
-print $response.status
+# name: demo
+# version: 1.2.0
+
+println (metadata.get "name")       # demo
+println (metadata.has "version")    # true
+
+$header = metadata.all              # {name: demo, version: 1.2.0}
 ```
 
-**Example — JSON:**
+`util.metadata`, `util.metadata_get`, `util.metadata.get`, and `util.metadata.all` are aliases.
+
+### Policy (`rule`)
+
+`rule` is a cooperative gate for `print` and input operations:
 
 ```xcl
-$data = { "name": "Alice", "age": 30 }
-$json = encoding.json.stringify $data
-$parsed = encoding.json.parse $json
+rule.deny "fs.*"                 # wildcard deny
+println (rule.is_allowed "fs.read")   # false
+
+rule.allow "fs.read"
+rule.deny_all                    # deny everything not allowed
+rule.reset
 ```
 
-**Example — Cloud with domain expansion:**
+A denied operation performs no I/O; it writes `util: denied <op>: <message>` to stderr and returns `none`.
+
+### Result
+
+`Result` values are maps with the VM's `Result` subtype; the payload lives under `Ok` or `Err`.
 
 ```xcl
-cloud "aws" "us-east-1" {
-    $config = cloud.config
-    print "Provider:" $config.provider
-    print "Region:" $config.region
-}
+$ok  = util.ok 42
+$bad = util.err "not_found"
+
+println (util.is_ok $ok)          # true
+println (util.unwrap $ok)         # 42
+println (util.unwrap_or $bad 0)   # 0
 ```
 
-**Example — Collections:**
+The constructors `Ok` and `Err` also work: `Ok 42`, `Err "not_found"`.
 
-```xcl
-# Array operations
-$squares = collections.arr.map [1, 2, 3, 4, 5] |$x| $x * $x
-$evens = collections.arr.filter $squares |$x| $x % 2 == 0
+Method syntax is available in statements and conditions, or with an explicit argument list: `if $r.is_ok { ... }`, `$r.unwrap`, `$e.unwrap_or(0)`.
 
-# Pipeline style
-$result = [1, 2, 3, 4, 5] |> collections.arr.map |$x| $x * 2
-```
-
-**Example — FFI:**
-
-```xcl
-# Load a shared library
-$lib = ffi.load "libexample.so"
-
-# Call an exported function
-$result = ffi.call $lib "my_function"
-
-# Unload library
-ffi.free $lib
-```
-
-### Result and Error Types
-
-XCL provides `Ok` and `Err` constructors for result handling, along with a `make_error` helper:
-
-```xcl
-$result = Ok 42
-$error = Err (make_error "not_found" "Resource not found" 404)
-```
+Standard error-kind strings live in `xcl_plugins::errors` (`not_found`, `permission_denied`, `is_a_directory`, and so on) so scripts can match on `kind` consistently.
 
 ## Architecture
 
-XCL follows a three-stage compilation pipeline:
-
 ```
-Source code → Lexer → Parser → Compiler → Bytecode → VM → Output
+Source → Lexer → Parser → Compiler → Bytecode → VM → Output
 ```
 
-1. **Lexing** — Source code is tokenized by a DFA-based lexer (powered by `logos`). Punctuation and keywords are zero-allocation.
-2. **Parsing** — Tokens are parsed into an abstract syntax tree (AST) using a Pratt parser with full support for lambdas, pipelines, type definitions, and context blocks.
-3. **Compilation** — The AST is compiled to bytecode instructions.
-4. **Execution** — The stack-based VM interprets the bytecode.
+1. **Lexing** — `logos`-based DFA lexer; punctuation and keywords are zero-allocation.
+2. **Parsing** — recursive descent plus a Pratt expression parser.
+3. **Compilation** — the AST becomes 64-bit instructions, then peephole and dataflow passes run (constant folding, dead-store elimination, LICM, superinstruction fusion).
+4. **Execution** — a register-file VM with a shared operand stack and `LocalSlice` frames.
 
 ### Memory Model
 
-- **NaN-boxing:** All values fit in a single 64-bit word. Primitives use NaN payload bits for tagging; heap objects store pointers in the lower 48 bits.
-- **Bump allocation:** Temporary objects are allocated from a bump arena that resets after each loop iteration and function call, providing fast allocation with automatic cleanup.
-- **Boxed values:** Long-lived objects use standard heap allocation and survive scope exit.
+- **NaN-boxing** — every value is one 64-bit word; heap objects are pointers in the low bits.
+- **Bump arena** — temporaries come from a thread-local, pooled bump arena. `run()` resets it and keeps the current chunk, so repeated runs do not grow memory.
+- **Escape barrier** — values returned from `run` are copied out of the arena, so callers can inspect them safely.
+
+### JIT
+
+`xcl-jit` compiles hot loops to native code with Cranelift. It is optional:
+
+```bash
+cargo build --release -p xcl-cli --features jit
+```
+
+The JIT covers integer loops, comparisons, arithmetic, array indexing, and map field reads. Anything it cannot compile falls back to the interpreter, so semantics are identical.
+
+### Opcode Registry
+
+Opcodes are declared with the `#[opcode]` macro:
+
+```rust
+use xcl_macros::opcode;
+use xcl_vm::{Instr, OpcodeResult, Value};
+
+#[opcode(name = "OP_MY_THING", code = 200)]
+fn op_my_thing(vm: &mut xcl_vm::VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    vm.push_value(Value::from_i48(42));
+    OpcodeResult::Next
+}
+```
+
+The code space is `0..=126` for core instructions, `127` for `OP_EXT` (a 32-bit module id in the operand for cold modules), and `128..=255` for hot plugin module slots. Adding a core opcode also requires registering it with every optimizer pass (see `.agents/skills/xcl-perf/SKILL.md`).
 
 ## Project Structure
 
 | Crate | Description |
 |---|---|
-| `xcl-vm` | Core VM: lexer, parser, bytecode compiler, and runtime |
-| `xcl-macros` | Procedural macros: `#[xcl_fn]` for native functions, `#[derive(Xcl)]` for type registration, `#[xcl_impl]` for impl blocks |
-| `xcl-plugins` | Standard library plugins: all domains (io, fs, net, encoding, cloud, ffi, etc.) |
-| `xcl-cli` | Command-line interface for running XCL scripts |
-| `xcl-debug` | Parser debug tool and bytecode toolkit: tokenize, parse, visualize AST, decompile bytecode, and disassemble (`xcl-debug` and `xcl-bytecode` binaries) |
+| `xcl-vm` | Core VM: lexer, parser, bytecode compiler, optimizer, runtime, opcodes |
+| `xcl-jit` | Optional Cranelift JIT backend (`jit` feature) |
+| `xcl-macros` | Procedural macros: `#[xcl_fn]`, `#[xcl_impl]`, `#[xcl_trait]`, `#[derive(Xcl)]`, `#[opcode]` |
+| `xcl-plugins` | Standard library domains: `util`, `fs`, `io`, `math`, `json`, `https`, `metadata`, `rule` |
+| `xcl-cli` | `xcl` command-line runner |
+| `xcl-debug` | `xcl-debug` (tokens/AST) and `xcl-bytecode` (disassemble/trace/profile/stats) |
 | `xcl-doc` | Documentation generator that reads macro metadata and produces an HTML site |
 
 ## Writing Native Functions
 
-Extend XCL from Rust using the `#[xcl_fn]` procedural macro. The macro auto-detects domain and method name from the function name (e.g., `io_open` → domain=`io`, method=`open`):
+Use the `#[xcl_fn]` macro; it derives the domain and method from the Rust function name (`fs_open` → `fs.open`):
 
 ```rust
 use xcl_macros::xcl_fn;
@@ -638,7 +653,7 @@ pub fn io_greet(name: &str) -> Value {
 }
 ```
 
-For impl blocks, use `#[xcl_impl]` with optional `auto_import` to enable bare-identifier calls:
+For impl blocks, use `#[derive(Xcl)]` plus `#[xcl_impl]`; add `auto_import` to expose bare names:
 
 ```rust
 use xcl_macros::{Xcl, xcl_impl};
@@ -655,68 +670,99 @@ impl MyDomain {
 }
 ```
 
-The macros handle registration with the VM at compile time using `linkme`, with zero runtime overhead.
+Variadics receive `&[Value]` and named arguments arrive as one trailing map, so native functions split them with `xcl_plugins::split_named_args(args, &["fg_color", "bg_color"])`.
 
-## Parser Debug Tool
+Registration uses `linkme` distributed slices, so it costs nothing at runtime.
 
-The `xcl-debug` tool helps diagnose parser issues by tokenizing and visualizing XCL code:
+## Tools
+
+### Parser Debug Tool
 
 ```bash
-# Show token stream
-cargo run -p xcl-debug -- --tokens script.xcl
-
-# Show AST tree
-cargo run -p xcl-debug -- --tree script.xcl
-
-# Show verbose AST with line:column spans
-cargo run -p xcl-debug -- --tree --verbose script.xcl
+cargo run -p xcl-debug --bin xcl-debug -- --tokens script.xcl
+cargo run -p xcl-debug --bin xcl-debug -- --tree script.xcl
+cargo run -p xcl-debug --bin xcl-debug -- --tree --verbose script.xcl
 ```
 
-## Documentation Generation
+### Bytecode Tool
 
-Generate the HTML documentation site from macro metadata:
+```bash
+cargo run -p xcl-debug --bin xcl-bytecode -- disassemble script.xcl
+cargo run -p xcl-debug --bin xcl-bytecode -- trace script.xcl
+cargo run -p xcl-debug --bin xcl-bytecode -- profile script.xcl
+cargo run -p xcl-debug --bin xcl-bytecode -- stats script.xcl
+```
+
+### Documentation Generator
 
 ```bash
 cargo run -p xcl-doc --release -- build --out docs
+cargo run -p xcl-doc --release -- serve
 ```
 
-The generated site includes domain pages, function reference pages, sidebar navigation, client-side search, and dark mode support.
+The generated site includes domain pages, function references, search, and dark mode.
 
 ## CLI Usage
 
 ```
-xcl [OPTIONS] [FILE]
+xcl [OPTIONS] [FILE]...
 
 Options:
-  -h, --help            Show help
-  -v, --version         Show version
-  -e, --eval <EXPR>     Evaluate an expression
-  -q, --quiet           Suppress output
-  --                    End of options
+  -h, --help          Show help
+  -v, --version       Show version
+  -e, --eval <EXPR>   Evaluate the given expression
+  -q, --quiet         Suppress result output
+  -d, --decompile     Decompile to bytecode and print (do not run)
+  --                  All following arguments are script arguments ($1, $2, ...)
 ```
-
-## Building
-
-XCL is written in Rust and supports `no_std` environments. Optimized with trimmed dependencies for minimal binary size (~1 MB release build).
 
 ```bash
-# Build all crates
-cargo build --release
-
-# Run the CLI
-cargo run -p xcl-cli -- script.xcl
-
-# Run tests
-cargo test --workspace
+xcl script.xcl -- a b "c d"
+xcl -e 'print $1' -- hello
+xcl -d -e 'print 1 + 2'
 ```
+
+## Building and Benchmarking
+
+```bash
+# Interpreter (~1.3 MB release binary)
+cargo build --release -p xcl-cli
+
+# Interpreter + JIT (~3.0 MB)
+cargo build --release -p xcl-cli --features jit
+
+# Tests and lints
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo check -p xcl-vm --no-default-features   # no_std core
+```
+
+Single-language benchmarks:
+
+```bash
+cargo bench -p xcl-vm --bench vm_core --bench vm_data \
+    --bench vm_algorithms --bench vm_games
+```
+
+Cross-language comparison against Luau, LuaJIT, and CPython:
+
+```bash
+cargo build --release -p xcl-cli --features jit
+cp target/release/xcl.exe target/release/xcl-jit.exe
+cargo build --release -p xcl-cli
+CROSSLANG_REPS=9 python scripts/crosslang/run.py
+python scripts/crosslang/usage.py
+```
+
+On the reference machine the interpreter beats Luau on all seven cross-language workloads, and the JIT is within roughly 1.2x of LuaJIT while using less memory than CPython.
 
 ## Examples
 
-See the [`example/`](example/) directory for sample XCL scripts covering all language features, including HTTPS, cloud providers, lambdas, and the comprehensive benchmark.
+See [`example/`](example/) for sample scripts, and `crates/xcl-vm/benches/` for the benchmark programs used in the comparison suite.
 
 ## Contributing
 
-Contributions are welcome. The most impactful way to contribute is by writing domain plugins — each new domain extends the language's standard library capabilities.
+Contributions are welcome. The most impactful way to contribute is writing domain plugins — each new domain extends the standard library without touching the VM — or adding opcodes for hot patterns, provided they are registered with every optimizer pass.
 
 ## License
 

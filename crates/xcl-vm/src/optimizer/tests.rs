@@ -74,7 +74,7 @@ fn test_dead_store_elimination() {
         Instr::none(OP_HALT),
     ];
     let mut wide: Vec<i64> = Vec::new();
-    eliminate_dead_stores(&mut code, &mut wide);
+    eliminate_dead_stores(&mut code, &mut wide, 0);
     // The dead store to slot 0 should be removed
     assert!(!code.iter().any(|i| i.op() == OP_STORE_LOCAL && i.a() == 0));
 }

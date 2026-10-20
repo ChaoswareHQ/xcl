@@ -11,8 +11,8 @@ pub use opcode::{OpcodeEntry, OpcodeFn, OpcodeResult, opcode_name};
 pub use value::{
     BuiltinImpl, DomainCtx, FuncValue, GlobalOverrideGuard, HandleKind, ImplDescriptor, ImplMethod,
     IntoValue, NamedParam, NativeArg, NativeEntry, NativeKind, RawPtr, SUBTYPE_ERROR,
-    SUBTYPE_HANDLE, SUBTYPE_NONE, SUBTYPE_RESULT, SUBTYPE_USER_BASE, TraitDescriptor, TraitMethod,
-    TypeDescriptor, TypeField, TypeKind, TypeVariant, VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK,
-    Value, XclType, extract_arg,
+    SUBTYPE_HANDLE, SUBTYPE_NONE, SUBTYPE_RANGE, SUBTYPE_RESULT, SUBTYPE_USER_BASE,
+    TraitDescriptor, TraitMethod, TypeDescriptor, TypeField, TypeKind, TypeVariant,
+    VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK, Value, XclType, extract_arg,
 };
 pub use vm::{DomainSlot, VM};
