@@ -167,6 +167,11 @@ pub struct HeapArray {
     pub header: HeapHeader,
     /// Contiguous element buffer.
     pub data: Vec<Value>,
+    /// Mutation counter, bumped whenever the elements change.
+    ///
+    /// The JIT caches "all elements are integers" keyed by this counter, so a
+    /// short loop entered many times does not rescan the array.
+    pub version: u64,
 }
 
 /// Maximum inline entries for small-map representation.
@@ -627,6 +632,7 @@ impl Value {
                 variant: VARIANT_DEFAULT,
             },
             data: elements,
+            version: 0,
         });
         Value(TAG_PTR | ((obj as *const HeapArray as u64) & PAYLOAD))
     }
@@ -847,6 +853,29 @@ impl Value {
             Some(unsafe { &mut (*(self.as_ptr::<HeapArray>() as *mut HeapArray)).data })
         } else {
             None
+        }
+    }
+
+    /// Returns the array's mutation version, if this value is an array.
+    #[inline(always)]
+    pub fn array_version(self) -> Option<u64> {
+        if self.heap_kind() == Some(KIND_ARRAY) {
+            Some(unsafe { (*self.as_ptr::<HeapArray>()).version })
+        } else {
+            None
+        }
+    }
+
+    /// Marks an array as mutated so versioned caches re-validate it.
+    #[inline(always)]
+    pub fn bump_array_version(self) {
+        if self.heap_kind() == Some(KIND_ARRAY) {
+            // SAFETY: the value is a live heap array; only the version field is
+            // written, and callers bump after dropping any `data` borrow.
+            unsafe {
+                let obj = self.as_ptr::<HeapArray>() as *mut HeapArray;
+                (*obj).version = (*obj).version.wrapping_add(1);
+            }
         }
     }
 
@@ -1380,6 +1409,7 @@ impl Value {
                 variant: VARIANT_DEFAULT,
             },
             data: elements,
+            version: 0,
         }));
         Value(TAG_PTR | ((obj as *const HeapArray as u64) & PAYLOAD))
     }
@@ -1445,6 +1475,7 @@ impl Value {
                 if let Some(dst) = out.as_array_mut() {
                     dst.extend_from_slice(&elements);
                 }
+                out.bump_array_version();
                 out
             }
             Some(KIND_MAP) => {

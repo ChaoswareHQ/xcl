@@ -53,6 +53,10 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module, default_libcall_names};
 
+pub mod functions;
+
+pub use functions::{FunctionFn, FunctionInput, JitFunction, ensure_functions};
+
 // ── NaN-boxing layout (mirrors `xcl-vm/src/runtime/value.rs`) ──────────────
 //
 // `Value` is `u64`; integers are `TAG_INT | i48`. Decoding is a sign-extend
@@ -439,7 +443,7 @@ fn loop_at(code: &[u64], wide: &[i64], h: usize) -> Option<LoopSpec> {
 
 // ── Compilation ───────────────────────────────────────────────────────────
 
-fn make_module() -> Result<JITModule, String> {
+pub(crate) fn make_module() -> Result<JITModule, String> {
     let mut flags = settings::builder();
     flags.set("is_pic", "false").map_err(|e| e.to_string())?;
     flags.set("opt_level", "speed").map_err(|e| e.to_string())?;

@@ -1241,3 +1241,26 @@ fn self_prefixed_variables_are_not_keywords() {
     // longest match, so only the exact `$self` / `$super` tokens are special.
     assert_eq!(eval_i64("$selfish = 5; $superb = 2; $selfish + $superb"), 7);
 }
+
+// ── Integer-function JIT tier must match the interpreter ──
+
+#[test]
+fn recursive_fib_through_function_tier() {
+    let src = "fib($n) { if $n < 2 { return $n } return (fib ($n - 1)) + (fib ($n - 2)) }\nfib 20";
+    assert_eq!(eval_i64(src), 6765);
+}
+
+#[test]
+fn four_parameter_recursion_matches() {
+    let src = "hanoi($n, $from, $to, $via) {\n    if $n == 0 { return 0 }\n    $x = hanoi ($n - 1) $from $via $to\n    $y = hanoi ($n - 1) $via $to $from\n    return $x + 1 + $y\n}\nhanoi 10 1 3 2";
+    assert_eq!(eval_i64(src), 1023);
+}
+
+#[test]
+fn non_integer_argument_falls_back_to_the_interpreter() {
+    // The native tier accepts integers only; a float argument must take the
+    // interpreted path and produce the same value.
+    let src =
+        "fib($n) { if $n < 2 { return $n } return (fib ($n - 1)) + (fib ($n - 2)) }\nfib 10.0";
+    assert_eq!(eval_f64(src), 55.0);
+}

@@ -548,6 +548,7 @@ mod core_ops {
         if let Some(arr) = target.as_array_mut() {
             arr.push(elem);
         }
+        target.bump_array_version();
         vm.push(target);
         OpcodeResult::Next
     }
@@ -749,6 +750,54 @@ mod core_ops {
 
     // ── Batch 1: calls, fields, types, iteration ──
 
+    /// Runs a compiled integer function for a cached call site.
+    ///
+    /// Returns `None` when the cached callee has no native entry, when the
+    /// arity does not match, or when any argument is not an integer; the
+    /// caller then takes the ordinary interpreter path.
+    ///
+    /// The argument values are read and the frame is rebuilt **after** the
+    /// native call, so no borrow of the VM is live across it.
+    #[cfg(feature = "jit")]
+    #[inline(always)]
+    fn try_jit_function(
+        vm: &mut VM,
+        slot: usize,
+        arg_start: usize,
+        n: usize,
+    ) -> Option<OpcodeResult> {
+        let f = vm.jit_call_cache[slot]?;
+        if n != f.nparams as usize {
+            return None;
+        }
+        let end = arg_start.checked_add(n)?;
+        let mut args = [0i64; 4];
+        for (i, v) in vm.stack.get(arg_start..end)?.iter().enumerate() {
+            if v.tag() != crate::runtime::value::TAG_INT {
+                return None;
+            }
+            args[i] = v.as_i48();
+        }
+        // SAFETY: `JitFunction::func` is compiled with signature
+        // `(i64, i64, i64, i64) -> i64` and only integer arguments are passed.
+        let result = unsafe { (f.func)(args[0], args[1], args[2], args[3]) };
+        vm.stack.truncate(arg_start);
+        vm.push(Value::from_i48(result));
+        Some(OpcodeResult::Next)
+    }
+
+    /// Without the JIT feature there is nothing to enter.
+    #[cfg(not(feature = "jit"))]
+    #[inline(always)]
+    fn try_jit_function(
+        _vm: &mut VM,
+        _slot: usize,
+        _arg_start: usize,
+        _n: usize,
+    ) -> Option<OpcodeResult> {
+        None
+    }
+
     /// Hot path for named calls: callee and args are on the stack at `base..base+n+1`.
     /// Returns immediately when the callee resolves to a function (fast path or cache hit).
     /// Falls through to `call_from_stack_slow` for name resolution.
@@ -826,7 +875,7 @@ mod core_ops {
                     if globals_idx < vm.globals.len() {
                         let func = vm.globals[globals_idx];
                         if let Some(f) = func.as_func() {
-                            vm.call_cache[slot] = (callee, func);
+                            vm.cache_callee(slot, callee, func);
                             return vm.enter_call_from_op(f, &args);
                         }
                     }
@@ -911,7 +960,7 @@ mod core_ops {
                 .iter()
                 .find_map(|g| g.as_func().filter(|f| &*f.name == name).map(|_| *g));
             if let Some(func_val) = found {
-                vm.call_cache[slot] = (callee, func_val);
+                vm.cache_callee(slot, callee, func_val);
                 if let Some(f) = func_val.as_func() {
                     return vm.enter_call_from_op(f, &args);
                 }
@@ -942,6 +991,9 @@ mod core_ops {
 
         let slot = ((callee.0 >> 4) as usize) & crate::runtime::vm::CALL_CACHE_MASK;
         if callee.0 == vm.call_cache[slot].0.0 {
+            if let Some(result) = try_jit_function(vm, slot, arg_start, n) {
+                return result;
+            }
             if let Some(f) = vm.call_cache[slot].1.as_func() {
                 return vm.enter_call_args_at(f, arg_start, n);
             }
@@ -1006,7 +1058,7 @@ mod core_ops {
                     if globals_idx < vm.globals.len() {
                         let func_val = vm.globals[globals_idx];
                         if let Some(f) = func_val.as_func() {
-                            vm.call_cache[slot] = (callee, func_val);
+                            vm.cache_callee(slot, callee, func_val);
                             return vm.enter_tail_call(f, &args);
                         }
                     }
@@ -1034,7 +1086,7 @@ mod core_ops {
                 .iter()
                 .find_map(|g| g.as_func().filter(|f| &*f.name == name).map(|_| *g));
             if let Some(func_val) = found {
-                vm.call_cache[slot] = (callee, func_val);
+                vm.cache_callee(slot, callee, func_val);
                 if let Some(f) = func_val.as_func() {
                     return vm.enter_tail_call(f, &args);
                 }
@@ -1107,7 +1159,7 @@ mod core_ops {
                     if globals_idx < vm.globals.len() {
                         let func_val = vm.globals[globals_idx];
                         if let Some(f) = func_val.as_func() {
-                            vm.call_cache[slot] = (callee, func_val);
+                            vm.cache_callee(slot, callee, func_val);
                             return vm.enter_tail_call(f, &args);
                         }
                     }
@@ -1135,7 +1187,7 @@ mod core_ops {
                 .iter()
                 .find_map(|g| g.as_func().filter(|f| &*f.name == name).map(|_| *g));
             if let Some(func_val) = found {
-                vm.call_cache[slot] = (callee, func_val);
+                vm.cache_callee(slot, callee, func_val);
                 if let Some(f) = func_val.as_func() {
                     return vm.enter_tail_call(f, &args);
                 }
@@ -2370,6 +2422,7 @@ mod core_ops {
         if let Some(arr_mut) = arr.as_array_mut() {
             arr_mut.push(val);
         }
+        arr.bump_array_version();
         unsafe {
             *l.get_unchecked_mut(arr_slot) = arr;
         }

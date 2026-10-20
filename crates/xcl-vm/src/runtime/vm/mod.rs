@@ -402,6 +402,45 @@ fn prepare_jit(bc: &Bytecode) -> Option<JitUnit> {
     })
 }
 
+/// Compiles integer-only functions (for example `fib`) into native entries.
+///
+/// The eligible set is small and strict: parameter-only locals, forward
+/// branches, integer arithmetic, and exact-arity calls to other compiled
+/// functions. Everything else stays on the interpreter.
+#[cfg(feature = "jit")]
+fn prepare_jit_functions(bc: &Bytecode) -> HashMap<Box<str>, xcl_jit::JitFunction> {
+    let mut owned: Vec<(&str, Vec<u64>, Vec<i64>, &[Box<str>], usize, usize)> = Vec::new();
+    for (name, func) in bc.user_functions.iter() {
+        let Some(fb) = &func.bytecode else {
+            continue;
+        };
+        let code: Vec<u64> = fb.instructions.iter().map(|i| i.0).collect();
+        let wide: Vec<i64> = fb.wide_operands.to_vec();
+        owned.push((
+            name.as_ref(),
+            code,
+            wide,
+            &fb.string_table[..],
+            func.params.len(),
+            fb.local_names.len().max(func.params.len()),
+        ));
+    }
+    let inputs: Vec<xcl_jit::FunctionInput<'_>> = owned
+        .iter()
+        .map(
+            |(name, code, wide, strings, params, locals)| xcl_jit::FunctionInput {
+                name,
+                code,
+                wide,
+                strings,
+                params: *params,
+                locals: *locals,
+            },
+        )
+        .collect();
+    xcl_jit::ensure_functions(&inputs).unwrap_or_default()
+}
+
 /// Largest array the JIT will scan to prove every element is an integer.
 /// Above this, the loop stays interpreted rather than paying an O(n) scan.
 #[cfg(feature = "jit")]
@@ -434,38 +473,46 @@ fn fill_loop_cache(
         None => return false,
     };
     for (plan, slot) in plans.iter().zip(cache.accesses.iter_mut()) {
-        let Some(&obj) = regs.get(base + plan.object_slot as usize) else {
+        let Some(&container) = regs.get(base + plan.object_slot as usize) else {
             return false;
         };
         match plan.kind {
             xcl_jit::AccessKind::ArrayIndex => {
-                let Some(arr) = obj.as_array() else {
+                let Some(arr) = container.as_array() else {
                     return false;
                 };
-                // The generated loop skips per-element tag checks, so only
-                // cache an array whose elements are all integers.
-                if arr.len() > JIT_ARRAY_SCAN_MAX || !arr.iter().all(|v| v.tag() == TAG_INT) {
-                    return false;
+                // Re-validate only when the array's version (or length)
+                // changed. A short loop entered many times therefore scans
+                // the elements once, not once per entry.
+                let version = container.array_version().unwrap_or(0).wrapping_add(1);
+                let mut stamp = slot.value;
+                let same_object = slot.object == container.0;
+                let validated = same_object && stamp == version && slot.len == arr.len();
+                if !validated {
+                    if arr.len() > JIT_ARRAY_SCAN_MAX || !arr.iter().all(|v| v.tag() == TAG_INT) {
+                        return false;
+                    }
+                    stamp = version;
                 }
                 *slot = xcl_jit::AccessCache {
-                    object: obj.0,
+                    object: container.0,
                     data: arr.as_ptr().cast::<u64>(),
                     len: arr.len(),
-                    value: 0,
+                    value: stamp,
                 };
             }
             xcl_jit::AccessKind::MapField => {
                 let Some(&key) = bc.string_values.get(plan.key_slot as usize) else {
                     return false;
                 };
-                let Some(field) = obj.as_map().and_then(|m| m.get_fast_value(key)) else {
+                let Some(field) = container.as_map().and_then(|m| m.get_fast_value(key)) else {
                     return false;
                 };
                 if field.tag() != TAG_INT {
                     return false;
                 }
                 *slot = xcl_jit::AccessCache {
-                    object: obj.0,
+                    object: container.0,
                     data: core::ptr::null(),
                     len: 0,
                     value: field.0,
@@ -537,8 +584,17 @@ pub struct VM {
     script_name: Box<str>,
     /// Top-level positional script arguments.
     script_args: Vec<Value>,
-    /// Direct-mapped 4-entry callee cache for fast recursive call dispatch.
+    /// Direct-mapped [`CALL_CACHE_SLOTS`]-entry callee cache for fast
+    /// recursive call dispatch.
     call_cache: [(Value, Value); CALL_CACHE_SLOTS],
+    /// Compiled integer functions for this run (name → native entry).
+    #[cfg(feature = "jit")]
+    jit_functions: HashMap<Box<str>, xcl_jit::JitFunction>,
+    /// Native entry for each [`call_cache`](Self::call_cache) slot, if the
+    /// resolved callee was compiled by the function JIT. Kept in lockstep with
+    /// the callee cache so a hot call site pays one tuple load, not a hash.
+    #[cfg(feature = "jit")]
+    jit_call_cache: [Option<xcl_jit::JitFunction>; CALL_CACHE_SLOTS],
     /// Number of live call frames.
     ///
     /// `frames[..frame_depth]` are live; the rest are recycled slots kept
@@ -610,6 +666,10 @@ impl VM {
             script_name: "<input>".into(),
             script_args: Vec::new(),
             call_cache: [(Value::nil(), Value::nil()); CALL_CACHE_SLOTS],
+            #[cfg(feature = "jit")]
+            jit_functions: HashMap::new(),
+            #[cfg(feature = "jit")]
+            jit_call_cache: [None; CALL_CACHE_SLOTS],
             frame_depth: 0,
             installed_code: None,
             function_slots: Vec::new(),
@@ -1020,10 +1080,35 @@ impl VM {
     /// the next `run()` call.
     pub fn run(&mut self, bc: &Bytecode) -> Value {
         #[cfg(feature = "jit")]
-        if let Some(mut jit) = prepare_jit(bc) {
-            return self.run_inner::<true>(bc, Some(&mut jit));
+        {
+            self.jit_functions = prepare_jit_functions(bc);
+            if let Some(mut jit) = prepare_jit(bc) {
+                return self.run_inner::<true>(bc, Some(&mut jit));
+            }
         }
         self.run_inner::<false>(bc, None)
+    }
+
+    /// Records a resolved callee in the call cache and, when the callee has a
+    /// compiled integer body, in the parallel JIT slot cache.
+    ///
+    /// Both tables are indexed by the same hash slot and written together, so
+    /// the dispatch fast path can consult `jit_call_cache` without re-hashing
+    /// the callee name.
+    #[cfg(feature = "jit")]
+    #[inline]
+    pub(crate) fn cache_callee(&mut self, slot: usize, callee: Value, func: Value) {
+        self.call_cache[slot] = (callee, func);
+        self.jit_call_cache[slot] = func
+            .as_func()
+            .and_then(|f| self.jit_functions.get(&*f.name).copied());
+    }
+
+    /// Without the JIT feature only the interpreter cache exists.
+    #[cfg(not(feature = "jit"))]
+    #[inline(always)]
+    pub(crate) fn cache_callee(&mut self, slot: usize, callee: Value, func: Value) {
+        self.call_cache[slot] = (callee, func);
     }
 
     /// Dispatch loop, monomorphised on whether a native loop is installed.
@@ -1043,6 +1128,10 @@ impl VM {
         // Item 2: clear growing state so repeated runs leave nothing behind.
         self.context_stack.clear();
         self.call_cache = [(Value::nil(), Value::nil()); CALL_CACHE_SLOTS];
+        #[cfg(feature = "jit")]
+        {
+            self.jit_call_cache = [None; CALL_CACHE_SLOTS];
+        }
         self.arena.reset();
         self.closures = Arc::clone(&bc.closures);
 
