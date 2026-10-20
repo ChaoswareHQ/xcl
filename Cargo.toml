@@ -81,6 +81,30 @@ strip = true
 overflow-checks = false
 debug-assertions = false
 
+# Size: Cranelift is compile-time machinery, not hot runtime code, so optimize
+# it for size. The generated XCL code is unaffected, and JIT compile time was
+# measured unchanged (~1.3 ms for `fib`; see docs/benchmarking.md).
+[profile.release.package."cranelift-codegen"]
+opt-level = "z"
+
+[profile.release.package."cranelift-assembler-x64"]
+opt-level = "z"
+
+[profile.release.package."cranelift-frontend"]
+opt-level = "z"
+
+[profile.release.package."cranelift-jit"]
+opt-level = "z"
+
+[profile.release.package."cranelift-module"]
+opt-level = "z"
+
+[profile.release.package."cranelift-native"]
+opt-level = "z"
+
+[profile.release.package."regalloc2"]
+opt-level = "z"
+
 # Profiling: debug info + opt-level 1 for flamegraph readability
 [profile.bench-flamegraph]
 inherits = "release"

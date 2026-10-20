@@ -236,6 +236,23 @@ impl Compiler {
         self.global_index.contains_key(name)
     }
 
+    /// Returns the full dotted name when `node` is a field-access chain rooted
+    /// at a plain identifier that is not a local, global, or type name. Such a
+    /// chain is a zero-argument domain call (`metadata.all`, `fs.cwd`), not a
+    /// field read.
+    fn zero_arg_domain_call(&self, node: &AstNode) -> Option<String> {
+        let name = collect_dotted_name(node)?;
+        if !name.contains('.') {
+            return None;
+        }
+        let base = name.split('.').next().unwrap_or(&name);
+        let bare = base.strip_prefix('$').unwrap_or(base);
+        let is_value = base.starts_with('$')
+            || self.is_global(bare)
+            || self.locals.iter().any(|n| n.as_ref() == bare);
+        if is_value { None } else { Some(name) }
+    }
+
     #[inline]
     fn wide(&mut self, v: i64) -> u32 {
         let i = self.wide.len() as u32;
@@ -270,7 +287,9 @@ impl Compiler {
                     && (matches!(index.as_ref(), AstNode::Str { .. })
                         || self.can_emit_to_slot(index))
             }
-            AstNode::FieldAccess { target, .. } => self.can_emit_to_slot(target),
+            AstNode::FieldAccess { target, .. } => {
+                self.zero_arg_domain_call(node).is_none() && self.can_emit_to_slot(target)
+            }
             _ => false,
         }
     }
@@ -389,6 +408,18 @@ impl Compiler {
                 dst
             }
             AstNode::FieldAccess { target, field, .. } => {
+                if let Some(name) = self.zero_arg_domain_call(node) {
+                    let i = self.intern(&name);
+                    if let Ok(name16) = u16::try_from(i) {
+                        self.emit(Instr::make(OP_CALL_NAME, 0, name16, 0));
+                    } else {
+                        self.emit(Instr::a1(OP_PUSH_STR, i));
+                        self.emit(Instr::a2(OP_CALL, 0, 0));
+                    }
+                    let dst = self.temp_slot(temp_depth);
+                    self.emit(Instr::a1(OP_STORE_LOCAL, dst));
+                    return dst;
+                }
                 let t_slot = self.emit_expr_to_slot(target, temp_depth);
                 let field_idx = self.intern(field);
                 let dst = self.temp_slot(temp_depth);
@@ -429,12 +460,34 @@ impl Compiler {
     /// Emits `local[a] ± int` as a single push when a call argument has that
     /// shape. Returns `true` if the fused opcode was emitted.
     /// Emits call arguments, fusing `local ± int` into a single push.
-    fn emit_call_args(&mut self, args: &[CallArg]) {
+    /// Emits call arguments and returns the argument count the callee receives.
+    ///
+    /// Positional arguments go first, in source order. Named arguments are
+    /// packed into one trailing map (`name: value` pairs), which natives split
+    /// with `split_named_args`. The map counts as one argument.
+    fn emit_call_args(&mut self, args: &[CallArg]) -> usize {
+        let mut positional = 0;
         for a in args {
-            if !self.try_emit_arg_fused(&a.value) {
+            if a.name.is_none() {
+                positional += 1;
+                if !self.try_emit_arg_fused(&a.value) {
+                    self.node(&a.value);
+                }
+            }
+        }
+        let named = args.iter().filter(|a| a.name.is_some()).count();
+        if named == 0 {
+            return positional;
+        }
+        for a in args {
+            if let Some(name) = &a.name {
+                let key = self.intern(name);
+                self.emit(Instr::a1(OP_PUSH_STR, key));
                 self.node(&a.value);
             }
         }
+        self.emit(Instr::a1(OP_MAKE_DICT, named as u32));
+        positional + 1
     }
 
     fn try_emit_arg_fused(&mut self, node: &AstNode) -> bool {
@@ -876,12 +929,12 @@ impl Compiler {
                         // Emit OP_TAIL_CALL_NAME: fused tail call with embedded name
                         let i = self.intern(name);
                         if let Ok(name16) = u16::try_from(i) {
-                            self.emit_call_args(args);
-                            self.emit(Instr::make(OP_TAIL_CALL_NAME, args.len() as u32, name16, 0));
+                            let n = self.emit_call_args(args);
+                            self.emit(Instr::make(OP_TAIL_CALL_NAME, n as u32, name16, 0));
                         } else {
                             self.emit(Instr::a1(OP_PUSH_STR, i));
-                            self.emit_call_args(args);
-                            self.emit(Instr::a2(OP_TAIL_CALL, args.len() as u32, 0));
+                            let n = self.emit_call_args(args);
+                            self.emit(Instr::a2(OP_TAIL_CALL, n as u32, 0));
                         }
                         return;
                     }
@@ -1204,6 +1257,9 @@ impl Compiler {
                     if let Some((params, body)) = &inline_body {
                         // Criterion: arg count must match
                         if args.len() == params.len()
+                            // Named arguments are not positional; inlining would
+                            // substitute them into the wrong parameters.
+                            && args.iter().all(|a| a.name.is_none())
                             // Criterion 4: every arg must be simple
                             && args.iter().all(|a| is_simple_arg(&a.value))
                             // Recursion guard: do not inline if already on the stack
@@ -1311,8 +1367,8 @@ impl Compiler {
                             self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
                         }
                         // Push args
-                        self.emit_call_args(args);
-                        self.emit(Instr::a2(OP_CALL_METHOD, field_idx, args.len() as u16));
+                        let n = self.emit_call_args(args);
+                        self.emit(Instr::a2(OP_CALL_METHOD, field_idx, n as u16));
                     } else if is_local && parts.len() == 1 {
                         // Single-part local variable call: $f() or $f arg
                         if let Some(slot) = self
@@ -1323,8 +1379,8 @@ impl Compiler {
                         {
                             self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
                         }
-                        self.emit_call_args(args);
-                        self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
+                        let n = self.emit_call_args(args);
+                        self.emit(Instr::a2(OP_CALL, n as u32, 0));
                     } else {
                         // Bare or dotted name call. Embed the callee name in the
                         // opcode so the name push and the call are one dispatch.
@@ -1332,12 +1388,12 @@ impl Compiler {
                         // domain methods exactly like `OP_CALL`.
                         let i = self.intern(&name);
                         if let Ok(name16) = u16::try_from(i) {
-                            self.emit_call_args(args);
-                            self.emit(Instr::make(OP_CALL_NAME, args.len() as u32, name16, 0));
+                            let n = self.emit_call_args(args);
+                            self.emit(Instr::make(OP_CALL_NAME, n as u32, name16, 0));
                         } else {
                             self.emit(Instr::a1(OP_PUSH_STR, i));
-                            self.emit_call_args(args);
-                            self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
+                            let n = self.emit_call_args(args);
+                            self.emit(Instr::a2(OP_CALL, n as u32, 0));
                         }
                     }
                 } else if let AstNode::Ident { name, .. } = callee.as_ref() {
@@ -1350,24 +1406,67 @@ impl Compiler {
                         .map(|i| i as u32)
                     {
                         self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
-                        self.emit_call_args(args);
-                        self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
+                        let n = self.emit_call_args(args);
+                        self.emit(Instr::a2(OP_CALL, n as u32, 0));
                     } else {
                         // Fused named call: embed the callee name in the opcode
                         let i = self.intern(name);
                         if let Ok(name16) = u16::try_from(i) {
-                            self.emit_call_args(args);
-                            self.emit(Instr::make(OP_CALL_NAME, args.len() as u32, name16, 0));
+                            let n = self.emit_call_args(args);
+                            self.emit(Instr::make(OP_CALL_NAME, n as u32, name16, 0));
                         } else {
                             self.emit(Instr::a1(OP_PUSH_STR, i));
-                            self.emit_call_args(args);
-                            self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
+                            let n = self.emit_call_args(args);
+                            self.emit(Instr::a2(OP_CALL, n as u32, 0));
                         }
                     }
                 } else {
                     self.node(callee);
-                    self.emit_call_args(args);
-                    self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
+                    let n = self.emit_call_args(args);
+                    self.emit(Instr::a2(OP_CALL, n as u32, 0));
+                }
+            }
+
+            AstNode::DomainCall {
+                callee,
+                args,
+                items,
+                span,
+            } => {
+                if items.is_empty() {
+                    self.emit(Instr::none(OP_PUSH_NIL));
+                    return;
+                }
+                for (i, item) in items.iter().enumerate() {
+                    // Positional args first, then the item value, then the named
+                    // map. Item named args replace shared ones with the same key.
+                    let mut call_args: Vec<CallArg> =
+                        args.iter().filter(|a| a.name.is_none()).cloned().collect();
+                    call_args.push(CallArg {
+                        value: item.value.clone(),
+                        name: None,
+                    });
+                    for a in args.iter().filter(|a| a.name.is_some()) {
+                        let key = a.name.as_ref().expect("named arg");
+                        if !item.named.iter().any(|(k, _)| k == key) {
+                            call_args.push(a.clone());
+                        }
+                    }
+                    for (key, value) in &item.named {
+                        call_args.push(CallArg {
+                            value: value.clone(),
+                            name: Some(key.clone()),
+                        });
+                    }
+                    let call = AstNode::Call {
+                        span: span.clone(),
+                        callee: callee.clone(),
+                        args: call_args,
+                    };
+                    self.node(&call);
+                    if i + 1 != items.len() {
+                        self.emit(Instr::none(OP_POP));
+                    }
                 }
             }
 
@@ -1463,6 +1562,22 @@ impl Compiler {
             }
 
             AstNode::FieldAccess { target, field, .. } => {
+                // A dotted chain rooted at a plain identifier is a domain
+                // method: `metadata.all` in expression position means the
+                // same as the statement form. Without this it compiled to a
+                // field read on an uninitialized local named `metadata`.
+                // `$var.field`, globals, and type/variant names stay field
+                // reads.
+                if let Some(name) = self.zero_arg_domain_call(node) {
+                    let i = self.intern(&name);
+                    if let Ok(name16) = u16::try_from(i) {
+                        self.emit(Instr::make(OP_CALL_NAME, 0, name16, 0));
+                    } else {
+                        self.emit(Instr::a1(OP_PUSH_STR, i));
+                        self.emit(Instr::a2(OP_CALL, 0, 0));
+                    }
+                    return;
+                }
                 self.node(target);
                 let i = self.intern(field);
                 self.emit(Instr::a1(OP_GET_FIELD, i));
@@ -1684,7 +1799,8 @@ fn is_pure_expr(node: &AstNode) -> bool {
         | AstNode::TypeDef { .. }
         | AstNode::ImplDef { .. }
         | AstNode::TypeTest { .. }
-        | AstNode::TypeCast { .. } => false,
+        | AstNode::TypeCast { .. }
+        | AstNode::DomainCall { .. } => false,
     }
 }
 
@@ -1748,6 +1864,7 @@ fn is_pure_block_expr(node: &AstNode, inlineable_fns: &BTreeSet<String>) -> bool
         | AstNode::ImplDef { .. }
         | AstNode::TypeTest { .. }
         | AstNode::TypeCast { .. }
+        | AstNode::DomainCall { .. }
         | AstNode::Block { .. } => false,
     }
 }

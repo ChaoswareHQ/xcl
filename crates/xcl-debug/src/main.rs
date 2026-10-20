@@ -28,9 +28,9 @@ use std::fs;
 use std::process;
 
 use xcl_vm::AstNode;
+use xcl_vm::Span;
 use xcl_vm::lexer::{self, TokenWithText};
 use xcl_vm::parser;
-use xcl_vm::Span;
 
 /// Extract the span from any AST node
 fn node_span(node: &AstNode) -> &Span {
@@ -45,6 +45,7 @@ fn node_span(node: &AstNode) -> &Span {
         | AstNode::FunctionDef { span, .. }
         | AstNode::Lambda { span, .. }
         | AstNode::Call { span, .. }
+        | AstNode::DomainCall { span, .. }
         | AstNode::Ident { span, .. }
         | AstNode::Int { span, .. }
         | AstNode::Float { span, .. }
@@ -199,7 +200,12 @@ fn print_tokens(tokens: &[TokenWithText], verbose: bool) {
                 tok.token
             );
         } else {
-            println!("{:4} | {:<20} | {:?}", i, format!("\"{}\"", tok.text), tok.token);
+            println!(
+                "{:4} | {:<20} | {:?}",
+                i,
+                format!("\"{}\"", tok.text),
+                tok.token
+            );
         }
     }
     println!();
@@ -217,6 +223,7 @@ fn node_name(node: &AstNode) -> &'static str {
         AstNode::FunctionDef { .. } => "FnDef",
         AstNode::Lambda { .. } => "Lambda",
         AstNode::Call { .. } => "Call",
+        AstNode::DomainCall { .. } => "DomainCall",
         AstNode::Ident { .. } => "Ident",
         AstNode::Int { .. } => "Int",
         AstNode::Float { .. } => "Float",
@@ -246,7 +253,12 @@ fn children(node: &AstNode) -> Vec<AstNode> {
     match node {
         AstNode::Assign { value, .. } => kids.push((**value).clone()),
         AstNode::Return { value: Some(v), .. } => kids.push((**v).clone()),
-        AstNode::If { condition, then_branch, else_branch, .. } => {
+        AstNode::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             kids.push((**condition).clone());
             kids.extend(then_branch.clone());
             if let Some(else_b) = else_branch {
@@ -257,7 +269,9 @@ fn children(node: &AstNode) -> Vec<AstNode> {
             kids.push((**iterable).clone());
             kids.extend(body.clone());
         }
-        AstNode::While { condition, body, .. } => {
+        AstNode::While {
+            condition, body, ..
+        } => {
             kids.push((**condition).clone());
             kids.extend(body.clone());
         }
@@ -267,6 +281,20 @@ fn children(node: &AstNode) -> Vec<AstNode> {
             kids.push((**callee).clone());
             for arg in args {
                 kids.push(arg.value.clone());
+            }
+        }
+        AstNode::DomainCall {
+            callee,
+            args,
+            items,
+            ..
+        } => {
+            kids.push((**callee).clone());
+            for arg in args {
+                kids.push(arg.value.clone());
+            }
+            for item in items {
+                kids.push(item.value.clone());
             }
         }
         AstNode::BinaryOp { left, right, .. } => {
@@ -326,7 +354,11 @@ fn print_tree(nodes: &[AstNode], indent: usize, verbose: bool) {
 
         // Print key info inline
         match node {
-            AstNode::Assign { name, type_annotation, .. } => {
+            AstNode::Assign {
+                name,
+                type_annotation,
+                ..
+            } => {
                 print!(" ${}", name);
                 if let Some(ty) = type_annotation {
                     print!(" :{}", ty);
@@ -354,6 +386,24 @@ fn print_tree(nodes: &[AstNode], indent: usize, verbose: bool) {
                 };
                 print!(" {}({} args)", callee_name, args.len());
             }
+            AstNode::DomainCall {
+                callee,
+                args,
+                items,
+                ..
+            } => {
+                let callee_name = match callee.as_ref() {
+                    AstNode::Ident { name, .. } => name.clone(),
+                    AstNode::FieldAccess { field, .. } => field.clone(),
+                    _ => node_name(callee).to_string(),
+                };
+                print!(
+                    " {}({} args -> {} items)",
+                    callee_name,
+                    args.len(),
+                    items.len()
+                );
+            }
             AstNode::FunctionDef { name, params, .. } => {
                 print!(" {}({} params)", name, params.len());
             }
@@ -361,7 +411,10 @@ fn print_tree(nodes: &[AstNode], indent: usize, verbose: bool) {
             AstNode::ArrayLit { elements, .. } => print!(" [{} elems]", elements.len()),
             AstNode::DictLit { entries, .. } => print!(" {{{} entries}}", entries.len()),
             AstNode::Block { statements, .. } => print!(" {{{} stmts}}", statements.len()),
-            AstNode::If { else_branch: Some(else_b), .. } => {
+            AstNode::If {
+                else_branch: Some(else_b),
+                ..
+            } => {
                 print!(" (else: {} stmts)", else_b.len());
             }
             AstNode::If { .. } => print!(" (no else)"),
@@ -374,7 +427,11 @@ fn print_tree(nodes: &[AstNode], indent: usize, verbose: bool) {
             AstNode::Index { .. } => print!(" []"),
             AstNode::Pipeline { stages, .. } => print!(" ({} stages)", stages.len()),
             AstNode::Range { .. } => print!(" .."),
-            AstNode::ImplDef { type_name, trait_name, .. } => {
+            AstNode::ImplDef {
+                type_name,
+                trait_name,
+                ..
+            } => {
                 print!(" {} is {}", type_name, trait_name);
             }
             AstNode::TypeTest { type_name, .. } => print!(" is {}", type_name),

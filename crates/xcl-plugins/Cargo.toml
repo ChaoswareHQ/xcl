@@ -23,6 +23,7 @@ xcl-macros.workspace = true
 xcl-vm.workspace = true
 linkme.workspace = true
 hashbrown.workspace = true
+itoa.workspace = true
 ureq = { workspace = true, default-features = false, features = ["_tls", "json"], optional = true }
 serde_json = { workspace = true, optional = true }
 

@@ -26,6 +26,7 @@ mod math;
 #[cfg(feature = "net")]
 mod net;
 mod registry;
+pub mod util;
 
 mod wellknown;
 
@@ -52,6 +53,9 @@ pub fn new_vm() -> VM {
 
 /// Evaluate XCL source code using the provided VM.
 pub fn evaluate(source: &str, vm: &mut VM) -> Value {
+    // Pick up the `# key: value` header before the script can call
+    // `util.metadata`.
+    util::install_metadata(source);
     xcl_vm::evaluate(source, vm)
 }
 

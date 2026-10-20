@@ -1264,3 +1264,67 @@ fn non_integer_argument_falls_back_to_the_interpreter() {
         "fib($n) { if $n < 2 { return $n } return (fib ($n - 1)) + (fib ($n - 2)) }\nfib 10.0";
     assert_eq!(eval_f64(src), 55.0);
 }
+
+#[test]
+fn parenthesized_call_argument_keeps_outer_arguments_separate() {
+    // `f (g 11) 2` must call `g` with one argument and `f` with two. The parser
+    // used to merge the trailing `2` into `g`, producing `f(g(11, 2))`.
+    let src =
+        "g($x) { if $x > 0 { return $x - 1 } return 0 }\nf($a, $b) { return $a + $b }\nf (g 11) 2";
+    assert_eq!(eval_i64(src), 12);
+}
+
+// ── `:` named arguments and brace expansion ──
+
+#[test]
+fn equals_is_still_assignment() {
+    // Named call arguments use `:`, so `=` is unambiguously assignment again.
+    assert_eq!(eval_i64("$x = 7\n$x = $x + 1\n$x"), 8);
+}
+
+#[test]
+fn colon_named_argument_packs_into_a_trailing_map() {
+    let src = "probe($a, $o) { return $o.fg_color }\nprobe fg_color: \"red\" 1";
+    assert_eq!(eval(src).as_str(), Some("red"));
+}
+
+#[test]
+fn expansion_calls_the_callee_once_per_item() {
+    // `twice { 1; 2; 3 }` is three calls; the last result is the value.
+    let src = "twice($x) { return $x * 2 }\ntwice { 1; 2; 3 }";
+    assert_eq!(eval_i64(src), 6);
+}
+
+#[test]
+fn colon_map_literal_still_parses() {
+    // Changing the named-argument separator must not affect map literals.
+    assert_eq!(eval_i64("$m = { a: 1, b: 2 }\n$m.a + $m.b"), 3);
+}
+
+#[test]
+fn positional_argument_before_a_brace_block_stays_a_lambda() {
+    // Expansion only applies when every shared argument is named, so
+    // `f "x" { 1 }` keeps the old domain block-lambda meaning: the callee
+    // receives the block as a function value, not as an expanded item.
+    let src = "call($a, $b) { return $b }\ncall \"x\" { 1 }";
+    assert!(eval(src).as_func().is_some());
+}
+
+#[test]
+fn expansion_shared_named_argument_reaches_every_item() {
+    let src = "tag($x, $o) { return $o.tag }\ntag tag: \"shared\" { 1; 2 }";
+    assert_eq!(eval(src).as_str(), Some("shared"));
+}
+
+#[test]
+fn item_named_argument_overrides_shared_one() {
+    let src = "tag($x, $o) { return $o.tag }\ntag tag: \"shared\" { 1, tag: \"item\" }";
+    assert_eq!(eval(src).as_str(), Some("item"));
+}
+
+#[test]
+fn field_read_on_a_local_stays_a_field_read() {
+    // The zero-argument domain-call lowering must not turn `$m.a` into a call.
+    let src = "$m = { a: 7 }\nidentity($v) { return $v }\nidentity ($m.a)";
+    assert_eq!(eval_i64(src), 7);
+}

@@ -143,6 +143,22 @@ pub enum AstNode {
         /// Positional and named arguments passed to the call.
         args: Vec<CallArg>,
     },
+    /// A call whose last argument is a brace-expanded item list:
+    /// `print { "a"; "b" }` or
+    /// `print fg_color: "red" { "a", fg_color: "blue"; "b" }`.
+    ///
+    /// The compiler calls the callee once per item, with the shared arguments
+    /// plus the item value. Item named arguments override the shared ones.
+    DomainCall {
+        /// Source location of the call expression.
+        span: Span,
+        /// Expression evaluated to obtain the callable object.
+        callee: Box<AstNode>,
+        /// Arguments shared by every item.
+        args: Vec<CallArg>,
+        /// One entry per brace item, in source order.
+        items: Vec<DomainItem>,
+    },
     /// Variable or symbol identifier reference (e.g., `$x`, `print`).
     Ident {
         /// Source location of the identifier.
@@ -384,6 +400,15 @@ pub struct CallArg {
     pub value: AstNode,
     /// Optional parameter name for named arguments (e.g. `timeout: 5000`).
     pub name: Option<String>,
+}
+
+/// One item of a [`AstNode::DomainCall`] brace block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DomainItem {
+    /// The value passed as the item's positional argument.
+    pub value: AstNode,
+    /// Per-item named arguments; these override the call's shared ones.
+    pub named: Vec<(String, AstNode)>,
 }
 
 /// Binary operators supported by XCL expressions.

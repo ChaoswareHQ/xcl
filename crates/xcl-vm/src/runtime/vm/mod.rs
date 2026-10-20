@@ -885,7 +885,14 @@ impl VM {
     #[allow(clippy::uninit_vec)]
     fn bind_registers(&mut self, idx: usize, n: usize, copied_params: usize) -> usize {
         let base = self.regs.len();
+        let old_ptr = self.regs.as_ptr();
         self.regs.reserve(n);
+        // Active frames cache a raw pointer into the register file. If the
+        // store grew, every cached pointer now dangles and must be rebased
+        // before any of those frames runs again (e.g. after a callee returns).
+        if self.regs.as_ptr() != old_ptr {
+            self.rebase_frames(idx);
+        }
         // SAFETY: `Value` is `Copy` and has no `Drop`. `reserve` guarantees
         // capacity for `base + n`. Every slot in `[base, base + n)` is written
         // before it can be read: the caller writes
@@ -911,6 +918,23 @@ impl VM {
         base
     }
 
+    /// Rebinds every frame below `active` to the current register allocation.
+    ///
+    /// Called only when growing `regs` moved the buffer; `LocalSlice` stores a
+    /// raw pointer, so stale pointers make a returning frame read or write the
+    /// freed block (the hanoi benchmark crosses the initial 64-slot capacity).
+    #[inline]
+    fn rebase_frames(&mut self, active: usize) {
+        let base_ptr = self.regs.as_mut_ptr();
+        for i in 0..active {
+            let frame = unsafe { self.frames.get_unchecked_mut(i) };
+            frame.locals = LocalSlice {
+                ptr: unsafe { base_ptr.add(frame.local_base as usize) },
+                len: frame.locals.len,
+            };
+        }
+    }
+
     /// Drops the registers of a frame that is returning.
     #[inline(always)]
     fn release_registers(&mut self, idx: usize) {
@@ -927,7 +951,11 @@ impl VM {
     #[allow(clippy::uninit_vec)]
     fn rebind_registers(&mut self, idx: usize, base: usize, n: usize, copied_params: usize) {
         self.regs.truncate(base);
+        let old_ptr = self.regs.as_ptr();
         self.regs.reserve(n);
+        if self.regs.as_ptr() != old_ptr {
+            self.rebase_frames(idx);
+        }
         // SAFETY: same argument as `bind_registers`: `Value` has no `Drop`, the
         // capacity is reserved, and every slot is written before it is read.
         unsafe {
@@ -2583,5 +2611,33 @@ mod tests {
         );
         let mut vm = VM::new();
         assert_eq!(vm.run(&bc).as_i48(), 4);
+    }
+
+    #[test]
+    fn growing_the_register_file_rebases_active_frame_pointers() {
+        // Each frame caches a raw pointer into `regs`. Growing the file moves
+        // the buffer, so every live frame must be rebased; otherwise a caller
+        // resumed after a deep callee reads and writes the freed block.
+        let src = "1";
+        let tokens = lex(src, "<test>");
+        let ast = parse(&tokens, src);
+        let bc = compile(&ast);
+
+        let mut vm = VM::new();
+        assert_eq!(vm.regs.capacity(), 64, "initial capacity assumption");
+        let first = vm.acquire_frame(&bc);
+        let base = vm.bind_registers(first, 40, 0);
+        vm.regs[base] = Value::from_i48(7);
+
+        // 40 + 40 exceeds the initial capacity, so this reallocates `regs`.
+        let second = vm.acquire_frame(&bc);
+        let _ = vm.bind_registers(second, 40, 0);
+
+        assert_eq!(
+            vm.frames[first].locals.ptr as usize,
+            vm.regs.as_ptr() as usize,
+            "a live frame must point at the current register file"
+        );
+        assert_eq!(vm.frames[first].locals[0].as_i48(), 7);
     }
 }

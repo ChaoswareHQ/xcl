@@ -38,7 +38,10 @@ use xcl_vm::Value;
 #[derive(Xcl)]
 pub struct Io;
 
-#[xcl_impl(auto_import)]
+// Not `auto_import`: the bare names (`print`, `println`, `readline`, …) are
+// owned by the `util` domain, whose implementations are the fast path. The
+// namespaced `io.*` forms keep working unchanged.
+#[xcl_impl]
 impl Io {
     /// Print any value to stdout without a trailing newline.
     pub fn print(value: Value) {

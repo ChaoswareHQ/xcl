@@ -410,6 +410,16 @@ mod core_ops {
 
     // ── Control flow ──
 
+    /// Discards the value on top of the operand stack.
+    ///
+    /// Used by brace-expanded calls (`print { "a"; "b" }`) to drop every
+    /// item's result except the last one.
+    #[opcode(code = 31, arity = 0, stack = "1 -> 0")]
+    fn op_pop(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+        vm.pop();
+        OpcodeResult::Next
+    }
+
     /// Unconditional jump to instruction pointer address `a`.
     #[opcode(code = 28, arity = 0, stack = "0 -> 0", branch = "abs")]
     fn op_jump(__vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {

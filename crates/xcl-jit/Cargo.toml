@@ -10,8 +10,10 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-cranelift-codegen = "0.136"
-cranelift-frontend = "0.136"
-cranelift-jit = "0.136"
-cranelift-module = "0.136"
-cranelift-native = "0.136"
+# `unwind` is enabled by cranelift-jit/module/native regardless; disabling the
+# defaults here only drops the `timing` instrumentation from the final binary.
+cranelift-codegen = { version = "0.137", default-features = false, features = ["std", "host-arch"] }
+cranelift-frontend = "0.137"
+cranelift-jit = "0.137"
+cranelift-module = "0.137"
+cranelift-native = "0.137"

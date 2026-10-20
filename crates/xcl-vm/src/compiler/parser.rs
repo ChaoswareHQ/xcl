@@ -49,8 +49,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::compiler::ast::{
-    AstNode, BinaryOperator, CallArg, Param, PipelineStage, SpecialVarKind, SumVariant, TypeField,
-    TypeKind, UnaryOperator,
+    AstNode, BinaryOperator, CallArg, DomainItem, Param, PipelineStage, SpecialVarKind, SumVariant,
+    TypeField, TypeKind, UnaryOperator,
 };
 use crate::compiler::lexer::{Token, TokenWithText, extract_string};
 use crate::compiler::span::Span;
@@ -61,6 +61,9 @@ struct Parser<'a> {
     source: &'a str,
     /// Tracks nesting depth of pipeline stages; when > 0, lambda bodies should not consume `|>`.
     pipeline_depth: usize,
+    /// Depth of positional call arguments being parsed. A parenthesized call at
+    /// depth > 0 must not absorb the enclosing call's remaining arguments.
+    arg_depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -70,6 +73,7 @@ impl<'a> Parser<'a> {
             pos: 0,
             source,
             pipeline_depth: 0,
+            arg_depth: 0,
         }
     }
 
@@ -401,10 +405,12 @@ impl<'a> Parser<'a> {
     #[inline]
     fn lookahead_dict_literal(&self) -> bool {
         // self.pos already points past the consumed `{`, so start here.
-        // Find the first meaningful token. If it's followed by `:`, it's a dict literal.
-        // Otherwise, it's a block-lambda.
-        // `{ }` → empty block-lambda (returns nil)
-        let mut i = self.pos;
+        self.lookahead_dict_at(self.pos)
+    }
+
+    /// Does the brace group starting at `start` look like `{ key: value, ... }`?
+    fn lookahead_dict_at(&self, start: usize) -> bool {
+        let mut i = start;
         while i < self.tokens.len() {
             match self.tokens[i].token {
                 Token::RBrace => return false, // empty `{ }` → block-lambda
@@ -419,6 +425,67 @@ impl<'a> Parser<'a> {
             }
         }
         false // reached EOF without `}` → block-lambda
+    }
+
+    /// Parse a brace-expanded argument list:
+    /// `{ expr, name: value; expr; ... }`.
+    fn expansion_block(&mut self) -> Vec<DomainItem> {
+        self.expect(Token::LBrace);
+        let mut items = Vec::new();
+        while !self.at(Token::RBrace) && !self.at_eof() {
+            if self.at(Token::Semi) {
+                self.consume();
+                continue;
+            }
+            let before = self.pos;
+            let value = self.expr();
+            let mut named = Vec::new();
+            while self.at(Token::Comma) {
+                let is_named = matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.token),
+                    Some(Token::IdentPlain)
+                ) && matches!(
+                    self.tokens.get(self.pos + 2).map(|t| &t.token),
+                    Some(Token::Colon)
+                );
+                if !is_named {
+                    break;
+                }
+                self.consume(); // ,
+                let name = self.consume().text.clone();
+                self.consume(); // :
+                self.arg_depth += 1;
+                let item_value = self.expr();
+                self.arg_depth -= 1;
+                named.push((name, item_value));
+            }
+            items.push(DomainItem { value, named });
+            if self.at(Token::Semi) {
+                self.consume();
+            }
+            // Never spin on a token `expr` refused to consume.
+            if self.pos == before {
+                self.consume();
+            }
+        }
+        self.expect(Token::RBrace);
+        items
+    }
+
+    /// Recognises the expansion form: a brace block with no positional argument
+    /// before it. `provider "ctx" { ... }` has a positional argument and stays a
+    /// domain block-lambda; `print { ... }` expands.
+    fn try_expansion(&mut self, args: &[CallArg]) -> Option<Vec<DomainItem>> {
+        if !self.at(Token::LBrace) {
+            return None;
+        }
+        if !args.iter().all(|a| a.name.is_some()) {
+            return None;
+        }
+        if self.lookahead_dict_at(self.pos + 1) {
+            return None;
+        }
+        Some(self.expansion_block())
     }
 
     #[inline]
@@ -1481,7 +1548,12 @@ impl<'a> Parser<'a> {
         // produced by parenthesized arguments must still accept the remaining
         // space-separated ones. Without this, `hanoi ($n - 1) $from $via $to`
         // compiles as `hanoi($n - 1)` followed by a discarded call.
-        let call_from_parens = matches!(e, AstNode::Call { .. });
+        //
+        // This only applies to a call that *ends the current expression*. Inside
+        // a call argument (`g (h 1) 2`), the trailing `2` belongs to the outer
+        // call, not to `h`; merging it here turned `unwrap_or (err 9) 3` into
+        // `unwrap_or(err(9, 3))`.
+        let call_from_parens = self.arg_depth == 0 && matches!(e, AstNode::Call { .. });
 
         if (prev_is_ident || call_from_parens)
             && matches!(
@@ -1549,6 +1621,14 @@ impl<'a> Parser<'a> {
                     Box::new(e)
                 };
                 while self.starts_positional_arg() && !self.has_newline_before_current() {
+                    if let Some(items) = self.try_expansion(&args) {
+                        return AstNode::DomainCall {
+                            span: self.span(),
+                            callee,
+                            args,
+                            items,
+                        };
+                    }
                     args.push(self.call_arg());
                 }
                 while self.at(Token::Comma) {
@@ -1556,6 +1636,14 @@ impl<'a> Parser<'a> {
                     if self.starts_positional_arg() && !self.has_newline_before_current() {
                         args.push(self.call_arg());
                     }
+                }
+                if let Some(items) = self.try_expansion(&args) {
+                    return AstNode::DomainCall {
+                        span: self.span(),
+                        callee,
+                        args,
+                        items,
+                    };
                 }
                 e = AstNode::Call {
                     span: self.span(),
@@ -1571,11 +1659,13 @@ impl<'a> Parser<'a> {
     fn call_arg(&mut self) -> CallArg {
         if self.at(Token::IdentPlain) {
             let next = self.pos + 1;
-            if matches!(self.tokens.get(next).map(|t| &t.token), Some(Token::Assign)) {
+            if matches!(self.tokens.get(next).map(|t| &t.token), Some(Token::Colon)) {
                 let name = self.consume().text.clone();
                 self.consume();
                 // Named args parse full expressions (they're unambiguous)
+                self.arg_depth += 1;
                 let value = self.expr();
+                self.arg_depth -= 1;
                 return CallArg {
                     value,
                     name: Some(name),
@@ -1586,10 +1676,13 @@ impl<'a> Parser<'a> {
         // are handled by the precedence climbing above postfix.
         // This means `math.sqrt 16 > 3` parses as `(math.sqrt 16) > 3`, not `math.sqrt (16 > 3)`.
         // Use parentheses for multi-operator args: `math.add (1 + 2)`.
-        CallArg {
-            value: self.unary(),
-            name: None,
-        }
+        //
+        // `arg_depth` stops a parenthesized call in this position from absorbing
+        // the caller's remaining space-separated arguments (see `postfix`).
+        self.arg_depth += 1;
+        let value = self.unary();
+        self.arg_depth -= 1;
+        CallArg { value, name: None }
     }
 
     fn primary(&mut self) -> AstNode {
@@ -1684,15 +1777,13 @@ impl<'a> Parser<'a> {
                             self.consume();
                             continue;
                         }
-                        // Named arg: `name = value`
+                        // Named arg: `name: value`
                         if self.at(Token::IdentPlain) {
                             let next = self.pos + 1;
-                            if matches!(
-                                self.tokens.get(next).map(|t| &t.token),
-                                Some(Token::Assign)
-                            ) {
+                            if matches!(self.tokens.get(next).map(|t| &t.token), Some(Token::Colon))
+                            {
                                 let aname = self.consume().text.clone();
-                                self.consume(); // =
+                                self.consume(); // :
                                 let aval = self.expr();
                                 args.push(CallArg {
                                     value: aval,
@@ -1717,6 +1808,17 @@ impl<'a> Parser<'a> {
                 // Space-separated domain-style call: `domain func arg`
                 let mut args = Vec::new();
                 while self.looks_like_arg() {
+                    if let Some(items) = self.try_expansion(&args) {
+                        return AstNode::DomainCall {
+                            span: span.clone(),
+                            callee: Box::new(AstNode::Ident {
+                                span: span.clone(),
+                                name,
+                            }),
+                            args,
+                            items,
+                        };
+                    }
                     args.push(self.call_arg());
                 }
                 while self.at(Token::Comma) {
@@ -1724,6 +1826,17 @@ impl<'a> Parser<'a> {
                     if self.looks_like_arg() {
                         args.push(self.call_arg());
                     }
+                }
+                if let Some(items) = self.try_expansion(&args) {
+                    return AstNode::DomainCall {
+                        span: span.clone(),
+                        callee: Box::new(AstNode::Ident {
+                            span: span.clone(),
+                            name,
+                        }),
+                        args,
+                        items,
+                    };
                 }
                 if args.is_empty() {
                     AstNode::Ident { span, name }
@@ -1972,8 +2085,12 @@ impl<'a> Parser<'a> {
                 // or bare function definition (`Name(`).
                 let next = self.tokens.get(self.pos + 1).map(|t| &t.token);
                 // Skip if it's an assignment: `$x = value` or `Name = {`
-                if matches!(next, Some(Token::Assign) | Some(Token::Colon)) {
+                if matches!(next, Some(Token::Assign)) {
                     return false;
+                }
+                // `name: value` is a named argument.
+                if matches!(next, Some(Token::Colon)) {
+                    return true;
                 }
                 // Skip if it's `Name is Trait`
                 if matches!(next, Some(Token::Is)) {

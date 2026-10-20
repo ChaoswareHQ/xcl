@@ -29,8 +29,8 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
 use syn::{
-    parse::Parse, Attribute, Expr, ExprLit, FnArg, Ident, ItemFn, ItemImpl, ItemMod, Lit, LitStr,
-    Meta, Token, Type, Visibility, VisRestricted, parse_macro_input,
+    Attribute, Expr, ExprLit, FnArg, Ident, ItemFn, ItemImpl, ItemMod, Lit, LitStr, Meta, Token,
+    Type, VisRestricted, Visibility, parse::Parse, parse_macro_input,
 };
 
 /// Extract the first line of `///` doc comments as a summary string.
@@ -323,7 +323,7 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
                             quote! {
                                 ::xcl_vm::TypeVariant {
                                     name: #variant_name,
-                                    fields: &#[#(#fs_entries),*],
+                                    fields: &[#(#fs_entries),*],
                                 }
                             }
                         }
@@ -341,7 +341,7 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
                             quote! {
                                 ::xcl_vm::TypeVariant {
                                     name: #variant_name,
-                                    fields: &#[#(#fs_entries),*],
+                                    fields: &[#(#fs_entries),*],
                                 }
                             }
                         }
@@ -585,6 +585,8 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Check if the function uses typed Rust parameters (not &[Value] or &mut DomainCtx)
     let uses_typed_params = !func.sig.inputs.is_empty() && !is_raw_args_signature(&func);
 
+    let auto_import_val = parsed.auto_import;
+
     if uses_typed_params {
         // Generate a wrapper that converts &[Value] to typed Rust args
         let wrapper_ident =
@@ -615,7 +617,7 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
                 named: #named_static,
                 summary: #summary_static,
                 arg_desc: #arg_desc_static,
-                auto_import: false,
+                auto_import: #auto_import_val,
             };
         };
 
@@ -640,7 +642,7 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
                 named: #named_static,
                 summary: #summary_static,
                 arg_desc: #arg_desc_static,
-                auto_import: false,
+                auto_import: #auto_import_val,
             };
         };
 
@@ -707,6 +709,7 @@ struct NativeAttr {
     summary: Option<String>,
     arg_desc: Vec<(String, String)>,
     named: Vec<NamedParamSpec>,
+    auto_import: bool,
 }
 
 struct NamedParamSpec {
@@ -733,6 +736,7 @@ impl syn::parse::Parse for NativeAttr {
                 summary: None,
                 arg_desc: Vec::new(),
                 named: Vec::new(),
+                auto_import: false,
             });
         }
 
@@ -746,6 +750,7 @@ impl syn::parse::Parse for NativeAttr {
         let mut summary = None;
         let mut arg_desc = Vec::new();
         let mut named = Vec::new();
+        let mut auto_import = false;
 
         loop {
             if input.is_empty() {
@@ -754,6 +759,14 @@ impl syn::parse::Parse for NativeAttr {
 
             let key: syn::Ident = input.parse()?;
             let key_s = key.to_string();
+
+            if key_s == "auto_import" {
+                auto_import = true;
+                if input.peek(syn::Token![,]) {
+                    input.parse::<syn::Token![,]>()?;
+                }
+                continue;
+            }
 
             if key_s == "arg_desc" {
                 // arg_desc("name" = "description", ...)
@@ -851,6 +864,7 @@ impl syn::parse::Parse for NativeAttr {
             summary,
             arg_desc,
             named,
+            auto_import,
         })
     }
 }
@@ -1487,21 +1501,15 @@ pub fn opcode(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     if !name.starts_with("OP_") {
-        return syn::Error::new_spanned(
-            &func,
-            "Opcode name must start with `OP_`",
-        )
-        .to_compile_error()
-        .into();
+        return syn::Error::new_spanned(&func, "Opcode name must start with `OP_`")
+            .to_compile_error()
+            .into();
     }
 
     if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return syn::Error::new_spanned(
-            &func,
-            "Opcode name must be a valid Rust identifier",
-        )
-        .to_compile_error()
-        .into();
+        return syn::Error::new_spanned(&func, "Opcode name must be a valid Rust identifier")
+            .to_compile_error()
+            .into();
     }
 
     let code = match code {
@@ -1517,12 +1525,9 @@ pub fn opcode(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     if !(128..=255).contains(&code) {
-        return syn::Error::new_spanned(
-            &func,
-            "Opcode code must be in range 128..=255",
-        )
-        .to_compile_error()
-        .into();
+        return syn::Error::new_spanned(&func, "Opcode code must be in range 128..=255")
+            .to_compile_error()
+            .into();
     }
     let func_name = &func.sig.ident;
     let func_name_str = func_name.to_string();
@@ -1588,7 +1593,10 @@ fn parse_slot_mask(s: &str, span: Span) -> syn::Result<u8> {
             _ => {
                 return Err(syn::Error::new(
                     span,
-                    format!("unknown operand '{}' in slot mask — expected 'a', 'b', or 'c'", ch),
+                    format!(
+                        "unknown operand '{}' in slot mask — expected 'a', 'b', or 'c'",
+                        ch
+                    ),
                 ));
             }
         }
@@ -1611,43 +1619,65 @@ impl Parse for OpMeta {
 
             match key.to_string().as_str() {
                 "code" => {
-                    if let Expr::Lit(ExprLit { lit: Lit::Int(lit_int), .. }) = value {
+                    if let Expr::Lit(ExprLit {
+                        lit: Lit::Int(lit_int),
+                        ..
+                    }) = value
+                    {
                         code = Some(lit_int.base10_parse()?);
                     } else {
                         return Err(syn::Error::new_spanned(value, "expected integer literal"));
                     }
                 }
                 "name" => {
-                    if let Expr::Lit(ExprLit { lit: Lit::Str(lit_str), .. }) = value {
+                    if let Expr::Lit(ExprLit {
+                        lit: Lit::Str(lit_str),
+                        ..
+                    }) = value
+                    {
                         name = Some(lit_str.value());
                     } else {
                         return Err(syn::Error::new_spanned(value, "expected string literal"));
                     }
                 }
                 "branch" => {
-                    if let Expr::Lit(ExprLit { lit: Lit::Str(ref lit_str), .. }) = value {
+                    if let Expr::Lit(ExprLit {
+                        lit: Lit::Str(ref lit_str),
+                        ..
+                    }) = value
+                    {
                         let s = lit_str.value();
                         match s.as_str() {
                             "abs" => branch = Some(BranchKind::Abs),
                             "wide" => branch = Some(BranchKind::Wide),
-                            _ => return Err(syn::Error::new_spanned(
-                                value,
-                                "branch must be \"abs\" or \"wide\"",
-                            )),
+                            _ => {
+                                return Err(syn::Error::new_spanned(
+                                    value,
+                                    "branch must be \"abs\" or \"wide\"",
+                                ));
+                            }
                         }
                     } else {
                         return Err(syn::Error::new_spanned(value, "expected string literal"));
                     }
                 }
                 "reads" => {
-                    if let Expr::Lit(ExprLit { lit: Lit::Str(lit_str), .. }) = value {
+                    if let Expr::Lit(ExprLit {
+                        lit: Lit::Str(lit_str),
+                        ..
+                    }) = value
+                    {
                         reads = parse_slot_mask(&lit_str.value(), lit_str.span())?;
                     } else {
                         return Err(syn::Error::new_spanned(value, "expected string literal"));
                     }
                 }
                 "writes" => {
-                    if let Expr::Lit(ExprLit { lit: Lit::Str(lit_str), .. }) = value {
+                    if let Expr::Lit(ExprLit {
+                        lit: Lit::Str(lit_str),
+                        ..
+                    }) = value
+                    {
                         writes = parse_slot_mask(&lit_str.value(), lit_str.span())?;
                     } else {
                         return Err(syn::Error::new_spanned(value, "expected string literal"));
@@ -1663,7 +1693,13 @@ impl Parse for OpMeta {
         }
 
         let code = code.ok_or_else(|| syn::Error::new(Span::call_site(), "missing `code`"))?;
-        Ok(OpMeta { code, name, branch, reads, writes })
+        Ok(OpMeta {
+            code,
+            name,
+            branch,
+            reads,
+            writes,
+        })
     }
 }
 
@@ -1855,110 +1891,110 @@ pub fn opcodes(args: TokenStream, input: TokenStream) -> TokenStream {
     // Build the output: consts module + cleaned module + dispatch function + opcode_name_core
     let output = if scope == "core" {
         quote! {
-            pub mod consts {
-                #(#consts)*
-            }
-
-            mod #mod_name {
-                #(#cleaned_items)*
-            }
-
-            pub(crate) const MIGRATED_MASK: u128 = #mask_lit;
-
-            #[inline(always)]
-            pub(crate) fn is_core_migrated(op: u8) -> bool {
-                op < 128 && ((MIGRATED_MASK >> op) & 1) == 1
-            }
-
-            #[inline(always)]
-            pub(crate) fn dispatch_core(
-    vm: &mut crate::runtime::vm::VM,
-    locals: crate::runtime::vm::LocalSlice,
-    top: usize,
-                instr: crate::Instr,
-            ) -> Option<crate::runtime::opcode::OpcodeResult> {
-                use crate::runtime::opcode::OpcodeResult;
-                Some(match instr.op() {
-                    #(#dispatch_arms)*
-                    _ => return None,
-                })
-            }
-
-            pub(crate) fn opcode_name_core(op: u8) -> Option<&'static str> {
-                Some(match op {
-                    #(#name_arms)*
-                    _ => return None,
-                })
-            }
-
-            pub mod meta {
-                /// Branch kind table: 0 = not a branch, 1 = absolute target in `a`, 2 = wide-operand index in `c`.
-                pub const BRANCH_KIND: [u8; 256] = {
-                    let mut t = [0u8; 256];
-                    #(#branch_assigns)*
-                    t
-                };
-
-                #[inline(always)]
-                pub const fn branch_kind(op: u8) -> u8 {
-                    BRANCH_KIND[op as usize]
+                pub mod consts {
+                    #(#consts)*
                 }
 
-                /// Slot-reads mask: bit 0 = operand `a`, bit 1 = `b`, bit 2 = `c`.
-                pub const SLOT_READS: [u8; 256] = {
-                    let mut t = [0u8; 256];
-                    #(#slot_reads_assigns)*
-                    t
-                };
+                mod #mod_name {
+                    #(#cleaned_items)*
+                }
 
-                /// Slot-writes mask: bit 0 = operand `a`, bit 1 = `b`, bit 2 = `c`.
-                pub const SLOT_WRITES: [u8; 256] = {
-                    let mut t = [0u8; 256];
-                    #(#slot_writes_assigns)*
-                    t
-                };
+                pub(crate) const MIGRATED_MASK: u128 = #mask_lit;
 
                 #[inline(always)]
-                pub const fn reads(op: u8) -> u8 {
-                    SLOT_READS[op as usize]
+                pub(crate) fn is_core_migrated(op: u8) -> bool {
+                    op < 128 && ((MIGRATED_MASK >> op) & 1) == 1
                 }
 
                 #[inline(always)]
-                pub const fn writes(op: u8) -> u8 {
-                    SLOT_WRITES[op as usize]
+                pub(crate) fn dispatch_core(
+        vm: &mut crate::runtime::vm::VM,
+        locals: crate::runtime::vm::LocalSlice,
+        top: usize,
+                    instr: crate::Instr,
+                ) -> Option<crate::runtime::opcode::OpcodeResult> {
+                    use crate::runtime::opcode::OpcodeResult;
+                    Some(match instr.op() {
+                        #(#dispatch_arms)*
+                        _ => return None,
+                    })
+                }
+
+                pub(crate) fn opcode_name_core(op: u8) -> Option<&'static str> {
+                    Some(match op {
+                        #(#name_arms)*
+                        _ => return None,
+                    })
+                }
+
+                pub mod meta {
+                    /// Branch kind table: 0 = not a branch, 1 = absolute target in `a`, 2 = wide-operand index in `c`.
+                    pub const BRANCH_KIND: [u8; 256] = {
+                        let mut t = [0u8; 256];
+                        #(#branch_assigns)*
+                        t
+                    };
+
+                    #[inline(always)]
+                    pub const fn branch_kind(op: u8) -> u8 {
+                        BRANCH_KIND[op as usize]
+                    }
+
+                    /// Slot-reads mask: bit 0 = operand `a`, bit 1 = `b`, bit 2 = `c`.
+                    pub const SLOT_READS: [u8; 256] = {
+                        let mut t = [0u8; 256];
+                        #(#slot_reads_assigns)*
+                        t
+                    };
+
+                    /// Slot-writes mask: bit 0 = operand `a`, bit 1 = `b`, bit 2 = `c`.
+                    pub const SLOT_WRITES: [u8; 256] = {
+                        let mut t = [0u8; 256];
+                        #(#slot_writes_assigns)*
+                        t
+                    };
+
+                    #[inline(always)]
+                    pub const fn reads(op: u8) -> u8 {
+                        SLOT_READS[op as usize]
+                    }
+
+                    #[inline(always)]
+                    pub const fn writes(op: u8) -> u8 {
+                        SLOT_WRITES[op as usize]
+                    }
                 }
             }
-        }
     } else {
         quote! {
-            pub mod consts {
-                #(#consts)*
-            }
+                pub mod consts {
+                    #(#consts)*
+                }
 
-            mod #mod_name {
-                #(#cleaned_items)*
-            }
+                mod #mod_name {
+                    #(#cleaned_items)*
+                }
 
-            pub(crate) fn dispatch_core(
-    vm: &mut crate::runtime::vm::VM,
-    locals: crate::runtime::vm::LocalSlice,
-    top: usize,
-                instr: crate::Instr,
-            ) -> Option<crate::runtime::opcode::OpcodeResult> {
-                use crate::runtime::opcode::OpcodeResult;
-                Some(match instr.op() {
-                    #(#dispatch_arms)*
-                    _ => return None,
-                })
-            }
+                pub(crate) fn dispatch_core(
+        vm: &mut crate::runtime::vm::VM,
+        locals: crate::runtime::vm::LocalSlice,
+        top: usize,
+                    instr: crate::Instr,
+                ) -> Option<crate::runtime::opcode::OpcodeResult> {
+                    use crate::runtime::opcode::OpcodeResult;
+                    Some(match instr.op() {
+                        #(#dispatch_arms)*
+                        _ => return None,
+                    })
+                }
 
-            pub(crate) fn opcode_name_core(op: u8) -> Option<&'static str> {
-                Some(match op {
-                    #(#name_arms)*
-                    _ => return None,
-                })
+                pub(crate) fn opcode_name_core(op: u8) -> Option<&'static str> {
+                    Some(match op {
+                        #(#name_arms)*
+                        _ => return None,
+                    })
+                }
             }
-        }
     };
 
     output.into()
