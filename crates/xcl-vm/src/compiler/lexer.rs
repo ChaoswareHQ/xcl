@@ -166,8 +166,9 @@ pub enum Token {
     /// Variable identifier prefixed with `$` (e.g. `$total`, `$x_1`).
     #[regex(r"\$[a-zA-Z_][a-zA-Z0-9_]*")]
     Ident,
-    /// Special read-only argument variable: `$0`, `$1`, `$#`, `$@`, `$*`.
+    /// Special read-only variable: `$0`, `$1`, `$#`, `$@`, `$*`, `$self`, `$super`.
     #[regex(r"\$[0-9]+|\$[#@*]")]
+    #[regex(r"\$(self|super)")]
     SpecialVar,
     /// Unsupported shell-style special variable: `$$`, `$?`, `$!`, `$-`.
     #[regex(r"\$[!?$-]")]

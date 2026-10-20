@@ -13,6 +13,8 @@ homepage.workspace = true
 default = ["std"]
 std = []
 opcode-stats = []
+# Cranelift-backed JIT for integer loops. Off by default; requires `std`.
+jit = ["std", "dep:xcl-jit"]
 
 [dependencies]
 logos.workspace = true
@@ -23,6 +25,7 @@ bumpalo = { workspace = true, features = ["collections"] }
 smallvec.workspace = true
 hashbrown.workspace = true
 xcl-macros.workspace = true
+xcl-jit = { path = "../xcl-jit", optional = true }
 
 [dev-dependencies]
 criterion.workspace = true

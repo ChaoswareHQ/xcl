@@ -324,6 +324,10 @@ pub enum SpecialVarKind {
     ArgsArray,
     /// `$*` — arguments joined by spaces.
     ArgsJoined,
+    /// `$self` — receiver of the current call (the frame's first argument).
+    SelfValue,
+    /// `$super` — parent record of `$self`.
+    SuperValue,
 }
 
 /// Classification of custom type definitions in XCL.

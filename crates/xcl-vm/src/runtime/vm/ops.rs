@@ -2521,6 +2521,48 @@ mod core_ops {
         OpcodeResult::Next
     }
 
+    /// Resolves `$super`: the parent record of `value`, or `nil`.
+    ///
+    /// XCL records are plain maps, so the type is recovered by finding the most
+    /// specific registered record whose fields are all present. The parent's
+    /// fields are then copied out of the value.
+    fn parent_record(vm: &VM, value: Value) -> Value {
+        use crate::runtime::value::{SUBTYPE_USER_BASE, TypeDescriptor, TypeKind, VARIANT_DEFAULT};
+
+        let Some(map) = value.as_map() else {
+            return Value::nil();
+        };
+
+        let mut best: Option<&TypeDescriptor> = None;
+        let mut best_fields = 0usize;
+        for desc in vm.type_entries.iter() {
+            let desc = *desc;
+            if desc.kind == TypeKind::Record
+                && !desc.fields.is_empty()
+                && desc.fields.len() > best_fields
+                && desc.fields.iter().all(|f| map.contains_key(f.name))
+            {
+                best_fields = desc.fields.len();
+                best = Some(desc);
+            }
+        }
+
+        let Some(parent_name) = best.and_then(|desc| desc.parent_type) else {
+            return Value::nil();
+        };
+        let Some(parent) = vm.type_entries.iter().find(|desc| desc.name == parent_name) else {
+            return Value::nil();
+        };
+
+        let mut fields = crate::HashMap::new();
+        for field in parent.fields {
+            if let Some(v) = map.get(field.name) {
+                fields.insert(field.name.to_string(), *v);
+            }
+        }
+        Value::from_map_boxed_typed_v(fields, SUBTYPE_USER_BASE, VARIANT_DEFAULT)
+    }
+
     /// Pushes a read-only special variable.
     ///
     /// Operand `a` = positional index (`$1..$N`), operand `c` = kind
@@ -2552,6 +2594,24 @@ mod core_ops {
                     joined.push_str(&arg.as_string());
                 }
                 Value::from_str_boxed(joined)
+            }
+            // `$self` is the receiver. Method calls pass the receiver as the
+            // first argument, so the frame's `argv[0]` is the receiver. The
+            // root frame is not a call and has no receiver.
+            sv::SELF => {
+                if top == 0 {
+                    Value::nil()
+                } else {
+                    vm.frames[top].argv.first().copied().unwrap_or(Value::nil())
+                }
+            }
+            sv::SUPER => {
+                let this = if top == 0 {
+                    Value::nil()
+                } else {
+                    vm.frames[top].argv.first().copied().unwrap_or(Value::nil())
+                };
+                parent_record(vm, this)
             }
             _ => Value::nil(),
         };

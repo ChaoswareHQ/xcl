@@ -18,3 +18,8 @@ mimalloc.workspace = true
 xcl-debug.workspace = true
 xcl-plugins.workspace = true
 xcl-vm.workspace = true
+
+[features]
+default = []
+# Enable the Cranelift JIT in the VM (`cargo build -p xcl-cli --features jit`).
+jit = ["xcl-vm/jit"]

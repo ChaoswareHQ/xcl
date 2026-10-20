@@ -1644,6 +1644,8 @@ impl<'a> Parser<'a> {
                     "$#" => (SpecialVarKind::ArgCount, 0),
                     "$@" => (SpecialVarKind::ArgsArray, 0),
                     "$*" => (SpecialVarKind::ArgsJoined, 0),
+                    "$self" => (SpecialVarKind::SelfValue, 0),
+                    "$super" => (SpecialVarKind::SuperValue, 0),
                     text => {
                         let index = text[1..].parse::<u32>().unwrap_or_else(|_| {
                             panic!(

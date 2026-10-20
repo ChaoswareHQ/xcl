@@ -17,10 +17,7 @@
 //! When a [`xcl_vm::VM`] starts up, calling [`register_all`] scans these slices
 //! and populates the VM's internal dispatch tables.
 
-use crate::axioms::AXIOM_ENTRIES;
-use xcl_vm::{
-    ImplDescriptor, NativeEntry, TraitDescriptor, TypeDescriptor, VM,
-};
+use xcl_vm::{ImplDescriptor, NativeEntry, TraitDescriptor, TypeDescriptor, VM};
 
 pub use xcl_vm::{OpcodeEntry, OpcodeFn};
 
@@ -56,7 +53,6 @@ pub fn registered_opcode_name(op: u8) -> Option<&'static str> {
 
 /// Registers all plugin natives, types, traits, impls, and opcodes into the VM.
 pub fn register_all(vm: &mut VM) {
-    vm.register_natives(&AXIOM_ENTRIES);
     vm.register_opcodes(&xcl_plugins::OPCODE_REGISTRY);
     vm.register_natives(&NATIVE_REGISTRY);
     vm.register_types(&TYPE_REGISTRY);

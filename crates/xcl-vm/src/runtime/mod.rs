@@ -13,6 +13,6 @@ pub use value::{
     IntoValue, NamedParam, NativeArg, NativeEntry, NativeKind, RawPtr, SUBTYPE_ERROR,
     SUBTYPE_HANDLE, SUBTYPE_NONE, SUBTYPE_RESULT, SUBTYPE_USER_BASE, TraitDescriptor, TraitMethod,
     TypeDescriptor, TypeField, TypeKind, TypeVariant, VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK,
-    Value, XclObject, XclType, extract_arg,
+    Value, XclType, extract_arg,
 };
 pub use vm::{DomainSlot, VM};

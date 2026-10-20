@@ -1596,6 +1596,8 @@ impl Compiler {
                     SpecialVarKind::ArgCount => sv::ARG_COUNT,
                     SpecialVarKind::ArgsArray => sv::ARGS_ARRAY,
                     SpecialVarKind::ArgsJoined => sv::ARGS_JOINED,
+                    SpecialVarKind::SelfValue => sv::SELF,
+                    SpecialVarKind::SuperValue => sv::SUPER,
                 };
                 // a = positional index (32-bit), c = kind (8-bit)
                 self.emit(Instr::make(OP_SPECIAL_VAR, *index, 0, kind_code));

@@ -309,6 +309,173 @@ fn frame_code_bounds(frame: &Frame) -> (*const Instr, usize) {
     (code.instructions.as_ptr(), code.instructions.len())
 }
 
+/// A loop compiled to native code (feature `jit`).
+#[cfg(feature = "jit")]
+#[derive(Clone, Copy)]
+struct JitEntry {
+    /// Interpreter ip to resume at after a normal exit.
+    exit_ip: usize,
+    /// Native entry point.
+    func: xcl_jit::LoopFn,
+    /// First index into `JitUnit::accesses`.
+    access_start: u32,
+    /// Number of access plans for this loop.
+    access_len: u32,
+}
+
+/// All native loops compiled for one bytecode unit.
+#[cfg(feature = "jit")]
+struct JitUnit {
+    entries: Vec<JitEntry>,
+    /// `shadow[ip]` is `0` when no loop starts at `ip`, otherwise `index + 1`.
+    /// A flat table keeps the dispatch check to a bounds test and one load.
+    shadow: Vec<u32>,
+    /// Memory-access plans, in entry order.
+    accesses: Vec<xcl_jit::AccessPlan>,
+    /// One runtime cache per compiled loop.
+    caches: Vec<xcl_jit::LoopCache>,
+}
+
+/// The plan passed to the dispatch loop.
+#[cfg(feature = "jit")]
+type JitPlan<'a> = Option<&'a mut JitUnit>;
+/// Without the feature, the dispatch loop has no plan at all.
+#[cfg(not(feature = "jit"))]
+type JitPlan<'a> = Option<&'a mut ()>;
+
+/// The maximum number of compiled loops tracked per unit. The bail-out mask is
+/// a `u64`, one bit per loop.
+#[cfg(feature = "jit")]
+const JIT_MAX_LOOPS: usize = 64;
+
+/// Finds and compiles every hot integer loop of `bc`.
+///
+/// The compiled code is cached by `xcl-jit` for the life of the process, so
+/// repeated `run` calls on the same bytecode pay the compile cost once.
+#[cfg(feature = "jit")]
+fn prepare_jit(bc: &Bytecode) -> Option<JitUnit> {
+    // Cheap rejection first: most units have no fused `while` header at all, so
+    // they must not pay for an instruction copy or a Cranelift lookup.
+    let has_while = bc.instructions.iter().any(|i| {
+        matches!(
+            i.op(),
+            crate::runtime::vm::ops::consts::OP_WHILE_LT_INT
+                | crate::runtime::vm::ops::consts::OP_WHILE_LT_INT_WIDE
+        )
+    });
+    if !has_while {
+        return None;
+    }
+    let code: Vec<u64> = bc.instructions.iter().map(|i| i.0).collect();
+    let specs = xcl_jit::find_loops(&code, &bc.wide_operands);
+    if specs.is_empty() {
+        return None;
+    }
+    let nlocals = bc.local_names.len().max(16);
+    let mut entries = Vec::with_capacity(specs.len().min(JIT_MAX_LOOPS));
+    let mut accesses: Vec<xcl_jit::AccessPlan> = Vec::new();
+    let mut caches: Vec<xcl_jit::LoopCache> = Vec::new();
+    let mut shadow = vec![0u32; code.len()];
+    for spec in specs.iter().take(JIT_MAX_LOOPS) {
+        if let Some(compiled) = xcl_jit::ensure_compiled(&code, &bc.wide_operands, spec, nlocals) {
+            let idx = entries.len();
+            let access_start = accesses.len() as u32;
+            accesses.extend_from_slice(&compiled.accesses);
+            entries.push(JitEntry {
+                exit_ip: compiled.exit_ip,
+                func: compiled.func,
+                access_start,
+                access_len: compiled.accesses.len() as u32,
+            });
+            caches.push(xcl_jit::LoopCache::default());
+            shadow[spec.start] = (idx + 1) as u32;
+        }
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    Some(JitUnit {
+        entries,
+        shadow,
+        accesses,
+        caches,
+    })
+}
+
+/// Largest array the JIT will scan to prove every element is an integer.
+/// Above this, the loop stays interpreted rather than paying an O(n) scan.
+#[cfg(feature = "jit")]
+const JIT_ARRAY_SCAN_MAX: usize = 4096;
+
+/// Fills a loop's access cache from the current frame registers.
+///
+/// Returns `false` when a container is not the expected type (for example a
+/// map where the loop expects an array); the caller then leaves the loop to
+/// the interpreter.
+#[cfg(feature = "jit")]
+fn fill_loop_cache(
+    regs: &[Value],
+    bc: &Bytecode,
+    unit: &mut JitUnit,
+    idx: usize,
+    base: usize,
+) -> bool {
+    use crate::runtime::value::TAG_INT;
+
+    let entry = unit.entries[idx];
+    let start = entry.access_start as usize;
+    let end = start + entry.access_len as usize;
+    let plans = match unit.accesses.get(start..end) {
+        Some(p) => p,
+        None => return false,
+    };
+    let cache = match unit.caches.get_mut(idx) {
+        Some(c) => c,
+        None => return false,
+    };
+    for (plan, slot) in plans.iter().zip(cache.accesses.iter_mut()) {
+        let Some(&obj) = regs.get(base + plan.object_slot as usize) else {
+            return false;
+        };
+        match plan.kind {
+            xcl_jit::AccessKind::ArrayIndex => {
+                let Some(arr) = obj.as_array() else {
+                    return false;
+                };
+                // The generated loop skips per-element tag checks, so only
+                // cache an array whose elements are all integers.
+                if arr.len() > JIT_ARRAY_SCAN_MAX || !arr.iter().all(|v| v.tag() == TAG_INT) {
+                    return false;
+                }
+                *slot = xcl_jit::AccessCache {
+                    object: obj.0,
+                    data: arr.as_ptr().cast::<u64>(),
+                    len: arr.len(),
+                    value: 0,
+                };
+            }
+            xcl_jit::AccessKind::MapField => {
+                let Some(&key) = bc.string_values.get(plan.key_slot as usize) else {
+                    return false;
+                };
+                let Some(field) = obj.as_map().and_then(|m| m.get_fast_value(key)) else {
+                    return false;
+                };
+                if field.tag() != TAG_INT {
+                    return false;
+                }
+                *slot = xcl_jit::AccessCache {
+                    object: obj.0,
+                    data: core::ptr::null(),
+                    len: 0,
+                    value: field.0,
+                };
+            }
+        }
+    }
+    true
+}
+
 /// A dispatch table slot containing all methods registered for a specific domain namespace.
 #[derive(Clone)]
 pub struct DomainSlot {
@@ -353,7 +520,7 @@ pub struct VM {
     pub impl_index: Vec<&'static ImplDescriptor>,
     /// Flat list of registered native entries (for override_by_trait lookups).
     pub native_entries: Vec<&'static NativeEntry>,
-    /// Flat list of registered type descriptors (for axiom type/super lookups).
+    /// Flat list of registered type descriptors (used by `$super` lookups).
     pub type_entries: Vec<&'static TypeDescriptor>,
     /// Fast bump allocator arena for temporary heap objects created during execution.
     pub arena: Bump,
@@ -770,8 +937,9 @@ impl VM {
 
     /// Looks up a universal method (domain=None) by name.
     ///
-    /// Universal methods like `type` and `super` are available on all values
-    /// regardless of their type.
+    /// Universal methods are natives registered without a domain (for example
+    /// plugin-provided helpers); the `$` axioms are VM keywords and do not go
+    /// through this table.
     fn resolve_universal_method(&self, method: &str) -> Option<&BuiltinImpl> {
         self.global_index
             .get(method)
@@ -851,6 +1019,22 @@ impl VM {
     /// (the arena is reset). The result is escaped before return so it survives
     /// the next `run()` call.
     pub fn run(&mut self, bc: &Bytecode) -> Value {
+        #[cfg(feature = "jit")]
+        if let Some(mut jit) = prepare_jit(bc) {
+            return self.run_inner::<true>(bc, Some(&mut jit));
+        }
+        self.run_inner::<false>(bc, None)
+    }
+
+    /// Dispatch loop, monomorphised on whether a native loop is installed.
+    ///
+    /// `JIT == false` contains no JIT code at all, so interpreted programs pay
+    /// nothing for the feature being compiled in.
+    fn run_inner<const JIT: bool>(&mut self, bc: &Bytecode, jit: JitPlan<'_>) -> Value {
+        #[cfg(feature = "jit")]
+        let mut jit = jit;
+        #[cfg(not(feature = "jit"))]
+        let _ = jit;
         self.stack.clear();
         self.frame_depth = 0;
         if self.frames.len() > 4096 {
@@ -939,6 +1123,20 @@ impl VM {
         let (mut code_ptr, mut code_len) = frame_code_bounds(&self.frames[top]);
         let mut locals = self.frames[top].locals;
 
+        // Native loop state. The shadow table maps an instruction to its
+        // compiled loop; `jit_disabled` remembers loops that bailed out during
+        // this run. It applies only to the root frame's own bytecode. With
+        // `JIT == false` every use of these is eliminated.
+        #[cfg(feature = "jit")]
+        let (jit_shadow_ptr, jit_shadow_len) = match jit.as_deref() {
+            Some(u) => (u.shadow.as_ptr(), u.shadow.len()),
+            None => (core::ptr::null(), 0),
+        };
+        #[cfg(feature = "jit")]
+        let mut jit_disabled: u64 = 0;
+        #[cfg(feature = "jit")]
+        let root_code_ptr = bc.instructions.as_ptr();
+
         loop {
             if ip >= code_len {
                 // Run deferred closures before returning
@@ -965,6 +1163,45 @@ impl VM {
             }
 
             let instr = unsafe { *code_ptr.add(ip) };
+
+            // Enter a native loop when the root frame reaches a compiled
+            // header. The check is gated on the loop-header opcode, so
+            // interpreted instructions pay one compare rather than a shadow
+            // load. A bailout (non-integer local, multiply overflow, division
+            // by zero) leaves the register file untouched, so the interpreter
+            // re-executes the loop; that loop is disabled for the rest of this
+            // run. In the `JIT == false` instantiation this block is gone.
+            #[cfg(feature = "jit")]
+            if JIT && top == 0 && code_ptr == root_code_ptr && jit_shadow_len != 0 {
+                let op = instr.op();
+                if op == ops::consts::OP_WHILE_LT_INT || op == ops::consts::OP_WHILE_LT_INT_WIDE {
+                    // SAFETY: `ip < code_len`, and the shadow belongs to the
+                    // root bytecode, so its length is `code_len`.
+                    let slot = unsafe { *jit_shadow_ptr.add(ip) };
+                    let idx = slot.wrapping_sub(1) as usize;
+                    if slot != 0 && idx < JIT_MAX_LOOPS && jit_disabled & (1u64 << idx) == 0 {
+                        if let Some(unit) = jit.as_deref_mut() {
+                            let entry = unit.entries[idx];
+                            let base = self.frames[top].local_base as usize;
+                            if !fill_loop_cache(&self.regs, bc, unit, idx, base) {
+                                jit_disabled |= 1u64 << idx;
+                            } else {
+                                let ptr = unsafe { self.regs.as_mut_ptr().add(base) }.cast::<u64>();
+                                // SAFETY: `ptr` addresses the root frame's registers,
+                                // the frame is active, and the JIT only touches its locals.
+                                let cache_ptr: *mut xcl_jit::LoopCache = &raw mut unit.caches[idx];
+                                let rc = unsafe { (entry.func)(ptr, cache_ptr) };
+                                if rc == 0 {
+                                    ip = entry.exit_ip;
+                                    continue;
+                                }
+                                jit_disabled |= 1u64 << idx;
+                            }
+                        }
+                    }
+                }
+            }
+
             let action = self.dispatch(locals, top, instr);
             match action {
                 Action::Next => ip += 1,
@@ -1115,7 +1352,7 @@ impl VM {
         {
             let frame = &mut self.frames[idx];
             frame.ip = 0;
-            frame.stack_base = arg_base as u32;
+            frame.stack_base = arg_start as u32;
 
             if func.uses_special_vars {
                 frame
@@ -2098,5 +2335,164 @@ mod tests {
     fn vm_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<VM>();
+    }
+
+    // ── JIT (feature `jit`) ──
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_compiles_integer_loops_and_matches_an_oracle() {
+        // Counting loop: the JIT must produce the same value as the oracle.
+        let src = "$i = 0\n$s = 0\nwhile $i < 1000 {\n    $s = $s + $i\n    $i = $i + 1\n}\n$s";
+        let tokens = lex(src, "<test>");
+        let ast = parse(&tokens, src);
+        let bc = compile(&ast);
+        assert!(prepare_jit(&bc).is_some(), "counting loop should compile");
+        let mut vm = VM::new();
+        assert_eq!(vm.run(&bc).as_i48(), 499_500);
+
+        // Mock LCG: compiler output checked against a Rust oracle.
+        let src = "$x = 42\n$i = 0\nwhile $i < 100000 {\n    $x = ($x * 37 + 12345) % 1000003\n    $i = $i + 1\n}\n$x";
+        let tokens = lex(src, "<test>");
+        let ast = parse(&tokens, src);
+        let bc = compile(&ast);
+        assert!(prepare_jit(&bc).is_some(), "lcg loop should compile");
+        let mut expect = 42i64;
+        for _ in 0..100_000 {
+            expect = (expect * 37 + 12_345) % 1_000_003;
+        }
+        let mut vm = VM::new();
+        assert_eq!(vm.run(&bc).as_i48(), expect);
+
+        // Bitwise loop: shifts, or, and.
+        let src = "$x = 12345\n$i = 0\nwhile $i < 200000 {\n    $x = (($x << 5) | ($x >> 3)) & 16777215\n    $x = ($x + $i) & 16777215\n    $i = $i + 1\n}\n$x";
+        let tokens = lex(src, "<test>");
+        let ast = parse(&tokens, src);
+        let bc = compile(&ast);
+        assert!(prepare_jit(&bc).is_some(), "bitwise loop should compile");
+        let mut x = 12345i64;
+        let mut i = 0i64;
+        while i < 200_000 {
+            x = ((x << 5) | (x >> 3)) & 16_777_215;
+            x = (x + i) & 16_777_215;
+            i += 1;
+        }
+        let mut vm = VM::new();
+        assert_eq!(vm.run(&bc).as_i48(), x);
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_compiles_every_loop_in_a_unit() {
+        let src = "$a = 0\n$i = 0\nwhile $i < 100 {\n    $a = $a + $i\n    $i = $i + 1\n}\n$b = 0\n$j = 0\nwhile $j < 100 {\n    $b = $b + 1\n    $j = $j + 1\n}\n$a + $b";
+        let tokens = lex(src, "<test>");
+        let ast = parse(&tokens, src);
+        let bc = compile(&ast);
+        let unit = prepare_jit(&bc).expect("both loops compile");
+        assert_eq!(unit.entries.len(), 2, "expected two compiled loops");
+        assert_eq!(
+            unit.shadow.iter().filter(|&&s| s != 0).count(),
+            2,
+            "both headers must be in the shadow table"
+        );
+        let mut vm = VM::new();
+        assert_eq!(vm.run(&bc).as_i48(), 4950 + 100);
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_compiles_array_index_loops() {
+        let src = "$a = [10,20,30,40,50]\n$i = 0\n$s = 0\nwhile $i < 5 {\n    $s = $s + $a[$i]\n    $i = $i + 1\n}\n$s";
+        let tokens = lex(src, "<test>");
+        let ast = parse(&tokens, src);
+        let bc = compile(&ast);
+        let unit = prepare_jit(&bc).expect("array loop compiles");
+        assert_eq!(unit.entries.len(), 1);
+        assert_eq!(unit.entries[0].access_len, 1, "one array access site");
+        let mut vm = VM::new();
+        assert_eq!(vm.run(&bc).as_i48(), 150);
+
+        // Negative indices are normalised exactly like the interpreter.
+        let src = "$a = [10,20,30]\n$i = -3\n$s = 0\nwhile $i < 0 {\n    $s = $s + $a[$i]\n    $i = $i + 1\n}\n$s";
+        let tokens = lex(src, "<test>");
+        let ast = parse(&tokens, src);
+        let bc = compile(&ast);
+        let mut vm = VM::new();
+        assert_eq!(vm.run(&bc).as_i48(), 60);
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_falls_back_when_the_container_is_not_an_array() {
+        // The loop is structurally compilable, but the local is a map. The
+        // cache fill must fail and the interpreter must produce the result.
+        let src = "$m = { a: 1, b: 2 }\n$i = 0\n$s = 0\nwhile $i < 10 {\n    $s = $s + $m[\"a\"]\n    $i = $i + 1\n}\n$s";
+        let tokens = lex(src, "<test>");
+        let ast = parse(&tokens, src);
+        let bc = compile(&ast);
+        let mut vm = VM::new();
+        assert_eq!(vm.run(&bc).as_i48(), 10);
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_compiles_map_field_loops() {
+        let src = "$m = { a: 1, b: 2, c: 3 }\n$i = 0\n$s = 0\nwhile $i < 10 {\n    $s = $s + $m.a\n    $s = $s + $m.b\n    $s = $s + $m.c\n    $i = $i + 1\n}\n$s";
+        let tokens = lex(src, "<test>");
+        let ast = parse(&tokens, src);
+        let bc = compile(&ast);
+        let unit = prepare_jit(&bc).expect("map loop compiles");
+        assert_eq!(unit.entries.len(), 1);
+        assert_eq!(unit.entries[0].access_len, 3, "three field reads");
+        let mut vm = VM::new();
+        assert_eq!(vm.run(&bc).as_i48(), 60);
+
+        // A non-integer field makes the cache fill fail; the interpreter must
+        // still produce the right value.
+        let src = "$m = { a: 1.5 }\n$i = 0\n$s = 0\nwhile $i < 10 {\n    $s = $s + $m.a\n    $i = $i + 1\n}\n$s";
+        let tokens = lex(src, "<test>");
+        let ast = parse(&tokens, src);
+        let bc = compile(&ast);
+        let mut vm = VM::new();
+        assert_eq!(vm.run(&bc).as_f64(), 15.0);
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_rejects_non_integer_loops() {
+        // A float multiplication inside the body: outside the integer subset.
+        let src = "$x = 1\n$i = 0\nwhile $i < 100 {\n    $x = $x * 1.5\n    $i = $i + 1\n}\n$x";
+        let tokens = lex(src, "<test>");
+        let ast = parse(&tokens, src);
+        let bc = compile(&ast);
+        assert!(prepare_jit(&bc).is_none(), "float loop must not compile");
+        let mut vm = VM::new();
+        assert!(vm.run(&bc).is_float());
+
+        // A `for` loop is not a `while` header.
+        let src = "$s = 0\nfor $i in 0..100 {\n    $s = $s + $i\n}\n$s";
+        let tokens = lex(src, "<test>");
+        let ast = parse(&tokens, src);
+        let bc = compile(&ast);
+        assert!(prepare_jit(&bc).is_none(), "range loop must not compile");
+        let mut vm = VM::new();
+        assert_eq!(vm.run(&bc).as_i48(), 4950);
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_bails_out_without_committing_state() {
+        // The counter starts as a float: the entry guard must bail and leave
+        // the register file untouched for the interpreter.
+        let src = "$i = 1.5\n$s = 0\nwhile $i < 5 {\n    $s = $s + 1\n    $i = $i + 1\n}\n$s";
+        let tokens = lex(src, "<test>");
+        let ast = parse(&tokens, src);
+        let bc = compile(&ast);
+        assert!(
+            prepare_jit(&bc).is_some(),
+            "loop is compilable; guard decides"
+        );
+        let mut vm = VM::new();
+        assert_eq!(vm.run(&bc).as_i48(), 4);
     }
 }

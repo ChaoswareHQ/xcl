@@ -79,6 +79,10 @@ pub mod special_var_kind {
     pub const ARGS_ARRAY: u8 = 3;
     /// `$*` — arguments joined by spaces.
     pub const ARGS_JOINED: u8 = 4;
+    /// `$self` — receiver of the current call.
+    pub const SELF: u8 = 5;
+    /// `$super` — parent record of `$self`.
+    pub const SUPER: u8 = 6;
 }
 
 /// Layout of the 8-bit opcode space.
@@ -132,8 +136,8 @@ pub mod layout {
     /// Core codes with no opcode today: reserved growth space for new
     /// superinstructions. Keep in sync when adding an opcode.
     pub const CORE_GROWTH: &[u8] = &[
-        31, 40, 41, 48, 49, 50, 51, 54, 55, 56, 57, 58, 59, 70, 71, 72, 73, 74, 75, 76,
-        77, 78, 79, 86, 87, 88, 89,
+        31, 40, 41, 48, 49, 50, 51, 54, 55, 56, 57, 58, 59, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
+        86, 87, 88, 89,
     ];
 
     /// Returns `true` when `op` belongs to the core range.

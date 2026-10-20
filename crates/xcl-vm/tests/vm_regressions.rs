@@ -1154,3 +1154,90 @@ fn vm_is_send() {
     fn assert_send<T: Send>() {}
     assert_send::<xcl_vm::VM>();
 }
+
+// ── `$self` / `$super` are VM keywords (not plugin methods) ──
+
+static BASE_FIELDS: &[xcl_vm::TypeField] = &[xcl_vm::TypeField {
+    name: "x",
+    ty: "i64",
+    optional: false,
+}];
+static CHILD_FIELDS: &[xcl_vm::TypeField] = &[
+    xcl_vm::TypeField {
+        name: "x",
+        ty: "i64",
+        optional: false,
+    },
+    xcl_vm::TypeField {
+        name: "y",
+        ty: "i64",
+        optional: false,
+    },
+];
+static RECORD_TYPES: &[xcl_vm::TypeDescriptor] = &[
+    xcl_vm::TypeDescriptor {
+        name: "Base",
+        domain: None,
+        kind: xcl_vm::TypeKind::Record,
+        fields: BASE_FIELDS,
+        variants: &[],
+        summary: None,
+        parent_type: None,
+    },
+    xcl_vm::TypeDescriptor {
+        name: "Child",
+        domain: None,
+        kind: xcl_vm::TypeKind::Record,
+        fields: CHILD_FIELDS,
+        variants: &[],
+        summary: None,
+        parent_type: Some("Base"),
+    },
+];
+
+fn eval_with_records(src: &str) -> xcl_vm::Value {
+    let tokens = xcl_vm::lexer::lex(src, "<test>");
+    let ast = xcl_vm::parser::parse(&tokens, src);
+    let bc = xcl_vm::bytecode::compile(&ast);
+    let mut vm = xcl_vm::VM::new();
+    vm.register_types(RECORD_TYPES);
+    let result = vm.run(&bc);
+    core::mem::forget(vm);
+    result
+}
+
+#[test]
+fn self_is_nil_at_top_level() {
+    assert!(eval("$self").is_nil());
+}
+
+#[test]
+fn self_is_the_first_call_argument() {
+    let v = eval_with_records("pick($v) { $self }; pick { x: 7, y: 8 }");
+    let map = v.as_map().expect("map");
+    assert_eq!(map.get("y").map(|v| v.as_i48()), Some(8));
+}
+
+#[test]
+fn super_returns_the_parent_record() {
+    let v = eval_with_records("parent($v) { $super }; parent { x: 7, y: 8 }");
+    let map = v.as_map().expect("parent map");
+    assert_eq!(map.len(), 1, "only the parent fields are copied");
+    assert_eq!(map.get("x").map(|v| v.as_i48()), Some(7));
+    assert!(map.get("y").is_none());
+}
+
+#[test]
+fn super_is_nil_without_a_registered_parent() {
+    // `Base` has no parent; its own fields must not be returned.
+    assert!(eval_with_records("parent($v) { $super }; parent { x: 7 }").is_nil());
+    // A non-record is not a parent candidate.
+    assert!(eval_with_records("parent($v) { $super }; parent 7").is_nil());
+}
+
+#[test]
+fn self_prefixed_variables_are_not_keywords() {
+    // `$selfish` and `$superb` must stay normal variables: the lexer picks the
+    // longest match, so only the exact `$self` / `$super` tokens are special.
+    assert_eq!(eval_i64("$selfish = 5; $superb = 2; $selfish + $superb"), 7);
+}

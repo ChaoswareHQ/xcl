@@ -14,11 +14,9 @@
 extern crate self as xcl_plugins;
 
 pub mod args;
-pub mod errors;
-mod axioms;
-mod registry;
 #[cfg(feature = "encoding")]
 mod encoding;
+pub mod errors;
 #[cfg(feature = "fs")]
 mod fs;
 #[cfg(feature = "io")]
@@ -27,6 +25,7 @@ mod io;
 mod math;
 #[cfg(feature = "net")]
 mod net;
+mod registry;
 
 mod wellknown;
 
@@ -36,8 +35,8 @@ mod opcode_test;
 pub use args::split_named_args;
 pub use errors::{Group, is_known_kind};
 pub use registry::{
-    register_all, IMPL_REGISTRY, NATIVE_REGISTRY, OPCODE_REGISTRY, TRAIT_REGISTRY, TYPE_REGISTRY,
-    OpcodeEntry, OpcodeFn, registered_opcode_name,
+    IMPL_REGISTRY, NATIVE_REGISTRY, OPCODE_REGISTRY, OpcodeEntry, OpcodeFn, TRAIT_REGISTRY,
+    TYPE_REGISTRY, register_all, registered_opcode_name,
 };
 pub use wellknown::WellKnown;
 pub use xcl_vm;

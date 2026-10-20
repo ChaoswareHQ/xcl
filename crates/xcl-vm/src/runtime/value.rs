@@ -1458,10 +1458,14 @@ impl Value {
                         entries.insert(k.to_string(), Self::escape_inner(*val, memo));
                     }
                 }
-                let out = Self::from_map_boxed_typed_v(entries, v.map_subtype().unwrap_or(SUBTYPE_NONE), {
-                    // Preserve the variant tag (result/error/handle).
-                    unsafe { (*v.as_ptr::<HeapMap>()).header.variant }
-                });
+                let out = Self::from_map_boxed_typed_v(
+                    entries,
+                    v.map_subtype().unwrap_or(SUBTYPE_NONE),
+                    {
+                        // Preserve the variant tag (result/error/handle).
+                        unsafe { (*v.as_ptr::<HeapMap>()).header.variant }
+                    },
+                );
                 memo.insert(v.0, out);
                 out
             }
@@ -2179,7 +2183,7 @@ impl Drop for GlobalOverrideGuard<'_> {
     }
 }
 
-// — XclObject / XclType traits for universal methods and Self/Super support —
+// — XclType trait for Rust/XCL record conversion —
 
 /// Core trait for any Rust type that can be serialized to/from XCL `Value::Map`.
 ///
@@ -2191,32 +2195,4 @@ pub trait XclType: Sized {
 
     /// Serialize this Rust struct into an XCL `Value::Map`.
     fn to_value(&self) -> Value;
-}
-
-/// Universal trait available on all XCL values.
-///
-/// Provides methods like `type` and `super` that work on any value in the XCL VM.
-/// These are provided by the standard plugin layer.
-pub trait XclObject {
-    /// Returns the type name of the value as a string.
-    fn xcl_type_name(&self) -> String;
-
-    /// Returns the parent (base) struct of a composed type, if applicable.
-    fn xcl_super(&self) -> Option<Value>;
-}
-
-/// Blanket implementation: any type that implements `XclType` automatically gets `XclObject`.
-impl<T: XclType> XclObject for T {
-    fn xcl_type_name(&self) -> String {
-        // The type name is inferred from the VM type entries
-        // This is a fallback — the universal `type` axiom provides the actual
-        // implementation that checks VM type entries
-        "unknown".to_string()
-    }
-
-    fn xcl_super(&self) -> Option<Value> {
-        // The actual super resolution is handled by the universal `super` axiom
-        // which checks VM type entries for parent_type
-        None
-    }
 }
