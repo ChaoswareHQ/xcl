@@ -1,4 +1,4 @@
-﻿//! Dead store elimination: removes STORE instructions whose values are never read.
+//! Dead store elimination: removes STORE instructions whose values are never read.
 //!
 //! Uses live variable analysis from [`super::dataflow`] to identify dead stores.
 
@@ -20,7 +20,7 @@ use crate::bytecode::{
     OP_LOAD_LOCAL_STORE_LOCAL, OP_LT_LOCAL_LOCAL, OP_MOD_LOCAL_LOCAL_STORE, OP_MUL_FLOAT_LOCAL,
     OP_MUL_INT_LOCAL, OP_MUL_LOCAL_LOCAL, OP_MUL_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_STORE,
     OP_SUB_FLOAT_LOCAL, OP_SUB_INT_LOCAL, OP_SUB_LOCAL_LOCAL, OP_SUB_LOCAL_LOCAL_STORE,
-    OP_SUB_LOCAL_STORE, OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,
+    OP_SUB_LOCAL_STORE, OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL, OP_IF_LT_INT, OP_IF_EQ_INT,
 };
 use crate::runtime::vm::ops::consts::{
     OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_GLOBAL, OP_LOAD_LOCAL, OP_STORE_LOCAL,
@@ -137,6 +137,12 @@ pub fn eliminate_dead_stores(code: &mut Vec<Instr>, wide: &mut [i64]) {
                             }
                             OP_ARRAY_PUSH_LOCAL => {
                                 if later.a() == slot || later.b() as u32 == slot {
+                                    found_use = true;
+                                    break;
+                                }
+                            }
+                            OP_IF_LT_INT | OP_IF_EQ_INT => {
+                                if later.a() == slot {
                                     found_use = true;
                                     break;
                                 }

@@ -373,6 +373,48 @@ impl Compiler {
         }
     }
 
+    /// Emits `local[a] ± int` as a single push when a call argument has that
+    /// shape. Returns `true` if the fused opcode was emitted.
+    /// Emits call arguments, fusing `local ± int` into a single push.
+    fn emit_call_args(&mut self, args: &[CallArg]) {
+        for a in args {
+            if !self.try_emit_arg_fused(&a.value) {
+                self.node(&a.value);
+            }
+        }
+    }
+
+    fn try_emit_arg_fused(&mut self, node: &AstNode) -> bool {
+        let AstNode::BinaryOp { left, op, right, .. } = node else {
+            return false;
+        };
+        let AstNode::Ident { name, .. } = left.as_ref() else {
+            return false;
+        };
+        let AstNode::Int { value, .. } = right.as_ref() else {
+            return false;
+        };
+        if self.is_global(name) || !(0..=u16::MAX as i64).contains(value) {
+            return false;
+        }
+        let Some(slot) = self.locals.iter().position(|n| &**n == name) else {
+            return false;
+        };
+        let kind = match op {
+            BinaryOperator::Add => 0u8,
+            BinaryOperator::Sub => 1u8,
+            BinaryOperator::Mul => 2u8,
+            _ => return false,
+        };
+        self.emit(Instr::make(
+            OP_PUSH_LOCAL_INT_OP,
+            slot as u32,
+            *value as u16,
+            kind,
+        ));
+        true
+    }
+
     /// Try to fuse a nested binary expression into superinstructions.
     /// For example, `$zr = $zr*$zr - $zi*$zi + $cr` becomes:
     ///   MUL_LL_ST(temp1, zr, zr)
@@ -769,9 +811,7 @@ impl Compiler {
                         // Emit OP_TAIL_CALL: callee string + args, then continue (no new frame)
                         let i = self.intern(name);
                         self.emit(Instr::a1(OP_PUSH_STR, i));
-                        for a in args {
-                            self.node(&a.value);
-                        }
+                        self.emit_call_args(args);
                         self.emit(Instr::a2(OP_TAIL_CALL, args.len() as u32, 0));
                         return;
                     }
@@ -791,6 +831,62 @@ impl Compiler {
                 else_branch,
                 ..
             } => {
+                // `if $x < N` / `if $x == N` fuse the compare and the branch
+                // into one dispatch. The branch target goes in the wide table.
+                let fused = match condition.as_ref() {
+                    AstNode::BinaryOp { left, op, right, .. } => {
+                        match (left.as_ref(), right.as_ref()) {
+                            (AstNode::Ident { name, .. }, AstNode::Int { value, .. })
+                                if !self.is_global(name)
+                                    && *value >= 0
+                                    && *value <= u16::MAX as i64 =>
+                            {
+                                let slot = self
+                                    .locals
+                                    .iter()
+                                    .position(|n| &**n == name)
+                                    .map(|i| i as u32);
+                                slot.and_then(|slot| match op {
+                                    BinaryOperator::Lt => {
+                                        Some((OP_IF_LT_INT, slot, *value as u16))
+                                    }
+                                    BinaryOperator::Eq => {
+                                        Some((OP_IF_EQ_INT, slot, *value as u16))
+                                    }
+                                    _ => None,
+                                })
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+
+                if let Some((opc, slot, limit)) = fused
+                    && self.wide.len() < 256
+                {
+                    let widx = self.wide(0) as u8;
+                    self.emit(Instr::make(opc, slot, limit, widx));
+                    for s in then_branch {
+                        self.node(s);
+                    }
+                    if let Some(e) = else_branch {
+                        let j2 = self.ip();
+                        self.emit(Instr::a1(OP_JUMP, 0));
+                        let t = self.ip();
+                        self.wide[widx as usize] = t as i64;
+                        for s in e {
+                            self.node(s);
+                        }
+                        let end = self.ip();
+                        self.patch_jump(j2, end);
+                    } else {
+                        let end = self.ip();
+                        self.wide[widx as usize] = end as i64;
+                    }
+                    return;
+                }
+
                 self.node(condition);
                 let j = self.ip();
                 self.emit(Instr::a1(OP_JUMP_IF_FALSE, 0));
@@ -1121,9 +1217,7 @@ impl Compiler {
                             self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
                         }
                         // Push args
-                        for a in args {
-                            self.node(&a.value);
-                        }
+                        self.emit_call_args(args);
                         self.emit(Instr::a2(OP_CALL_METHOD, field_idx, args.len() as u16));
                     } else if is_local && parts.len() == 1 {
                         // Single-part local variable call: $f() or $f arg
@@ -1135,17 +1229,13 @@ impl Compiler {
                         {
                             self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
                         }
-                        for a in args {
-                            self.node(&a.value);
-                        }
+                        self.emit_call_args(args);
                         self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
                     } else {
                         // It's a domain call: net.tcp.connect or io.read
                         let i = self.intern(&name);
                         self.emit(Instr::a1(OP_PUSH_STR, i));
-                        for a in args {
-                            self.node(&a.value);
-                        }
+                        self.emit_call_args(args);
                         self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
                     }
                 } else if let AstNode::Ident { name, .. } = callee.as_ref() {
@@ -1162,15 +1252,11 @@ impl Compiler {
                         let i = self.intern(name);
                         self.emit(Instr::a1(OP_PUSH_STR, i));
                     }
-                    for a in args {
-                        self.node(&a.value);
-                    }
+                    self.emit_call_args(args);
                     self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
                 } else {
                     self.node(callee);
-                    for a in args {
-                        self.node(&a.value);
-                    }
+                    self.emit_call_args(args);
                     self.emit(Instr::a2(OP_CALL, args.len() as u32, 0));
                 }
             }

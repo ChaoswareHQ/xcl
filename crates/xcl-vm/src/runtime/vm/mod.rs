@@ -143,28 +143,25 @@ impl OpcodeCounter {
 }
 
 /// Action the VM dispatch loop should take after executing an instruction.
-enum Action {
-    /// Advance to the next instruction.
-    Next,
-    /// Jump to the given instruction pointer.
-    Jump(u32),
-    /// Return from the current frame.
-    Return,
-    /// Push the pending frame onto the frame stack.
-    PushFrame,
-    /// The current frame switched to different bytecode (tail call).
-    TailCall,
-}
+/// What the dispatch loop should do after an instruction.
+///
+/// This used to be a separate enum with the same five variants as
+/// [`OpcodeResult`], built by converting the handler's result on every single
+/// instruction. They are now the same type.
+type Action = crate::runtime::opcode::OpcodeResult;
 
 pub(crate) struct Frame {
     code: Arc<Bytecode>,
-    /// Local slots.
+    /// This frame's local slots inside the VM's shared register file.
     ///
-    /// A plain `Vec` (not `SmallVec`) on purpose: every local read does
-    /// `get_unchecked`, and `SmallVec` must branch on inline-vs-heap for each
-    /// access. It also shrinks `Frame` by ~112 bytes, which is memcpy'd three
-    /// times per call (pool → frames → pool).
-    locals: Vec<Value>,
+    /// Copyable and pointer-based: handlers need to read/write registers while
+    /// still touching other VM fields (`arena`, `stack`), which a `&mut [Value]`
+    /// borrowed through a method would forbid. One contiguous register file for
+    /// all frames (Luau's `base`/`regs[base + i]` design) means entering a call
+    /// is a `resize`, not a fresh vector per depth.
+    locals: LocalSlice,
+    /// Start of this frame's registers, as an index into `VM::regs`.
+    local_base: u32,
     ip: u32,
     /// Iteration buffer for `for x in array`.
     ///
@@ -182,6 +179,66 @@ pub(crate) struct Frame {
     /// Positional arguments passed into this frame (`$1`, `$#`, `$@`, `$*`).
     argv: Vec<Value>,
 }
+
+/// A frame's view of the shared register file (`VM::regs[base..base + len]`).
+#[derive(Clone, Copy)]
+pub(crate) struct LocalSlice {
+    ptr: *mut Value,
+    len: u32,
+}
+
+impl LocalSlice {
+    const EMPTY: Self = Self {
+        ptr: core::ptr::NonNull::<Value>::dangling().as_ptr(),
+        len: 0,
+    };
+
+    /// # Safety
+    /// `i` must be a valid slot index for this frame.
+    #[inline(always)]
+    pub(crate) unsafe fn get_unchecked(&self, i: usize) -> &'static Value {
+        unsafe { &*self.ptr.add(i) }
+    }
+
+    /// # Safety
+    /// `i` must be a valid slot index for this frame.
+    #[inline(always)]
+    pub(crate) unsafe fn get_unchecked_mut(&self, i: usize) -> &'static mut Value {
+        unsafe { &mut *self.ptr.add(i) }
+    }
+
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    #[inline(always)]
+    pub(crate) fn as_slice(&self) -> &'static [Value] {
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len as usize) }
+    }
+}
+
+impl core::ops::Index<usize> for LocalSlice {
+    type Output = Value;
+    #[inline(always)]
+    fn index(&self, i: usize) -> &Value {
+        unsafe { self.get_unchecked(i) }
+    }
+}
+
+// SAFETY: the pointer addresses `VM::regs`, a heap allocation that does not
+// move when the VM is moved, and `Value` is a plain 64-bit word. Sending a VM
+// to another thread therefore sends a valid pointer to its own allocation.
+unsafe impl Send for LocalSlice {}
+unsafe impl Sync for LocalSlice {}
+
+impl core::ops::IndexMut<usize> for LocalSlice {
+    #[inline(always)]
+    fn index_mut(&mut self, i: usize) -> &mut Value {
+        unsafe { self.get_unchecked_mut(i) }
+    }
+}
+
 
 /// Returns the raw instruction bounds of a frame's bytecode.
 ///
@@ -215,6 +272,12 @@ pub struct DomainSlot {
 pub struct VM {
     /// Operand stack used for bytecode evaluation.
     pub stack: Vec<Value>,
+    /// Shared register file: locals of every live frame, contiguous.
+    ///
+    /// Frames index it with `local_base + slot` (Luau keeps registers in its
+    /// stack for the same reason: entering a call is a `resize`, returning is a
+    /// `truncate`, and all frames' locals share cache lines).
+    regs: Vec<Value>,
     globals: Vec<Value>,
     global_index: HashMap<Box<str>, u32>,
     /// Table of globally available builtin and native functions.
@@ -281,6 +344,7 @@ impl VM {
     pub fn new() -> Self {
         Self {
             stack: Vec::with_capacity(64),
+            regs: Vec::with_capacity(64),
             globals: Vec::new(),
             global_index: Default::default(),
             global_table: Vec::new(),
@@ -404,7 +468,7 @@ impl VM {
     ///
     /// Returns immediately when there is nothing deferred, which is the common
     /// case; every function return goes through here.
-    #[inline]
+    #[inline(always)]
     fn run_defers(&mut self) {
         let Some(frame) = self.top_frame_mut() else {
             return;
@@ -463,7 +527,8 @@ impl VM {
         if idx == self.frames.len() {
             self.frames.push(Frame {
                 code: Arc::clone(bc),
-                locals: Vec::new(),
+                locals: LocalSlice::EMPTY,
+                local_base: 0,
                 ip: 0,
                 iter: Vec::new(),
                 iter_idx: 0,
@@ -487,8 +552,48 @@ impl VM {
         frame.range_end = 0;
         frame.defer_stack.clear();
         frame.argv.clear();
-        frame.locals.clear();
+        // `locals`/`local_base` are set by `bind_registers`, which every caller
+        // runs next.
         idx
+    }
+
+    /// Allocates `n` registers for frame `idx` at the top of the register file
+    /// and binds the frame to them.
+    ///
+    /// Any previous contents are dropped: the caller writes parameters into
+    /// `regs[base..]` immediately after this.
+    #[inline(always)]
+    fn bind_registers(&mut self, idx: usize, n: usize) -> usize {
+        let base = self.regs.len();
+        self.regs.resize(base + n, Value::nil());
+        let frame = unsafe { self.frames.get_unchecked_mut(idx) };
+        frame.local_base = base as u32;
+        frame.locals = LocalSlice {
+            ptr: unsafe { self.regs.as_mut_ptr().add(base) },
+            len: n as u32,
+        };
+        base
+    }
+
+    /// Drops the registers of a frame that is returning.
+    #[inline(always)]
+    fn release_registers(&mut self, idx: usize) {
+        let base = unsafe { self.frames.get_unchecked(idx) }.local_base as usize;
+        self.regs.truncate(base);
+    }
+
+    /// Rebinds frame `idx` to `n` registers at `base`, growing the file if the
+    /// (tail-called) function needs more slots than the current one.
+    #[inline(always)]
+    fn rebind_registers(&mut self, idx: usize, base: usize, n: usize) {
+        self.regs.truncate(base);
+        self.regs.resize(base + n, Value::nil());
+        let frame = unsafe { self.frames.get_unchecked_mut(idx) };
+        frame.local_base = base as u32;
+        frame.locals = LocalSlice {
+            ptr: unsafe { self.regs.as_mut_ptr().add(base) },
+            len: n as u32,
+        };
     }
 
     /// Reads a local variable from the current frame.
@@ -503,13 +608,15 @@ impl VM {
 
     /// Returns a slice of local variables in the current frame.
     pub fn frame_locals(&self, top: usize) -> &[Value] {
-        &self.frames[top].locals
+        self.frames[top].locals.as_slice()
     }
 
     /// Returns a mutable slice of local variables in the current frame.
     #[allow(clippy::mut_from_ref)]
     pub fn frame_locals_mut(&mut self, top: usize) -> &mut [Value] {
-        &mut self.frames[top].locals
+        let frame = &self.frames[top];
+        let len = frame.locals.len();
+        unsafe { core::slice::from_raw_parts_mut(frame.locals.ptr, len) }
     }
 
     /// Looks up a globally registered builtin or native function by name.
@@ -638,11 +745,12 @@ impl VM {
 
         let n = bc.local_names.len().max(16);
         let root_code = Arc::new(bc.clone());
+        self.regs.clear();
         let root = self.acquire_frame(&root_code);
+        self.bind_registers(root, n);
         {
             let frame = &mut self.frames[root];
             frame.stack_base = 0;
-            frame.locals.resize(n, Value::nil());
             frame.argv.extend_from_slice(&self.script_args);
         }
 
@@ -658,13 +766,17 @@ impl VM {
         let mut top = self.frame_count() - 1;
         let mut ip: usize = 0;
         let (mut code_ptr, mut code_len) = frame_code_bounds(&self.frames[top]);
+        let mut locals = self.frames[top].locals;
 
         loop {
             if ip >= code_len {
                 // Run deferred closures before returning
                 self.run_defers();
                 let r = self.stack.pop().unwrap_or(Value::nil());
-                let returning_base = self.top_frame().map(|f| f.stack_base);
+                let frame = unsafe { self.frames.get_unchecked(top) };
+                let returning_base = frame.stack_base;
+                let local_base = frame.local_base as usize;
+                self.regs.truncate(local_base);
                 self.frame_depth -= 1;
                 debug_assert_eq!(self.frame_depth, top);
                 if self.frame_depth == 0 {
@@ -672,39 +784,45 @@ impl VM {
                 }
                 top -= 1;
                 let caller = unsafe { self.frames.get_unchecked(top) };
-                let base = returning_base.unwrap_or(caller.stack_base);
+                let base = returning_base;
                 ip = caller.ip as usize;
                 (code_ptr, code_len) = frame_code_bounds(caller);
+                locals = caller.locals;
                 self.stack.truncate(base as usize);
                 self.stack.push(r);
                 continue;
             }
 
             let instr = unsafe { *code_ptr.add(ip) };
-            let action = self.dispatch(top, instr);
+            let action = self.dispatch(locals, top, instr);
             match action {
                 Action::Next => ip += 1,
                 Action::Jump(to) => ip = to as usize,
                 Action::TailCall => {
                     // The frame rebound to another function's bytecode.
                     ip = 0;
-                    (code_ptr, code_len) =
-                        frame_code_bounds(unsafe { self.frames.get_unchecked(top) });
+                    let frame = unsafe { self.frames.get_unchecked(top) };
+                    (code_ptr, code_len) = frame_code_bounds(frame);
+                    locals = frame.locals;
                 }
                 Action::Return => {
                     // Run deferred closures before returning
                     self.run_defers();
                     let r = self.stack.pop().unwrap_or(Value::nil());
-                    let returning_base = self.top_frame().map(|f| f.stack_base);
+                    let frame = unsafe { self.frames.get_unchecked(top) };
+                    let returning_base = frame.stack_base;
+                    let local_base = frame.local_base as usize;
+                    self.regs.truncate(local_base);
                     self.frame_depth -= 1;
                     if self.frame_depth == 0 {
                         return Value::escape(r);
                     }
                     top -= 1;
                     let caller = unsafe { self.frames.get_unchecked(top) };
-                    let base = returning_base.unwrap_or(caller.stack_base);
+                    let base = returning_base;
                     ip = caller.ip as usize;
                     (code_ptr, code_len) = frame_code_bounds(caller);
+                    locals = caller.locals;
                     self.stack.truncate(base as usize);
                     self.stack.push(r);
                 }
@@ -714,39 +832,28 @@ impl VM {
                     unsafe { self.frames.get_unchecked_mut(top) }.ip = (ip + 1) as u32;
                     top += 1;
                     ip = 0;
-                    (code_ptr, code_len) =
-                        frame_code_bounds(unsafe { self.frames.get_unchecked(top) });
+                    let frame = unsafe { self.frames.get_unchecked(top) };
+                    (code_ptr, code_len) = frame_code_bounds(frame);
+                    locals = frame.locals;
                 }
             }
         }
     }
 
     #[inline(always)]
-    fn dispatch(&mut self, top: usize, i: Instr) -> Action {
+    fn dispatch(&mut self, locals: LocalSlice, top: usize, i: Instr) -> Action {
         #[cfg(feature = "opcode-stats")]
         self.opcode_counter.record(i.op());
 
         // Core opcode dispatch
-        if let Some(result) = ops::dispatch_core(self, top, i) {
-            return match result {
-                crate::runtime::opcode::OpcodeResult::Next => Action::Next,
-                crate::runtime::opcode::OpcodeResult::Jump(addr) => Action::Jump(addr),
-                crate::runtime::opcode::OpcodeResult::Return => Action::Return,
-                crate::runtime::opcode::OpcodeResult::PushFrame => Action::PushFrame,
-                crate::runtime::opcode::OpcodeResult::TailCall => Action::TailCall,
-            };
+        if let Some(result) = ops::dispatch_core(self, locals, top, i) {
+            return result;
         }
 
         // Extension opcode lookup
         let op_code = i.op();
         if let Some(handler) = self.opcode_table[op_code as usize] {
-            match handler(self, top, i) {
-                super::opcode::OpcodeResult::Next => Action::Next,
-                super::opcode::OpcodeResult::Jump(addr) => Action::Jump(addr),
-                super::opcode::OpcodeResult::Return => Action::Return,
-                super::opcode::OpcodeResult::PushFrame => Action::PushFrame,
-                super::opcode::OpcodeResult::TailCall => Action::TailCall,
-            }
+            handler(self, top, i)
         } else {
             Action::Next
         }
@@ -764,14 +871,13 @@ impl VM {
         let base = self.stack.len() as u32;
 
         let idx = self.acquire_frame(bc);
+        let copy = func.params.len().min(args.len());
+        let reg_base = self.bind_registers(idx, n);
+        self.regs[reg_base..reg_base + copy].copy_from_slice(&args[..copy]);
+
         let frame = &mut self.frames[idx];
         frame.ip = 0;
         frame.stack_base = base;
-
-        // Prepare locals (bulk copy + resize)
-        let copy = func.params.len().min(args.len());
-        frame.locals.extend_from_slice(&args[..copy]);
-        frame.locals.resize(n, Value::nil());
 
         // Prepare argv (only if function uses special vars)
         if func.uses_special_vars {
@@ -806,20 +912,21 @@ impl VM {
         let arg_start = arg_base + 1;
 
         let idx = self.acquire_frame(bc);
-        let frame = &mut self.frames[idx];
-        frame.ip = 0;
-        frame.stack_base = arg_base as u32;
-
         let copy = func.params.len().min(nargs);
-        frame
-            .locals
-            .extend_from_slice(&self.stack[arg_start..arg_start + copy]);
-        frame.locals.resize(n, Value::nil());
+        let reg_base = self.bind_registers(idx, n);
+        self.regs[reg_base..reg_base + copy]
+            .copy_from_slice(&self.stack[arg_start..arg_start + copy]);
 
-        if func.uses_special_vars {
-            frame
-                .argv
-                .extend_from_slice(&self.stack[arg_start..arg_start + nargs]);
+        {
+            let frame = &mut self.frames[idx];
+            frame.ip = 0;
+            frame.stack_base = arg_base as u32;
+
+            if func.uses_special_vars {
+                frame
+                    .argv
+                    .extend_from_slice(&self.stack[arg_start..arg_start + nargs]);
+            }
         }
 
         self.stack.truncate(arg_base);
@@ -872,14 +979,15 @@ impl VM {
         frame.range_end = 0;
         frame.defer_stack.clear();
 
-        // Prepare locals (bulk copy + resize)
-        frame.locals.clear();
-        frame.locals.reserve(n);
+        // Rebind the frame's registers (the tail-called function may have a
+        // different local count) and write the new arguments.
+        let base = frame.local_base as usize;
         let copy = func.params.len().min(args.len());
-        frame.locals.extend_from_slice(&args[..copy]);
-        frame.locals.resize(n, Value::nil());
+        self.rebind_registers(top, base, n);
+        self.regs[base..base + copy].copy_from_slice(&args[..copy]);
 
         // Prepare argv (only if function uses special vars)
+        let frame = &mut self.frames[top];
         frame.argv.clear();
         if func.uses_special_vars {
             frame.argv.extend_from_slice(args);
@@ -922,18 +1030,17 @@ impl VM {
         let n = bc.local_names.len().max(func_ref.params.len());
 
         let initial_depth = self.frame_depth;
+        let initial_regs = self.regs.len();
         let stack_base = self.stack.len() as u32;
 
         let idx = self.acquire_frame(&bc);
+        let reg_base = self.bind_registers(idx, n);
+        for (i, _) in func_ref.params.iter().enumerate() {
+            self.regs[reg_base + i] = args.get(i).copied().unwrap_or(Value::nil());
+        }
         {
             let frame = &mut self.frames[idx];
             frame.stack_base = stack_base;
-            for (i, _) in func_ref.params.iter().enumerate() {
-                frame
-                    .locals
-                    .push(args.get(i).copied().unwrap_or(Value::nil()));
-            }
-            frame.locals.resize(n, Value::nil());
             frame.argv.extend_from_slice(args);
         }
 
@@ -945,6 +1052,7 @@ impl VM {
                 None => {
                     self.closures = saved_closures;
                     self.frame_depth = initial_depth;
+                    self.regs.truncate(initial_regs);
                     return Value::nil();
                 }
             };
@@ -961,6 +1069,7 @@ impl VM {
                 // Frame ran off the end — treat top of stack as return value
                 let result = self.stack.pop().unwrap_or(Value::nil());
                 let returning_base = self.top_frame().map(|f| f.stack_base);
+                self.release_registers(top);
                 self.frame_depth -= 1;
                 if self.frame_depth <= initial_depth {
                     self.stack
@@ -978,7 +1087,7 @@ impl VM {
             }
 
             let instr = unsafe { *frame.code.instructions.get_unchecked(frame.ip as usize) };
-            let action = self.dispatch(top, instr);
+            let action = self.dispatch(frame.locals, top, instr);
             match action {
                 Action::Next => {
                     let top = self.frame_depth.checked_sub(1).unwrap_or(top);
@@ -997,6 +1106,7 @@ impl VM {
                     self.run_defers();
                     let result = self.stack.pop().unwrap_or(Value::nil());
                     let returning_base = self.top_frame().map(|f| f.stack_base);
+                    self.release_registers(top);
                     self.frame_depth -= 1;
                     if self.frame_depth <= initial_depth {
                         self.stack
@@ -1020,6 +1130,7 @@ impl VM {
         }
 
         self.closures = saved_closures;
+        self.regs.truncate(initial_regs);
         Value::nil()
     }
 

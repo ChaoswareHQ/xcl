@@ -1,7 +1,7 @@
-﻿//! Peephole optimizer: scans bytecode and fuses common instruction patterns.
+//! Peephole optimizer: scans bytecode and fuses common instruction patterns.
 //!
 //! Runs after compilation to catch patterns that AST-level fusion misses.
-//! Uses fixed-point iteration so cascading patterns (e.g., identity → NOP → eliminate) are caught.
+//! Uses fixed-point iteration so cascading patterns (e.g., identity ? NOP ? eliminate) are caught.
 
 
 // `alloc` re-exports needed by `no_std` builds (std prelude provides them).
@@ -24,7 +24,10 @@ fn is_direct_jump(op: u8) -> bool {
 
 #[inline(always)]
 fn is_wide_exit_jump(op: u8) -> bool {
-    matches!(op, OP_WHILE_LT_INT | OP_WHILE_LT_LOCAL | OP_FOR_NUMBER_LOOP)
+    matches!(
+        op,
+        OP_WHILE_LT_INT | OP_WHILE_LT_LOCAL | OP_FOR_NUMBER_LOOP | OP_IF_LT_INT | OP_IF_EQ_INT
+    )
 }
 
 /// Drain instructions in `range` and adjust all jump targets after `range.start()`.
@@ -57,12 +60,17 @@ fn drain_and_patch(
 }
 
 /// Collect all instruction indices that are jump targets.
-fn collect_jump_targets(code: &[Instr]) -> crate::HashSet<usize> {
+fn collect_jump_targets(code: &[Instr], wide: &[i64]) -> crate::HashSet<usize> {
     let mut targets = crate::HashSet::new();
     for instr in code {
         let op = instr.op();
         if is_direct_jump(op) {
             let target = instr.a() as usize;
+            if target < code.len() {
+                targets.insert(target);
+            }
+        } else if is_wide_exit_jump(op) {
+            let target = wide.get(instr.c() as usize).copied().unwrap_or(0) as usize;
             if target < code.len() {
                 targets.insert(target);
             }
@@ -235,14 +243,14 @@ fn try_fuse_push_int_op(
         _ => false,
     }
 }
-/// Peephole optimizer â€” scans bytecode and fuses common patterns.
+/// Peephole optimizer — scans bytecode and fuses common patterns.
 /// This runs after compilation and catches patterns the AST-level fusion misses.
 /// Uses fixed-point iteration: keeps scanning until no more optimizations are made,
-/// so cascading patterns (e.g., identity â†’ NOP â†’ eliminate) are caught.
+/// so cascading patterns (e.g., identity → NOP → eliminate) are caught.
 pub(crate) fn peephole_optimize_once(code: &mut Vec<Instr>, wide: &mut [i64]) {
     // Fixed-point iteration: repeat until no more changes
     loop {
-        let jump_targets = collect_jump_targets(code);
+        let jump_targets = collect_jump_targets(code, wide);
         let mut changed = false;
         let mut i = 0;
         while i < code.len() {
@@ -280,7 +288,7 @@ fn peephole_at(
         return true;
     }
 
-    // Pattern 7: LOAD_LOCAL a; LOAD_LOCAL b; ADD; STORE_LOCAL a â†’ ADD_LOCAL_STORE a, b
+    // Pattern 7: LOAD_LOCAL a; LOAD_LOCAL b; ADD; STORE_LOCAL a → ADD_LOCAL_STORE a, b
     if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
         let next = code[i + 1];
         let next2 = code[i + 2];
@@ -301,8 +309,8 @@ fn peephole_at(
         }
     }
 
-    // Pattern 9: LOAD_LOCAL a; LOAD_LOCAL b; ADD; STORE_LOCAL c â†’ ADD_LOCAL_LOCAL_STORE c, a, b
-    // Like Luau's fused store pattern â€” eliminates 4 instructions into 1
+    // Pattern 9: LOAD_LOCAL a; LOAD_LOCAL b; ADD; STORE_LOCAL c → ADD_LOCAL_LOCAL_STORE c, a, b
+    // Like Luau's fused store pattern — eliminates 4 instructions into 1
     if op == OP_LOAD_LOCAL && code.len() >= i + 4 && instr.a() < 256 {
         let next = code[i + 1];
         let next2 = code[i + 2];
@@ -325,7 +333,7 @@ fn peephole_at(
         }
     }
 
-    // Pattern 2: LOAD_LOCAL a; PUSH_INT k; OP; STORE_LOCAL a â†’ ADD_INT_LOCAL a, k
+    // Pattern 2: LOAD_LOCAL a; PUSH_INT k; OP; STORE_LOCAL a → ADD_INT_LOCAL a, k
     if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
         let next = code[i + 1];
         let next2 = code[i + 2];
@@ -349,8 +357,8 @@ fn peephole_at(
         }
     }
 
-    // Pattern 10: LOAD_LOCAL a; PUSH_INT k; ADD; STORE_LOCAL b â†’ ADD_INT_STORE_LOCAL b, a, k
-    // Like Luau's ADDK â€” constant on the right side
+    // Pattern 10: LOAD_LOCAL a; PUSH_INT k; ADD; STORE_LOCAL b → ADD_INT_STORE_LOCAL b, a, k
+    // Like Luau's ADDK — constant on the right side
     if op == OP_LOAD_LOCAL && code.len() >= i + 4 && u16::try_from(instr.a()).is_ok() {
         let next = code[i + 1];
         let next2 = code[i + 2];
@@ -371,7 +379,7 @@ fn peephole_at(
         }
     }
 
-    // Pattern 1: LOAD_LOCAL a; LOAD_LOCAL b; ADD â†’ ADD_LOCAL_LOCAL a, b
+    // Pattern 1: LOAD_LOCAL a; LOAD_LOCAL b; ADD → ADD_LOCAL_LOCAL a, b
     if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
         let next = code[i + 1];
         let next2 = code[i + 2];
@@ -393,7 +401,7 @@ fn peephole_at(
         }
     }
 
-    // Pattern 3: PUSH_INT a; PUSH_INT b; ADD â†’ PUSH_INT (a+b) (constant folding)
+    // Pattern 3: PUSH_INT a; PUSH_INT b; ADD → PUSH_INT (a+b) (constant folding)
     if op == OP_PUSH_INT && code.len() >= i + 3 {
         let next = code[i + 1];
         let next2 = code[i + 2];
@@ -417,7 +425,7 @@ fn peephole_at(
         }
     }
 
-    // Pattern 5: LOAD_LOCAL a; STORE_LOCAL a â†’ (delete both, no-op)
+    // Pattern 5: LOAD_LOCAL a; STORE_LOCAL a → (delete both, no-op)
     if op == OP_LOAD_LOCAL && code.len() >= i + 2 {
         let next = code[i + 1];
         if next.op() == OP_STORE_LOCAL && next.a() == instr.a() {
@@ -426,7 +434,7 @@ fn peephole_at(
         }
     }
 
-    // Pattern 8: LOAD_LOCAL a; LOAD_LOCAL b; LOAD_LOCAL c; ADD; ADD â†’ fused chain
+    // Pattern 8: LOAD_LOCAL a; LOAD_LOCAL b; LOAD_LOCAL c; ADD; ADD → fused chain
     if op == OP_LOAD_LOCAL && code.len() >= i + 5 {
         let next = code[i + 1];
         let next2 = code[i + 2];
@@ -445,7 +453,7 @@ fn peephole_at(
         }
     }
 
-    // Pattern 12: Dead code elimination â€” consecutive NOPs
+    // Pattern 12: Dead code elimination — consecutive NOPs
     if op == OP_NOP && code.len() >= i + 2 && code[i + 1].op() == OP_NOP {
         drain_and_patch(code, wide, i..=i + 1);
         return true;
@@ -459,7 +467,7 @@ fn peephole_at(
         return true;
     }
 
-    // Pattern 22: Self subtraction â€” LOAD_LOCAL a; LOAD_LOCAL a; SUB â†’ PUSH_INT 0 (x - x = 0)
+    // Pattern 22: Self subtraction — LOAD_LOCAL a; LOAD_LOCAL a; SUB → PUSH_INT 0 (x - x = 0)
     if op == OP_LOAD_LOCAL && code.len() >= i + 3 {
         let next = code[i + 1];
         let next2 = code[i + 2];
@@ -470,7 +478,7 @@ fn peephole_at(
         }
     }
 
-    // Pattern 23: Redundant load elimination â€” LOAD_LOCAL a; LOAD_LOCAL a â†’ LOAD_LOCAL a
+    // Pattern 23: Redundant load elimination — LOAD_LOCAL a; LOAD_LOCAL a → LOAD_LOCAL a
     if op == OP_LOAD_LOCAL && code.len() >= i + 2 {
         let next = code[i + 1];
         if next.op() == OP_LOAD_LOCAL && next.a() == instr.a() {
@@ -479,7 +487,7 @@ fn peephole_at(
         }
     }
 
-    // Pattern 24: Redundant jump elimination â€” JUMP a; JUMP b â†’ JUMP b
+    // Pattern 24: Redundant jump elimination — JUMP a; JUMP b → JUMP b
     // Two consecutive jumps: the first is unreachable after the second, keep only the second
     if op == OP_JUMP && code.len() >= i + 2 {
         let next = code[i + 1];
@@ -490,24 +498,24 @@ fn peephole_at(
         }
     }
 
-    // Pattern 25: JUMP_IF_FALSE a; JUMP b where target=a â†’ JUMP b
+    // Pattern 25: JUMP_IF_FALSE a; JUMP b where target=a → JUMP b
     // If JUMP_IF_FALSE falls through to an unconditional JUMP, and the false target is the same
     // as the unconditional jump target, just use the unconditional jump.
     if op == OP_JUMP_IF_FALSE && code.len() >= i + 2 {
         let next = code[i + 1];
         if next.op() == OP_JUMP && next.a() == instr.a() {
-            // Both branches go to the same place â€” just jump unconditionally
+            // Both branches go to the same place — just jump unconditionally
             code[i] = Instr::a1(OP_JUMP, instr.a());
             drain_and_patch(code, wide, i + 1..=i + 1);
             return true;
         }
     }
 
-    // Pattern 26: Strength reduction â€” LOAD_LOCAL a; PUSH_INT (2^n); MUL; STORE_LOCAL a
-    // â†’ MUL_INT_LOCAL a, (2^n) when the result fits, already handled by Pattern 2.
+    // Pattern 26: Strength reduction — LOAD_LOCAL a; PUSH_INT (2^n); MUL; STORE_LOCAL a
+    // → MUL_INT_LOCAL a, (2^n) when the result fits, already handled by Pattern 2.
     // Instead: fold PUSH_INT a; PUSH_INT b; MUL when both are constants (covered by Pattern 3).
-    // Add: PUSH_INT 0; SUB â†’ PUSH_INT 0 (0 - x doesn't simplify, but x - 0 = x via Pattern 18).
-    // New: PUSH_INT a; PUSH_INT b; MOD â†’ PUSH_INT (a % b) for constant modulo folding.
+    // Add: PUSH_INT 0; SUB → PUSH_INT 0 (0 - x doesn't simplify, but x - 0 = x via Pattern 18).
+    // New: PUSH_INT a; PUSH_INT b; MOD → PUSH_INT (a % b) for constant modulo folding.
     if op == OP_PUSH_INT && code.len() >= i + 3 {
         let next = code[i + 1];
         let next2 = code[i + 2];
@@ -525,8 +533,8 @@ fn peephole_at(
         }
     }
 
-    // Pattern 27: Constant subtraction folding â€” PUSH_INT a; PUSH_INT b; SUB â†’ PUSH_INT (a-b)
-    // Already covered by Pattern 3, but adding NEG folding: PUSH_INT a; NEG â†’ PUSH_INT (-a)
+    // Pattern 27: Constant subtraction folding — PUSH_INT a; PUSH_INT b; SUB → PUSH_INT (a-b)
+    // Already covered by Pattern 3, but adding NEG folding: PUSH_INT a; NEG → PUSH_INT (-a)
     if op == OP_PUSH_INT && code.len() >= i + 2 {
         let next = code[i + 1];
         if next.op() == OP_NEG {
@@ -542,7 +550,7 @@ fn peephole_at(
         }
     }
 
-    // Pattern 28: Single NOP elimination (non-consecutive) â€” isolated NOP â†’ removed
+    // Pattern 28: Single NOP elimination (non-consecutive) — isolated NOP → removed
     // This catches NOPs left by Patterns 18-20 after the consecutive NOP pattern runs
     if op == OP_NOP {
         drain_and_patch(code, wide, i..=i);
@@ -551,8 +559,8 @@ fn peephole_at(
 
     // === NEW SUPEROPERATORS ===
 
-    // Pattern 29: Float constant fusion — LOAD_LOCAL a; PUSH_FLOAT w; OP; STORE_LOCAL a
-    // → OP_ADD_FLOAT_LOCAL a, w (like ADD_INT_LOCAL but for floats)
+    // Pattern 29: Float constant fusion � LOAD_LOCAL a; PUSH_FLOAT w; OP; STORE_LOCAL a
+    // ? OP_ADD_FLOAT_LOCAL a, w (like ADD_INT_LOCAL but for floats)
     if op == OP_LOAD_LOCAL && code.len() >= i + 4 {
         let next = code[i + 1];
         let next2 = code[i + 2];
@@ -573,8 +581,8 @@ fn peephole_at(
         }
     }
 
-    // Pattern 30: Modulo+equality fusion — LOAD_LOCAL a; PUSH_INT d; MOD; PUSH_INT v; EQ
-    // → OP_MOD_EQ_INT a, d, v (for $i % 2 == 0 patterns)
+    // Pattern 30: Modulo+equality fusion � LOAD_LOCAL a; PUSH_INT d; MOD; PUSH_INT v; EQ
+    // ? OP_MOD_EQ_INT a, d, v (for $i % 2 == 0 patterns)
     if op == OP_LOAD_LOCAL && code.len() >= i + 5 {
         let next = code[i + 1];
         let next2 = code[i + 2];
@@ -597,7 +605,7 @@ fn peephole_at(
         return true;
     }
 
-    // Pattern 34: Constant shift folding — PUSH_INT a; PUSH_INT b; SHL → PUSH_INT (a << b)
+    // Pattern 34: Constant shift folding � PUSH_INT a; PUSH_INT b; SHL ? PUSH_INT (a << b)
     if op == OP_PUSH_INT && code.len() >= i + 3 {
         let next = code[i + 1];
         let next2 = code[i + 2];
@@ -619,7 +627,7 @@ fn peephole_at(
         }
     }
 
-    // Pattern 35: Constant bitwise AND folding — PUSH_INT a; PUSH_INT b; BITAND → PUSH_INT (a & b)
+    // Pattern 35: Constant bitwise AND folding � PUSH_INT a; PUSH_INT b; BITAND ? PUSH_INT (a & b)
     if op == OP_PUSH_INT && code.len() >= i + 3 {
         let next = code[i + 1];
         let next2 = code[i + 2];

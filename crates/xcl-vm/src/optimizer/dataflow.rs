@@ -24,7 +24,7 @@ use crate::bytecode::{
     OP_MOD_EQ_INT, OP_MOD_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_LOCAL, OP_MUL_LOCAL_LOCAL_STORE,
     OP_MUL_LOCAL_STORE, OP_MUL_INT_LOCAL, OP_MUL_FLOAT_LOCAL, OP_SUB_LOCAL_LOCAL,
     OP_SUB_LOCAL_LOCAL_STORE, OP_SUB_LOCAL_STORE, OP_SUB_INT_LOCAL, OP_SUB_FLOAT_LOCAL,
-    OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,
+    OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL, OP_IF_LT_INT, OP_IF_EQ_INT,
 };
 use crate::runtime::vm::ops::consts::{
     OP_HALT, OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_LOCAL, OP_RETURN, OP_STORE_LOCAL,
@@ -87,7 +87,11 @@ pub(crate) fn build_basic_blocks(code: &[Instr], wide: &[i64]) -> Vec<BasicBlock
                     is_leader[i + 1] = true;
                 }
             }
-            OP_WHILE_LT_INT | OP_WHILE_LT_LOCAL | OP_FOR_NUMBER_LOOP => {
+            OP_WHILE_LT_INT
+            | OP_WHILE_LT_LOCAL
+            | OP_FOR_NUMBER_LOOP
+            | OP_IF_LT_INT
+            | OP_IF_EQ_INT => {
                 // The wide operand holds the exit target
                 // We can't resolve it here without wide_operands, so mark fall-through
                 if i + 1 < len {
@@ -161,7 +165,11 @@ pub(crate) fn build_basic_blocks(code: &[Instr], wide: &[i64]) -> Vec<BasicBlock
                         }
                     }
                 }
-                OP_WHILE_LT_INT | OP_WHILE_LT_LOCAL | OP_FOR_NUMBER_LOOP => {
+                OP_WHILE_LT_INT
+                | OP_WHILE_LT_LOCAL
+                | OP_FOR_NUMBER_LOOP
+                | OP_IF_LT_INT
+                | OP_IF_EQ_INT => {
                     // Fall-through to loop body (next instruction)
                     if idx + 1 < len && idx == block.end {
                         let ft = idx + 1;
@@ -306,7 +314,7 @@ pub(crate) fn live_variables(code: &[Instr], blocks: &[BasicBlock]) -> Vec<BTree
                     use_set[bi].insert(instr.b() as u32);
                 }
                 // WHILE_LT_INT: reads slot a (operand a = slot, b = limit, c = exit_wide_idx)
-                OP_WHILE_LT_INT => {
+                OP_WHILE_LT_INT | OP_IF_LT_INT | OP_IF_EQ_INT => {
                     use_set[bi].insert(instr.a());
                 }
                 // WHILE_LT_LOCAL: reads slot a and slot b (operand a = left, b = right, c = exit_wide_idx)
@@ -470,7 +478,7 @@ pub(crate) fn live_variables(code: &[Instr], blocks: &[BasicBlock]) -> Vec<BTree
                     instr_use.insert(instr.a());
                     instr_use.insert(instr.b() as u32);
                 }
-                OP_WHILE_LT_INT => { instr_use.insert(instr.a()); }
+                OP_WHILE_LT_INT | OP_IF_LT_INT | OP_IF_EQ_INT => { instr_use.insert(instr.a()); }
                 OP_WHILE_LT_LOCAL => {
                     instr_use.insert(instr.a());
                     instr_use.insert(instr.b() as u32);

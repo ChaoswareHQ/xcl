@@ -1,11 +1,11 @@
-﻿//! XCL Macros â€” Derive and impl attribute macros for registering types and methods with the VM.
+//! XCL Macros — Derive and impl attribute macros for registering types and methods with the VM.
 //!
 //! # Supported macros
 //!
 //! Only 2 macros are needed:
 //!
-//! - `#[derive(Xcl)]` â€” Register a struct or enum in `TYPE_REGISTRY`.
-//! - `#[xcl_impl]` â€” Register an impl block: each method becomes a native entry in `NATIVE_REGISTRY`.
+//! - `#[derive(Xcl)]` — Register a struct or enum in `TYPE_REGISTRY`.
+//! - `#[xcl_impl]` — Register an impl block: each method becomes a native entry in `NATIVE_REGISTRY`.
 //!
 //! Universal methods (`type`, `super`) are auto-registered by the VM at startup.
 //!
@@ -23,7 +23,7 @@
 //!     }
 //! }
 //! ```
-//! This registers `https.get` in the VM â€” no manual wrappers or statics needed.
+//! This registers `https.get` in the VM — no manual wrappers or statics needed.
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
@@ -51,7 +51,7 @@ fn extract_doc_summary(attrs: &[syn::Attribute]) -> Option<String> {
 }
 
 /// Infer the domain from the source file path using proc_macro2's span-locations.
-/// For example, `src/io/mod.rs` â†’ `"io"`, `src/proc.rs` â†’ `"proc"`.
+/// For example, `src/io/mod.rs` → `"io"`, `src/proc.rs` → `"proc"`.
 fn infer_domain_from_span(span: proc_macro2::Span) -> Option<String> {
     let path = span.local_file()?;
     let path_str = path.to_string_lossy().to_string();
@@ -177,24 +177,24 @@ fn rust_type_to_xcl_type(ty: &Type) -> String {
     }
 }
 
-/// `#[derive(Xcl)]` â€” Auto-registers a struct or enum in `TYPE_REGISTRY`.
+/// `#[derive(Xcl)]` — Auto-registers a struct or enum in `TYPE_REGISTRY`.
 ///
 /// Supports optional `#[xcl(...)]` helper attributes:
-/// - `domain = "..."` â€” override the auto-detected domain.
-/// - `kind = "Record" | "Opaque" | "Sum"` â€” override the type kind.
-/// - `summary = "..."` â€” override the auto-detected summary.
-/// - `super = "..."` â€” set the parent type for inheritance.
+/// - `domain = "..."` — override the auto-detected domain.
+/// - `kind = "Record" | "Opaque" | "Sum"` — override the type kind.
+/// - `summary = "..."` — override the auto-detected summary.
+/// - `super = "..."` — set the parent type for inheritance.
 ///
 /// The derive macro auto-detects:
-/// - **domain** from the source file path (e.g., `src/io/mod.rs` â†’ `"io"`).
-/// - **kind** from the type shape (unit struct â†’ Opaque, named fields â†’ Record, enum â†’ Sum).
+/// - **domain** from the source file path (e.g., `src/io/mod.rs` → `"io"`).
+/// - **kind** from the type shape (unit struct → Opaque, named fields → Record, enum → Sum).
 /// - **summary** from the first `///` doc comment line.
 ///
 /// Use `#[xcl(domain = "...", kind = "...", summary = "...")]` to override any auto-detected value.
 /// # Example
 ///
 /// ```ignore
-/// // In src/io/mod.rs â€” domain auto-detected as "io"
+/// // In src/io/mod.rs — domain auto-detected as "io"
 /// /// A handle to an open file.
 /// #[derive(Xcl)]
 /// pub struct FileType;
@@ -203,7 +203,7 @@ fn rust_type_to_xcl_type(ty: &Type) -> String {
 /// #[xcl(kind = "Sum")]
 /// pub struct StreamType;
 ///
-/// // In src/proc.rs â€” domain auto-detected as "proc"
+/// // In src/proc.rs — domain auto-detected as "proc"
 /// /// A handle to a spawned child process.
 /// #[derive(Xcl)]
 /// pub struct ProcessType;
@@ -384,7 +384,7 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
     }
 }
 
-/// `#[xcl_trait]` â€” Registers a trait in `TRAIT_REGISTRY`.
+/// `#[xcl_trait]` — Registers a trait in `TRAIT_REGISTRY`.
 ///
 /// # Example
 ///
@@ -447,21 +447,21 @@ pub fn xcl_trait(_attr: TokenStream, item: TokenStream) -> TokenStream {
     expanded.into()
 }
 
-/// `#[xcl_fn]` â€” Auto-registers a function in `NATIVE_REGISTRY`.
+/// `#[xcl_fn]` — Auto-registers a function in `NATIVE_REGISTRY`.
 ///
-/// Zero arguments required â€” everything is auto-detected:
-/// - **domain + method** from the function name (e.g., `io_open` â†’ domain="io", method="open").
-/// - **kind** from the signature (`&mut DomainCtx` â†’ Ctx, `&[Value]` â†’ Pure).
+/// Zero arguments required — everything is auto-detected:
+/// - **domain + method** from the function name (e.g., `io_open` → domain="io", method="open").
+/// - **kind** from the signature (`&mut DomainCtx` → Ctx, `&[Value]` → Pure).
 /// - **summary** from the first `///` doc comment line.
 ///
 /// Optional override attributes are still supported:
-/// - `name = "domain.method"` â€” override the auto-detected name.
-/// - `domain = "..."` â€” override the auto-detected domain.
-/// - `impl_type = "..."` â€” for trait implementation methods.
-/// - `override_method = "..."` â€” for trait method override.
-/// - `args = "..."` â€” manual arg signature string.
-/// - `ret = "..."` â€” manual return type string.
-/// - `summary = "..."` â€” override auto-detected summary.
+/// - `name = "domain.method"` — override the auto-detected name.
+/// - `domain = "..."` — override the auto-detected domain.
+/// - `impl_type = "..."` — for trait implementation methods.
+/// - `override_method = "..."` — for trait method override.
+/// - `args = "..."` — manual arg signature string.
+/// - `ret = "..."` — manual return type string.
+/// - `summary = "..."` — override auto-detected summary.
 ///
 /// # Example
 ///
@@ -497,13 +497,13 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let domain = if !parsed.method.is_empty() {
-        // Explicit name provided â€” extract domain from dotted name if present
+        // Explicit name provided — extract domain from dotted name if present
         parsed
             .domain
             .clone()
             .or_else(|| domain_from_name(&method_name).map(|s| s.to_string()))
     } else {
-        // No explicit name â€” use auto-detected domain, but allow explicit override
+        // No explicit name — use auto-detected domain, but allow explicit override
         parsed.domain.clone().or(Some(auto_domain))
     };
 
@@ -659,7 +659,7 @@ fn fn_name_to_domain_method(fn_name: &str) -> (String, String) {
         let method = fn_name[underscore_pos + 1..].to_string();
         (domain, method)
     } else {
-        // No underscore â€” treat the whole name as the method with no domain
+        // No underscore — treat the whole name as the method with no domain
         (String::new(), fn_name.to_string())
     }
 }
@@ -1060,7 +1060,7 @@ impl syn::parse::Parse for TypeAttr {
                     _ => {}
                 }
             } else if input.peek(syn::token::Paren) {
-                // variants( ... ) or fields( ... ) â€” parenthesized form
+                // variants( ... ) or fields( ... ) — parenthesized form
                 let content;
                 syn::parenthesized!(content in input);
                 if ident_s == "fields" {
@@ -1069,7 +1069,7 @@ impl syn::parse::Parse for TypeAttr {
                     variants = parse_variants_stream(&content)?;
                 }
             } else if input.peek(syn::token::Brace) {
-                // variants { ... } or fields { ... } â€” braced form
+                // variants { ... } or fields { ... } — braced form
                 let content;
                 syn::braced!(content in input);
                 if ident_s == "fields" {
@@ -1162,10 +1162,10 @@ fn is_ctx_type(ty: &Type) -> bool {
     false
 }
 
-/// `#[xcl_impl]` â€” Auto-registers each method in a Rust impl block as a native entry.
+/// `#[xcl_impl]` — Auto-registers each method in a Rust impl block as a native entry.
 ///
 /// Domain is auto-detected from the type name (e.g., `Https` -> `"https"`, `Fs` -> `"fs"`).
-/// Method names are used as-is â€” `get()` becomes `https.get`, `read()` becomes `fs.read`.
+/// Method names are used as-is — `get()` becomes `https.get`, `read()` becomes `fs.read`.
 ///
 /// # Auto-import
 ///
@@ -1338,7 +1338,7 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                         let arg_idx = syn::Index::from(i);
                         let local_name = syn::Ident::new(&format!("arg_{}", i), proc_macro2::Span::call_site());
 
-                        // Check if this is Vec<Value> â€” extract as Value and convert
+                        // Check if this is Vec<Value> — extract as Value and convert
                         let is_vec_value = matches!(arg_type.as_ref(), syn::Type::Path(type_path) if {
                             if let Some(seg) = type_path.path.segments.first() {
                                 seg.ident == "Vec"
@@ -1431,7 +1431,7 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// `#[xcl_opcode(name = "OP_...", code = N)]` â€” Register an extension opcode handler.
+/// `#[xcl_opcode(name = "OP_...", code = N)]` — Register an extension opcode handler.
 ///
 /// Declares a function as an opcode handler and registers it in the VM's
 /// [`OPCODE_REGISTRY`](::xcl_plugins::OPCODE_REGISTRY) distributed slice.
@@ -1588,7 +1588,7 @@ impl Parse for OpMeta {
                     }
                 }
                 _ => {
-                    // Ignore other keys like arity, stack, flags â€” they are metadata only
+                    // Ignore other keys like arity, stack, flags — they are metadata only
                 }
             }
             if input.peek(Token![,]) {
@@ -1725,7 +1725,7 @@ pub fn xcl_opcodes(args: TokenStream, input: TokenStream) -> TokenStream {
             let func_ident = &func.sig.ident;
             dispatch_arms.push(quote! {
                 #code => {
-                    #mod_name::#func_ident(vm, top, instr)
+                    #mod_name::#func_ident(vm, locals, top, instr)
                 }
             });
 
@@ -1778,8 +1778,9 @@ pub fn xcl_opcodes(args: TokenStream, input: TokenStream) -> TokenStream {
 
             #[inline(always)]
             pub(crate) fn dispatch_core(
-                vm: &mut crate::runtime::vm::VM,
-                top: usize,
+    vm: &mut crate::runtime::vm::VM,
+    locals: crate::runtime::vm::LocalSlice,
+    top: usize,
                 instr: crate::Instr,
             ) -> Option<crate::runtime::opcode::OpcodeResult> {
                 use crate::runtime::opcode::OpcodeResult;
@@ -1807,8 +1808,9 @@ pub fn xcl_opcodes(args: TokenStream, input: TokenStream) -> TokenStream {
             }
 
             pub(crate) fn dispatch_core(
-                vm: &mut crate::runtime::vm::VM,
-                top: usize,
+    vm: &mut crate::runtime::vm::VM,
+    locals: crate::runtime::vm::LocalSlice,
+    top: usize,
                 instr: crate::Instr,
             ) -> Option<crate::runtime::opcode::OpcodeResult> {
                 use crate::runtime::opcode::OpcodeResult;

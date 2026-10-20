@@ -29,47 +29,47 @@ mod core_ops {
     use crate::Instr;
     use crate::runtime::opcode::OpcodeResult;
     use crate::runtime::value::Value;
-    use crate::runtime::vm::{VM, fast_hash};
+    use crate::runtime::vm::{LocalSlice, VM, fast_hash};
 
     // ── Phase A + Tier 1: Stack/constants ──
 
     /// No-operation opcode.
     #[xcl_op(code = 0, arity = 0, stack = "0 -> 0")]
-    fn op_nop(_vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_nop(__vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         OpcodeResult::Next
     }
 
     /// Pushes `nil` (`none`) onto the operand stack.
     #[xcl_op(code = 1, arity = 0, stack = "0 -> 1")]
-    fn op_push_nil(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_push_nil(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         vm.push(Value::nil());
         OpcodeResult::Next
     }
 
     /// Pushes boolean `true` onto the operand stack.
     #[xcl_op(code = 2, arity = 0, stack = "0 -> 1")]
-    fn op_push_true(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_push_true(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         vm.push(Value::bool(true));
         OpcodeResult::Next
     }
 
     /// Pushes boolean `false` onto the operand stack.
     #[xcl_op(code = 3, arity = 0, stack = "0 -> 1")]
-    fn op_push_false(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_push_false(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         vm.push(Value::bool(false));
         OpcodeResult::Next
     }
 
     /// Pushes a small integer constant encoded directly in operand `a`.
     #[xcl_op(code = 4, arity = 0, stack = "0 -> 1")]
-    fn op_push_int(vm: &mut VM, _top: usize, instr: Instr) -> OpcodeResult {
+    fn op_push_int(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         vm.push(Value::from_i48(instr.a() as i64));
         OpcodeResult::Next
     }
 
     /// Pushes a 64-bit integer constant indexed from `wide_operands` by operand `a`.
     #[xcl_op(code = 5, arity = 0, stack = "0 -> 1")]
-    fn op_push_int_wide(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_push_int_wide(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         let v = vm.frames[top].code.wide_operands[instr.a() as usize];
         vm.push(Value::from_i48(v));
         OpcodeResult::Next
@@ -77,7 +77,7 @@ mod core_ops {
 
     /// Pushes a 64-bit float constant indexed from `wide_operands` by operand `a`.
     #[xcl_op(code = 6, arity = 0, stack = "0 -> 1")]
-    fn op_push_float(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_push_float(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         let bits = vm.frames[top].code.wide_operands[instr.a() as usize];
         vm.push(Value::from_f64(f64::from_bits(bits as u64)));
         OpcodeResult::Next
@@ -85,7 +85,7 @@ mod core_ops {
 
     /// Pushes an interned string indexed from `string_values` by operand `a`.
     #[xcl_op(code = 7, arity = 0, stack = "0 -> 1")]
-    fn op_push_str(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_push_str(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         vm.push(vm.frames[top].code.string_values[instr.a() as usize]);
         OpcodeResult::Next
     }
@@ -94,18 +94,18 @@ mod core_ops {
 
     /// Loads a local variable from slot index `a` onto the stack.
     #[xcl_op(code = 8, arity = 0, stack = "0 -> 1")]
-    fn op_load_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
-        let v = unsafe { *vm.frames[top].locals.get_unchecked(instr.a() as usize) };
+    fn op_load_local(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
+        let v = unsafe { *locals.get_unchecked(instr.a() as usize) };
         vm.push(v);
         OpcodeResult::Next
     }
 
     /// Pops a value from the stack and stores it into local slot index `a`.
     #[xcl_op(code = 9, arity = 1, stack = "1 -> 0")]
-    fn op_store_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_store_local(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         let v = vm.pop();
         unsafe {
-            *vm.frames[top].locals.get_unchecked_mut(instr.a() as usize) = v;
+            *locals.get_unchecked_mut(instr.a() as usize) = v;
         }
         OpcodeResult::Next
     }
@@ -114,7 +114,7 @@ mod core_ops {
 
     /// Loads a global variable from slot index `a` onto the stack.
     #[xcl_op(code = 10, arity = 0, stack = "0 -> 1")]
-    fn op_load_global(vm: &mut VM, _top: usize, instr: Instr) -> OpcodeResult {
+    fn op_load_global(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         let v = vm
             .globals
             .get(instr.a() as usize)
@@ -126,7 +126,7 @@ mod core_ops {
 
     /// Pops a value from the stack and stores it into global slot index `a`.
     #[xcl_op(code = 11, arity = 1, stack = "1 -> 0")]
-    fn op_store_global(vm: &mut VM, _top: usize, instr: Instr) -> OpcodeResult {
+    fn op_store_global(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         let v = vm.pop();
         if (instr.a() as usize) < vm.globals.len() {
             vm.globals[instr.a() as usize] = v;
@@ -143,7 +143,7 @@ mod core_ops {
         stack = "2 -> 1",
         flags = "PURE | DETERMINISTIC | COMMUTATIVE"
     )]
-    fn op_add(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_add(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let b = vm.pop();
         let a = vm.pop();
         if a.is_int() && b.is_int() {
@@ -164,7 +164,7 @@ mod core_ops {
 
     /// Pops two values, subtracts `top` from `second`, and pushes the result.
     #[xcl_op(code = 13, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_sub(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_sub(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let b = vm.pop();
         let a = vm.pop();
         if a.is_int() && b.is_int() {
@@ -190,7 +190,7 @@ mod core_ops {
         stack = "2 -> 1",
         flags = "PURE | DETERMINISTIC | COMMUTATIVE"
     )]
-    fn op_mul(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_mul(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let b = vm.pop();
         let a = vm.pop();
         if a.is_int() && b.is_int() {
@@ -211,7 +211,7 @@ mod core_ops {
 
     /// Pops two values, divides `second` by `top`, and pushes the result.
     #[xcl_op(code = 15, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_div(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_div(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let b = vm.pop();
         let a = vm.pop();
         if a.is_int() && b.is_int() {
@@ -231,7 +231,7 @@ mod core_ops {
 
     /// Pops two values, computes modulo remainder, and pushes the result.
     #[xcl_op(code = 16, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_mod(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_mod(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let b = vm.pop();
         let a = vm.pop();
         if a.is_int() && b.is_int() {
@@ -251,7 +251,7 @@ mod core_ops {
 
     /// Negates the value on the top of the stack.
     #[xcl_op(code = 17, arity = 1, stack = "1 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_neg(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_neg(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let a = vm.pop();
         vm.push(a.neg_());
         OpcodeResult::Next
@@ -266,7 +266,7 @@ mod core_ops {
         stack = "2 -> 1",
         flags = "PURE | DETERMINISTIC | COMMUTATIVE"
     )]
-    fn op_eq(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_eq(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let b = vm.pop();
         let a = vm.pop();
         let result = if a.is_int() && b.is_int() {
@@ -287,7 +287,7 @@ mod core_ops {
         stack = "2 -> 1",
         flags = "PURE | DETERMINISTIC | COMMUTATIVE"
     )]
-    fn op_neq(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_neq(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let b = vm.pop();
         let a = vm.pop();
         let result = if a.is_int() && b.is_int() {
@@ -303,7 +303,7 @@ mod core_ops {
 
     /// Tests if second stack value is less than top stack value (`<`).
     #[xcl_op(code = 20, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_lt(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_lt(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let b = vm.pop();
         let a = vm.pop();
         let result = if a.is_int() && b.is_int() {
@@ -319,7 +319,7 @@ mod core_ops {
 
     /// Tests if second stack value is greater than top stack value (`>`).
     #[xcl_op(code = 21, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_gt(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_gt(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let b = vm.pop();
         let a = vm.pop();
         let result = if a.is_int() && b.is_int() {
@@ -335,7 +335,7 @@ mod core_ops {
 
     /// Tests if second stack value is less than or equal to top stack value (`<=`).
     #[xcl_op(code = 22, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_le(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_le(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let b = vm.pop();
         let a = vm.pop();
         let result = if a.is_int() && b.is_int() {
@@ -351,7 +351,7 @@ mod core_ops {
 
     /// Tests if second stack value is greater than or equal to top stack value (`>=`).
     #[xcl_op(code = 23, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_ge(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_ge(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let b = vm.pop();
         let a = vm.pop();
         let result = if a.is_int() && b.is_int() {
@@ -367,7 +367,7 @@ mod core_ops {
 
     /// Logical AND of top two stack values.
     #[xcl_op(code = 24, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_and(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_and(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let b = vm.pop();
         let a = vm.pop();
         vm.push(Value::bool(a.is_truthy() && b.is_truthy()));
@@ -376,7 +376,7 @@ mod core_ops {
 
     /// Logical OR of top two stack values.
     #[xcl_op(code = 25, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_or(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_or(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let b = vm.pop();
         let a = vm.pop();
         vm.push(Value::bool(a.is_truthy() || b.is_truthy()));
@@ -385,7 +385,7 @@ mod core_ops {
 
     /// Logical inversion of top stack value (`!`).
     #[xcl_op(code = 26, arity = 1, stack = "1 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_not(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_not(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let a = vm.pop();
         vm.push(a.not_());
         OpcodeResult::Next
@@ -393,7 +393,7 @@ mod core_ops {
 
     /// Tests membership (`in`).
     #[xcl_op(code = 27, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_in(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_in(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let c = vm.pop();
         let item = vm.pop();
         let found = c
@@ -408,13 +408,13 @@ mod core_ops {
 
     /// Unconditional jump to instruction pointer address `a`.
     #[xcl_op(code = 28, arity = 0, stack = "0 -> 0")]
-    fn op_jump(_vm: &mut VM, _top: usize, instr: Instr) -> OpcodeResult {
+    fn op_jump(__vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         OpcodeResult::Jump(instr.a())
     }
 
     /// Conditional jump to address `a` if top of stack is falsy.
     #[xcl_op(code = 29, arity = 1, stack = "1 -> 0")]
-    fn op_jump_if_false(vm: &mut VM, _top: usize, instr: Instr) -> OpcodeResult {
+    fn op_jump_if_false(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         let c = vm.pop();
         if c.is_truthy() {
             OpcodeResult::Next
@@ -425,7 +425,7 @@ mod core_ops {
 
     /// Conditional jump to address `a` if top of stack is nil.
     #[xcl_op(code = 30, arity = 1, stack = "1 -> 0")]
-    fn op_jump_if_nil(vm: &mut VM, _top: usize, instr: Instr) -> OpcodeResult {
+    fn op_jump_if_nil(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         let v = vm.pop();
         if v.is_nil() {
             OpcodeResult::Jump(instr.a())
@@ -436,13 +436,13 @@ mod core_ops {
 
     /// Returns from the current function call frame.
     #[xcl_op(code = 33, arity = 0, stack = "0 -> 0")]
-    fn op_return(_vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_return(__vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         OpcodeResult::Return
     }
 
     /// Halts VM execution.
     #[xcl_op(code = 34, arity = 0, stack = "0 -> 0")]
-    fn op_halt(_vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_halt(__vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         OpcodeResult::Return
     }
 
@@ -450,7 +450,7 @@ mod core_ops {
 
     /// Constructs an array from `a` elements on the stack.
     #[xcl_op(code = 35, arity = 0, stack = "n -> 1")]
-    fn op_make_array(vm: &mut VM, _top: usize, instr: Instr) -> OpcodeResult {
+    fn op_make_array(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         let n = instr.a() as usize;
         let mut arr = Vec::with_capacity(n);
         for _ in 0..n {
@@ -463,7 +463,7 @@ mod core_ops {
 
     /// Constructs a dictionary map from `a` key-value pairs on the stack.
     #[xcl_op(code = 36, arity = 0, stack = "2n -> 1")]
-    fn op_make_dict(vm: &mut VM, _top: usize, instr: Instr) -> OpcodeResult {
+    fn op_make_dict(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         let n = instr.a() as usize;
         if n <= crate::runtime::value::SMALL_MAP_MAX {
             // Small path: inline SmallVec with cached fingerprint, no String allocation
@@ -510,7 +510,7 @@ mod core_ops {
 
     /// Retrieves an element by indexing `target[index]`.
     #[xcl_op(code = 37, arity = 2, stack = "2 -> 1")]
-    fn op_get_index(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_get_index(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let idx = vm.pop();
         let target = vm.pop();
         let result = if let Some(arr) = target.as_array() {
@@ -533,7 +533,7 @@ mod core_ops {
 
     /// Pushes an element onto an array.
     #[xcl_op(code = 39, arity = 2, stack = "2 -> 1")]
-    fn op_array_push(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_array_push(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let elem = vm.pop();
         let target = vm.pop();
         if let Some(arr) = target.as_array_mut() {
@@ -547,7 +547,7 @@ mod core_ops {
 
     /// Loads a compiled lambda closure onto the stack. Operand `a` = closure index.
     #[xcl_op(code = 46, arity = 0, stack = "0 -> 1")]
-    fn op_load_lambda(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_load_lambda(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         let idx = instr.a() as usize;
         let func = vm.frames[top].code.closures[idx].clone();
         vm.push(Value::from_func(func, &vm.arena));
@@ -556,7 +556,7 @@ mod core_ops {
 
     /// Null coalescing operator (`??`).
     #[xcl_op(code = 47, arity = 2, stack = "2 -> 1")]
-    fn op_coalesce(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_coalesce(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let fallback = vm.pop();
         let value = vm.pop();
         if value.is_nil() {
@@ -576,7 +576,7 @@ mod core_ops {
         stack = "2 -> 1",
         flags = "PURE | DETERMINISTIC"
     )]
-    fn op_shl(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_shl(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let b = vm.pop();
         let a = vm.pop();
         if a.is_int() && b.is_int() {
@@ -599,7 +599,7 @@ mod core_ops {
         stack = "2 -> 1",
         flags = "PURE | DETERMINISTIC"
     )]
-    fn op_shr(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_shr(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let b = vm.pop();
         let a = vm.pop();
         if a.is_int() && b.is_int() {
@@ -622,7 +622,7 @@ mod core_ops {
         stack = "2 -> 1",
         flags = "PURE | DETERMINISTIC | COMMUTATIVE"
     )]
-    fn op_bitand(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_bitand(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let b = vm.pop();
         let a = vm.pop();
         if a.is_int() && b.is_int() {
@@ -640,7 +640,7 @@ mod core_ops {
         stack = "2 -> 1",
         flags = "PURE | DETERMINISTIC | COMMUTATIVE"
     )]
-    fn op_bitor(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_bitor(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let b = vm.pop();
         let a = vm.pop();
         if a.is_int() && b.is_int() {
@@ -658,7 +658,7 @@ mod core_ops {
         stack = "2 -> 1",
         flags = "PURE | DETERMINISTIC | COMMUTATIVE"
     )]
-    fn op_bitxor(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_bitxor(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let b = vm.pop();
         let a = vm.pop();
         if a.is_int() && b.is_int() {
@@ -676,7 +676,7 @@ mod core_ops {
         stack = "1 -> 1",
         flags = "PURE | DETERMINISTIC"
     )]
-    fn op_bitnot(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_bitnot(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let a = vm.pop();
         if a.is_int() {
             vm.push(Value::from_i48(!a.as_i48()));
@@ -693,7 +693,7 @@ mod core_ops {
         stack = "2 -> 1",
         flags = "PURE | DETERMINISTIC"
     )]
-    fn op_pow(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_pow(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let exp_val = vm.pop();
         let base_val = vm.pop();
 
@@ -741,7 +741,7 @@ mod core_ops {
 
     /// Calls a function or builtin by name. Operand `a` = arg count.
     #[xcl_op(code = 32, arity = 0, stack = "n+1 -> 1")]
-    fn op_call(vm: &mut VM, _top: usize, instr: Instr) -> OpcodeResult {
+    fn op_call(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         let n = instr.a() as usize;
         let stack_len = vm.stack.len();
         // Stack layout is [callee, arg0 .. argN-1].
@@ -885,7 +885,7 @@ mod core_ops {
     /// Tail-call: pops args and callee, resolves the function, and reuses the current frame
     /// instead of pushing a new one. Operand `a` = arg count.
     #[xcl_op(code = 123, arity = 0, stack = "n+1 -> 0")]
-    fn op_tail_call(vm: &mut VM, _top: usize, instr: Instr) -> OpcodeResult {
+    fn op_tail_call(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         let n = instr.a() as usize;
         let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(n);
         for _ in 0..n {
@@ -977,7 +977,7 @@ mod core_ops {
 
     /// Gets a field from a map or resolves a universal method. Operand `a` = string table index.
     #[xcl_op(code = 38, arity = 1, stack = "1 -> 1")]
-    fn op_get_field(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_get_field(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         let field_idx = instr.a() as usize;
         let target = vm.pop();
         let field = &vm.frames[top].code.string_table[field_idx];
@@ -1005,7 +1005,7 @@ mod core_ops {
 
     /// Starts iterating over an array. Pops the iterable.
     #[xcl_op(code = 42, arity = 1, stack = "1 -> 0")]
-    fn op_for_iter_start(vm: &mut VM, top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_for_iter_start(vm: &mut VM, _locals: LocalSlice, top: usize, _instr: Instr) -> OpcodeResult {
         let iterable = vm.pop();
         let f = &mut vm.frames[top];
         f.iter.clear();
@@ -1018,7 +1018,7 @@ mod core_ops {
 
     /// Advances the iterator, pushing the next value or jumping to end. Operand `a` = jump target.
     #[xcl_op(code = 43, arity = 0, stack = "0 -> 1")]
-    fn op_for_iter_next(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_for_iter_next(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         let f = &mut vm.frames[top];
         if (f.iter_idx as usize) < f.iter.len() {
             let v = f.iter[f.iter_idx as usize];
@@ -1032,7 +1032,7 @@ mod core_ops {
 
     /// Starts a numeric range iteration. Pops end, start.
     #[xcl_op(code = 44, arity = 2, stack = "2 -> 0")]
-    fn op_for_range_start(vm: &mut VM, top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_for_range_start(vm: &mut VM, _locals: LocalSlice, top: usize, _instr: Instr) -> OpcodeResult {
         let end = vm.pop().as_int();
         let start = vm.pop().as_int();
         let f = &mut vm.frames[top];
@@ -1043,7 +1043,7 @@ mod core_ops {
 
     /// Advances the range iterator, pushing the next value or jumping to end. Operand `a` = jump target.
     #[xcl_op(code = 45, arity = 0, stack = "0 -> 1")]
-    fn op_for_range_next(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_for_range_next(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         let f = &mut vm.frames[top];
         if f.range_cur < f.range_end {
             let v = f.range_cur;
@@ -1057,7 +1057,7 @@ mod core_ops {
 
     /// Tests if a value is of a given type. Stack: value, type_name -> bool.
     #[xcl_op(code = 52, arity = 2, stack = "2 -> 1")]
-    fn op_type_test(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_type_test(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let type_name_s = vm.pop().as_str();
         let value = vm.pop();
         let is_type = if let Some(tn) = type_name_s {
@@ -1083,7 +1083,7 @@ mod core_ops {
 
     /// Casts a value to a type (no-op for now). Stack: value, type_name -> value.
     #[xcl_op(code = 53, arity = 2, stack = "2 -> 1")]
-    fn op_type_cast(vm: &mut VM, _top: usize, _instr: Instr) -> OpcodeResult {
+    fn op_type_cast(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
         let type_name_s = vm.pop().as_str();
         let value = vm.pop();
         let _ = type_name_s;
@@ -1093,7 +1093,7 @@ mod core_ops {
 
     /// Dispatches a method call on a receiver value. Operand `a` = field index, `b` = arg count.
     #[xcl_op(code = 66, arity = 0, stack = "n+1 -> 1")]
-    fn op_call_method(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_call_method(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         let field_idx = instr.a() as usize;
         let nargs = instr.b() as usize;
         let string_table = vm.frames[top].code.string_table.clone();
@@ -1187,8 +1187,8 @@ mod core_ops {
 
     /// Load two locals onto the stack. Operand `a` = slot1, `b` = slot2.
     #[xcl_op(code = 60, arity = 0, stack = "0 -> 2")]
-    fn op_load_local_load_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
-        let l = &vm.frames[top].locals;
+    fn op_load_local_load_local(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
+        let l = &locals;
         let a = unsafe { *l.get_unchecked(instr.a() as usize) };
         let b = unsafe { *l.get_unchecked(instr.b() as usize) };
         vm.push(a);
@@ -1198,8 +1198,8 @@ mod core_ops {
 
     /// Add two locals and push result. Operand `a` = slot1, `b` = slot2.
     #[xcl_op(code = 61, arity = 0, stack = "0 -> 1")]
-    fn op_add_local_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
-        let l = &vm.frames[top].locals;
+    fn op_add_local_local(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
+        let l = &locals;
         let a = unsafe { *l.get_unchecked(instr.a() as usize) };
         let b = unsafe { *l.get_unchecked(instr.b() as usize) };
         vm.push(a.add(b, &vm.arena));
@@ -1208,8 +1208,8 @@ mod core_ops {
 
     /// Subtract two locals and push result. Operand `a` = slot1, `b` = slot2.
     #[xcl_op(code = 62, arity = 0, stack = "0 -> 1")]
-    fn op_sub_local_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
-        let l = &vm.frames[top].locals;
+    fn op_sub_local_local(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
+        let l = &locals;
         let a = unsafe { *l.get_unchecked(instr.a() as usize) };
         let b = unsafe { *l.get_unchecked(instr.b() as usize) };
         vm.push(a.sub_(b));
@@ -1218,8 +1218,8 @@ mod core_ops {
 
     /// Less-than compare two locals and push bool. Operand `a` = slot1, `b` = slot2.
     #[xcl_op(code = 63, arity = 0, stack = "0 -> 1")]
-    fn op_lt_local_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
-        let l = &vm.frames[top].locals;
+    fn op_lt_local_local(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
+        let l = &locals;
         let a = unsafe { *l.get_unchecked(instr.a() as usize) };
         let b = unsafe { *l.get_unchecked(instr.b() as usize) };
         vm.push(Value::bool(a.lt(b)));
@@ -1228,8 +1228,8 @@ mod core_ops {
 
     /// Load local and push int constant. Operand `a` = slot, `b` = int.
     #[xcl_op(code = 64, arity = 0, stack = "0 -> 2")]
-    fn op_load_local_push_int(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
-        let v = unsafe { *vm.frames[top].locals.get_unchecked(instr.a() as usize) };
+    fn op_load_local_push_int(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
+        let v = unsafe { *locals.get_unchecked(instr.a() as usize) };
         vm.push(v);
         vm.push(Value::from_i48(instr.b() as i64));
         OpcodeResult::Next
@@ -1237,19 +1237,19 @@ mod core_ops {
 
     /// Copy local `a` to local `b`. Operand `a` = src, `b` = dest.
     #[xcl_op(code = 65, arity = 0, stack = "0 -> 0")]
-    fn op_load_local_store_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
-        let v = unsafe { *vm.frames[top].locals.get_unchecked(instr.a() as usize) };
+    fn op_load_local_store_local(_vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
+        let v = unsafe { *locals.get_unchecked(instr.a() as usize) };
         unsafe {
-            *vm.frames[top].locals.get_unchecked_mut(instr.b() as usize) = v;
+            *locals.get_unchecked_mut(instr.b() as usize) = v;
         }
         OpcodeResult::Next
     }
 
     /// Increment local by 1. Operand `a` = slot.
     #[xcl_op(code = 80, arity = 0, stack = "0 -> 0")]
-    fn op_inc_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_inc_local(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let idx = instr.a() as usize;
         let v = unsafe { *l.get_unchecked(idx) };
         if v.tag() == TAG_INT {
@@ -1267,9 +1267,9 @@ mod core_ops {
 
     /// Decrement local by 1. Operand `a` = slot.
     #[xcl_op(code = 81, arity = 0, stack = "0 -> 0")]
-    fn op_dec_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_dec_local(_vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let idx = instr.a() as usize;
         let v = unsafe { *l.get_unchecked(idx) };
         if v.tag() == TAG_INT {
@@ -1287,8 +1287,8 @@ mod core_ops {
 
     /// Multiply two locals and push result. Operand `a` = slot1, `b` = slot2.
     #[xcl_op(code = 82, arity = 0, stack = "0 -> 1")]
-    fn op_mul_local_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
-        let l = &vm.frames[top].locals;
+    fn op_mul_local_local(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
+        let l = &locals;
         let a = unsafe { *l.get_unchecked(instr.a() as usize) };
         let b = unsafe { *l.get_unchecked(instr.b() as usize) };
         vm.push(a.mul(b, &vm.arena));
@@ -1297,8 +1297,8 @@ mod core_ops {
 
     /// Divide two locals and push result. Operand `a` = slot1, `b` = slot2.
     #[xcl_op(code = 83, arity = 0, stack = "0 -> 1")]
-    fn op_div_local_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
-        let l = &vm.frames[top].locals;
+    fn op_div_local_local(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
+        let l = &locals;
         let a = unsafe { *l.get_unchecked(instr.a() as usize) };
         let b = unsafe { *l.get_unchecked(instr.b() as usize) };
         vm.push(a.div_(b));
@@ -1307,8 +1307,8 @@ mod core_ops {
 
     /// Store local[a] = local[b] + c. Operand `a` = dest, `b` = src, `c` = int constant.
     #[xcl_op(code = 84, arity = 0, stack = "0 -> 0")]
-    fn op_add_int_store_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
-        let l = &mut vm.frames[top].locals;
+    fn op_add_int_store_local(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
+        let l = &locals;
         let dest = instr.a() as usize;
         let src = instr.b() as usize;
         let c = instr.c() as i64;
@@ -1329,8 +1329,8 @@ mod core_ops {
 
     /// Increment local by constant. Operand `a` = slot, `b` = int constant.
     #[xcl_op(code = 85, arity = 0, stack = "0 -> 0")]
-    fn op_inc_local_int(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
-        let l = &mut vm.frames[top].locals;
+    fn op_inc_local_int(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
+        let l = &locals;
         let idx = instr.a() as usize;
         let c = instr.b() as i64;
         let v = unsafe { *l.get_unchecked(idx) };
@@ -1350,7 +1350,7 @@ mod core_ops {
 
     /// Numeric for-loop (Luau FORNLOOP style). Operand `a` = (var_slot << 16) | start_wide_idx, `b` = end_wide_idx.
     #[xcl_op(code = 90, arity = 0, stack = "0 -> 0")]
-    fn op_for_number_loop(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_for_number_loop(vm: &mut VM, locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         let f = &mut vm.frames[top];
         let var_slot = (instr.a() >> 16) as usize;
         let start_wide_idx = (instr.a() & 0xFFFF) as usize;
@@ -1359,14 +1359,14 @@ mod core_ops {
         let start = f.code.wide_operands[start_wide_idx];
         let end = f.code.wide_operands[end_wide_idx];
 
-        let cur = unsafe { *f.locals.get_unchecked(var_slot) };
+        let cur = unsafe { *locals.get_unchecked(var_slot) };
         let cur_val = if cur.is_int() { cur.as_i48() } else { start };
 
         let next_val = cur_val + 1;
 
         if next_val < end {
             unsafe {
-                *f.locals.get_unchecked_mut(var_slot) = Value::from_i48(next_val);
+                *locals.get_unchecked_mut(var_slot) = Value::from_i48(next_val);
             }
             OpcodeResult::Next
         } else {
@@ -1378,9 +1378,9 @@ mod core_ops {
 
     /// Add int constant to local. Operand `a` = slot, `b` = int constant.
     #[xcl_op(code = 91, arity = 0, stack = "0 -> 0")]
-    fn op_add_int_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_add_int_local(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let idx = instr.a() as usize;
         let c = instr.b() as i64;
         let v = unsafe { *l.get_unchecked(idx) };
@@ -1399,9 +1399,9 @@ mod core_ops {
 
     /// Store local[a] = local[a] + local[b]. Operand `a` = dest, `b` = src.
     #[xcl_op(code = 92, arity = 0, stack = "0 -> 0")]
-    fn op_add_local_store(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_add_local_store(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let dest = instr.a() as usize;
         let src = instr.b() as usize;
         let a = unsafe { *l.get_unchecked(dest) };
@@ -1428,9 +1428,9 @@ mod core_ops {
 
     /// Subtract int constant from local. Operand `a` = slot, `b` = int constant.
     #[xcl_op(code = 93, arity = 0, stack = "0 -> 0")]
-    fn op_sub_int_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_sub_int_local(_vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let idx = instr.a() as usize;
         let c = instr.b() as i64;
         let v = unsafe { *l.get_unchecked(idx) };
@@ -1449,9 +1449,9 @@ mod core_ops {
 
     /// Multiply local by int constant. Operand `a` = slot, `b` = int constant.
     #[xcl_op(code = 94, arity = 0, stack = "0 -> 0")]
-    fn op_mul_int_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_mul_int_local(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let idx = instr.a() as usize;
         let c = instr.b() as i64;
         let v = unsafe { *l.get_unchecked(idx) };
@@ -1468,15 +1468,91 @@ mod core_ops {
         OpcodeResult::Next
     }
 
+    /// Push `local[a] <op> b` for a small integer constant. Operand `a` = slot,
+    /// `b` = constant, `c` = 0 add / 1 sub / 2 mul.
+    ///
+    /// Call arguments are the hot case: `fib($n - 1)` used to be
+    /// `LOAD_LOCAL, PUSH_INT, SUB` (three dispatches) before every call.
+    #[xcl_op(code = 125, arity = 0, stack = "0 -> 1")]
+    fn op_push_local_int_op(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
+        use crate::runtime::value::TAG_INT;
+        let v = unsafe { *locals.get_unchecked(instr.a() as usize) };
+        let c = instr.b() as i64;
+        let r = if v.tag() == TAG_INT {
+            let a = v.as_i48();
+            let folded = match instr.c() {
+                1 => a.checked_sub(c),
+                2 => a.checked_mul(c),
+                _ => a.checked_add(c),
+            };
+            match folded {
+                Some(r) => Value::from_i48(r),
+                None => Value::from_f64(a as f64 + c as f64),
+            }
+        } else {
+            let cv = Value::from_i48(c);
+            match instr.c() {
+                1 => v.sub_(cv),
+                2 => v.mul(cv, &vm.arena),
+                _ => v.add(cv, &vm.arena),
+            }
+        };
+        vm.push(r);
+        OpcodeResult::Next
+    }
+
+    /// If local[a] < b: fall through, else jump to the wide-operand target.
+    ///
+    /// Fuses `if $x < N { ... }` (compare + `JUMP_IF_FALSE`) into one dispatch.
+    /// Operand `a` = slot, `b` = limit, `c` = target wide index.
+    #[xcl_op(code = 126, arity = 0, stack = "0 -> 0")]
+    fn op_if_lt_int(vm: &mut VM, locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
+        use crate::runtime::value::TAG_INT;
+        let slot = instr.a() as usize;
+        let limit = instr.b() as i32 as i64;
+        let v = unsafe { *locals.get_unchecked(slot) };
+        let val = if v.tag() == TAG_INT {
+            v.as_i48()
+        } else {
+            v.as_int()
+        };
+        if val < limit {
+            OpcodeResult::Next
+        } else {
+            OpcodeResult::Jump(vm.frames[top].code.wide_operands[instr.c() as usize] as u32)
+        }
+    }
+
+    /// If local[a] == b: fall through, else jump to the wide-operand target.
+    ///
+    /// Fuses `if $x == N { ... }`, the shape used by base cases in recursive
+    /// benchmarks.
+    #[xcl_op(code = 127, arity = 0, stack = "0 -> 0")]
+    fn op_if_eq_int(vm: &mut VM, locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
+        let slot = instr.a() as usize;
+        let limit = instr.b() as i32 as i64;
+        let v = unsafe { *locals.get_unchecked(slot) };
+        let eq = if v.is_int() {
+            v.as_i48() == limit
+        } else {
+            v.eq_(Value::from_i48(limit))
+        };
+        if eq {
+            OpcodeResult::Next
+        } else {
+            OpcodeResult::Jump(vm.frames[top].code.wide_operands[instr.c() as usize] as u32)
+        }
+    }
+
     /// While local[a] < b: continue, else jump to exit. Operand `a` = slot, `b` = limit, `c` = exit_wide_idx.
     #[xcl_op(code = 95, arity = 0, stack = "0 -> 0")]
-    fn op_while_lt_int(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_while_lt_int(vm: &mut VM, locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
         let f = &mut vm.frames[top];
         let slot = instr.a() as usize;
         let limit = instr.b() as i32 as i64;
         let exit_wide_idx = instr.c() as usize;
-        let v = unsafe { *f.locals.get_unchecked(slot) };
+        let v = unsafe { *locals.get_unchecked(slot) };
         let val = if v.tag() == TAG_INT {
             v.as_i48()
         } else {
@@ -1492,9 +1568,9 @@ mod core_ops {
 
     /// Store local[a] = local[a] * local[b]. Operand `a` = dest, `b` = src.
     #[xcl_op(code = 96, arity = 0, stack = "0 -> 0")]
-    fn op_mul_local_store(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_mul_local_store(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let dest = instr.a() as usize;
         let src = instr.b() as usize;
         let a = unsafe { *l.get_unchecked(dest) };
@@ -1521,9 +1597,9 @@ mod core_ops {
 
     /// Store local[a] = local[a] / local[b]. Operand `a` = dest, `b` = src.
     #[xcl_op(code = 97, arity = 0, stack = "0 -> 0")]
-    fn op_div_local_store(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_div_local_store(_vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let dest = instr.a() as usize;
         let src = instr.b() as usize;
         let a = unsafe { *l.get_unchecked(dest) };
@@ -1551,9 +1627,9 @@ mod core_ops {
 
     /// Store local[a] = local[a] - local[b]. Operand `a` = dest, `b` = src.
     #[xcl_op(code = 98, arity = 0, stack = "0 -> 0")]
-    fn op_sub_local_store(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_sub_local_store(_vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let dest = instr.a() as usize;
         let src = instr.b() as usize;
         let a = unsafe { *l.get_unchecked(dest) };
@@ -1580,9 +1656,9 @@ mod core_ops {
 
     /// Store local[a] = local[c] + local[b]. Operand `a` = dest, `b` = src2, `c` = src1.
     #[xcl_op(code = 99, arity = 0, stack = "0 -> 0")]
-    fn op_add_local_local_store(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_add_local_local_store(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let dest = instr.a() as usize;
         let src1 = instr.c() as usize;
         let src2 = instr.b() as usize;
@@ -1610,9 +1686,9 @@ mod core_ops {
 
     /// Store local[a] = local[c] * local[b]. Operand `a` = dest, `b` = src2, `c` = src1.
     #[xcl_op(code = 100, arity = 0, stack = "0 -> 0")]
-    fn op_mul_local_local_store(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_mul_local_local_store(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let dest = instr.a() as usize;
         let src1 = instr.c() as usize;
         let src2 = instr.b() as usize;
@@ -1640,9 +1716,9 @@ mod core_ops {
 
     /// Store local[a] = local[c] - local[b]. Operand `a` = dest, `b` = src2, `c` = src1.
     #[xcl_op(code = 101, arity = 0, stack = "0 -> 0")]
-    fn op_sub_local_local_store(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_sub_local_local_store(_vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let dest = instr.a() as usize;
         let src1 = instr.c() as usize;
         let src2 = instr.b() as usize;
@@ -1670,9 +1746,9 @@ mod core_ops {
 
     /// Store local[a] = local[c] / local[b]. Operand `a` = dest, `b` = src2, `c` = src1.
     #[xcl_op(code = 102, arity = 0, stack = "0 -> 0")]
-    fn op_div_local_local_store(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_div_local_local_store(_vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let dest = instr.a() as usize;
         let src1 = instr.c() as usize;
         let src2 = instr.b() as usize;
@@ -1701,9 +1777,9 @@ mod core_ops {
 
     /// While local[a] < local[b]: continue, else jump to exit. Operand `a` = left, `b` = right, `c` = exit_wide_idx.
     #[xcl_op(code = 103, arity = 0, stack = "0 -> 0")]
-    fn op_while_lt_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_while_lt_local(vm: &mut VM, locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         let f = &mut vm.frames[top];
-        let l = &f.locals;
+        let l = &locals;
         let left = instr.a() as usize;
         let right = instr.b() as usize;
         let exit_wide_idx = instr.c() as usize;
@@ -1726,14 +1802,14 @@ mod core_ops {
 
     /// Store local[a] = local[c][local[b]]. Operand `a` = dest, `b` = idx_slot, `c` = arr_slot.
     #[xcl_op(code = 105, arity = 0, stack = "0 -> 0")]
-    fn op_get_index_local_local_store(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_get_index_local_local_store(_vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         let dest = instr.a() as usize;
         let idx_slot = instr.b() as usize;
         let arr_slot = instr.c() as usize;
 
         // Read locals first (no mutable borrow on vm yet)
-        let target = unsafe { *vm.frames[top].locals.get_unchecked(arr_slot) };
-        let idx = unsafe { *vm.frames[top].locals.get_unchecked(idx_slot) };
+        let target = unsafe { *locals.get_unchecked(arr_slot) };
+        let idx = unsafe { *locals.get_unchecked(idx_slot) };
 
         let result = if let Some(arr) = target.as_array() {
             // Array indexing — never cached
@@ -1750,20 +1826,20 @@ mod core_ops {
             Value::nil()
         };
         unsafe {
-            *vm.frames[top].locals.get_unchecked_mut(dest) = result;
+            *locals.get_unchecked_mut(dest) = result;
         }
         OpcodeResult::Next
     }
 
     /// Store local[a] = local[c].(string_table[b]). Operand `a` = dest, `b` = str_idx, `c` = obj_slot.
     #[xcl_op(code = 106, arity = 0, stack = "0 -> 0")]
-    fn op_get_field_local_store(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_get_field_local_store(vm: &mut VM, locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         let dest = instr.a() as usize;
         let str_idx = instr.b() as usize;
         let obj_slot = instr.c() as usize;
 
         // Read the object and key before borrowing vm mutably
-        let obj = unsafe { *vm.frames[top].locals.get_unchecked(obj_slot) };
+        let obj = unsafe { *locals.get_unchecked(obj_slot) };
         let field_val = vm.frames[top].code.string_values[str_idx];
 
         let result = if let Some(map_obj) = obj.as_map() {
@@ -1772,16 +1848,16 @@ mod core_ops {
             Value::nil()
         };
         unsafe {
-            *vm.frames[top].locals.get_unchecked_mut(dest) = result;
+            *locals.get_unchecked_mut(dest) = result;
         }
         OpcodeResult::Next
     }
 
     /// Store local[a] = local[c] % local[b]. Operand `a` = dest, `b` = src2, `c` = src1.
     #[xcl_op(code = 107, arity = 0, stack = "0 -> 0")]
-    fn op_mod_local_local_store(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_mod_local_local_store(_vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let dest = instr.a() as usize;
         let src2 = instr.b() as usize;
         let src1 = instr.c() as usize;
@@ -1807,7 +1883,7 @@ mod core_ops {
 
     /// Load constant directly to local slot. Operand `a` = slot, `b` = value/index, `c` = kind.
     #[xcl_op(code = 108, arity = 0, stack = "0 -> 0")]
-    fn op_load_const_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_load_const_local(vm: &mut VM, locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         let slot = instr.a() as usize;
         let b = instr.b();
         let kind = instr.c();
@@ -1831,7 +1907,7 @@ mod core_ops {
             }
             _ => Value::nil(),
         };
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         unsafe {
             *l.get_unchecked_mut(slot) = val;
         }
@@ -1843,14 +1919,14 @@ mod core_ops {
     /// Fuses `$s = $s + $obj.field` (and `$s = $s + $obj["field"]`, which the
     /// compiler lowers to the same shape) into a single dispatch.
     #[xcl_op(code = 124, arity = 0, stack = "0 -> 0")]
-    fn op_add_field_local_store(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_add_field_local_store(vm: &mut VM, locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
         let dest = instr.a() as usize;
         let field_idx = instr.b() as usize;
         let obj_slot = instr.c() as usize;
 
         let frame = &vm.frames[top];
-        let obj = unsafe { *frame.locals.get_unchecked(obj_slot) };
+        let obj = unsafe { *locals.get_unchecked(obj_slot) };
         let key = frame.code.string_values[field_idx];
         let b = if let Some(map_obj) = obj.as_map() {
             map_obj.get_fast_value(key).unwrap_or(Value::nil())
@@ -1858,7 +1934,7 @@ mod core_ops {
             Value::nil()
         };
 
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let a = unsafe { *l.get_unchecked(dest) };
         if a.tag() == TAG_INT && b.tag() == TAG_INT {
             let r = a
@@ -1882,8 +1958,8 @@ mod core_ops {
 
     /// Append local[b] to array in local[a]. Operand `a` = arr_slot, `b` = val_slot.
     #[xcl_op(code = 109, arity = 0, stack = "0 -> 0")]
-    fn op_array_push_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
-        let l = &mut vm.frames[top].locals;
+    fn op_array_push_local(_vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
+        let l = &locals;
         let arr_slot = instr.a() as usize;
         let val_slot = instr.b() as usize;
         let val = unsafe { *l.get_unchecked(val_slot) };
@@ -1899,11 +1975,11 @@ mod core_ops {
 
     /// Add float constant to local. Operand `a` = slot, `b` = wide_operands index.
     #[xcl_op(code = 110, arity = 0, stack = "0 -> 0")]
-    fn op_add_float_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_add_float_local(vm: &mut VM, locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
         let frame = &vm.frames[top];
         let f = f64::from_bits(frame.code.wide_operands[instr.b() as usize] as u64);
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let idx = instr.a() as usize;
         let v = unsafe { *l.get_unchecked(idx) };
         if v.is_float() {
@@ -1924,11 +2000,11 @@ mod core_ops {
 
     /// Subtract float constant from local. Operand `a` = slot, `b` = wide_operands index.
     #[xcl_op(code = 111, arity = 0, stack = "0 -> 0")]
-    fn op_sub_float_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_sub_float_local(vm: &mut VM, locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
         let frame = &vm.frames[top];
         let f = f64::from_bits(frame.code.wide_operands[instr.b() as usize] as u64);
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let idx = instr.a() as usize;
         let v = unsafe { *l.get_unchecked(idx) };
         if v.is_float() {
@@ -1949,11 +2025,11 @@ mod core_ops {
 
     /// Multiply local by float constant. Operand `a` = slot, `b` = wide_operands index.
     #[xcl_op(code = 112, arity = 0, stack = "0 -> 0")]
-    fn op_mul_float_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_mul_float_local(vm: &mut VM, locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
         let frame = &vm.frames[top];
         let f = f64::from_bits(frame.code.wide_operands[instr.b() as usize] as u64);
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let idx = instr.a() as usize;
         let v = unsafe { *l.get_unchecked(idx) };
         if v.is_float() {
@@ -1974,11 +2050,11 @@ mod core_ops {
 
     /// Divide local by float constant. Operand `a` = slot, `b` = wide_operands index.
     #[xcl_op(code = 113, arity = 0, stack = "0 -> 0")]
-    fn op_div_float_local(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_div_float_local(vm: &mut VM, locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
         let frame = &vm.frames[top];
         let f = f64::from_bits(frame.code.wide_operands[instr.b() as usize] as u64);
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let idx = instr.a() as usize;
         let v = unsafe { *l.get_unchecked(idx) };
         if v.is_float() {
@@ -1999,9 +2075,9 @@ mod core_ops {
 
     /// Test local[a] % b == c. Operand `a` = slot, `b` = divisor, `c` = eq_val.
     #[xcl_op(code = 114, arity = 0, stack = "0 -> 1")]
-    fn op_mod_eq_int(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_mod_eq_int(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::value::TAG_INT;
-        let l = &mut vm.frames[top].locals;
+        let l = &locals;
         let idx = instr.a() as usize;
         let divisor = instr.b() as i64;
         let eq_val = instr.c() as i64;
@@ -2023,7 +2099,7 @@ mod core_ops {
     /// Operand `a` = positional index (`$1..$N`), operand `c` = kind
     /// (`runtime::opcode::special_var_kind`).
     #[xcl_op(code = 118, arity = 0, stack = "0 -> 1")]
-    fn op_special_var(vm: &mut VM, top: usize, instr: Instr) -> OpcodeResult {
+    fn op_special_var(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         use crate::runtime::opcode::special_var_kind as sv;
 
         let index = instr.a() as usize;

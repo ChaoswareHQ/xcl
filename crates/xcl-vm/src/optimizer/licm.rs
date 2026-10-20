@@ -1,4 +1,4 @@
-﻿//! Loop detection and loop-invariant code motion.
+//! Loop detection and loop-invariant code motion.
 //!
 //! Identifies natural loops via back edges and hoists invariant instructions
 //! (like LOAD_GLOBAL) before loop entry.
@@ -14,7 +14,9 @@ use alloc::{
 use crate::bytecode::{
     Instr, OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,
 };
-use crate::runtime::vm::ops::consts::{OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_GLOBAL, OP_NOP};
+use crate::runtime::vm::ops::consts::{
+    OP_IF_EQ_INT, OP_IF_LT_INT, OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_GLOBAL, OP_NOP,
+};
 
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;
@@ -126,7 +128,7 @@ fn detect_loops(code: &[Instr], blocks: &[BasicBlock]) -> Vec<Vec<usize>> {
 /// Move loop-invariant instructions outside loops.
 ///
 /// Handles:
-/// - LOAD_GLOBAL inside loops â†’ hoist before loop entry
+/// - LOAD_GLOBAL inside loops → hoist before loop entry
 ///
 /// Algorithm:
 /// 1. Detect natural loops using back edges in the CFG
@@ -177,7 +179,7 @@ pub fn loop_invariant_code_motion(code: &mut Vec<Instr>, wide: &mut [i64]) {
         let header_instr_idx = header_block.start;
 
         // The pre-header is the instruction just before the loop header.
-        // If the header is at index 0, there's no pre-header â€” skip.
+        // If the header is at index 0, there's no pre-header — skip.
         if header_instr_idx == 0 {
             continue;
         }
@@ -266,7 +268,11 @@ fn patch_jump_targets_insert(code: &mut [Instr], wide: &mut [i64], pos: usize, c
                     *instr = Instr::make(op, instr.a() + count_u32, instr.b(), instr.c());
                 }
             }
-            OP_WHILE_LT_INT | OP_WHILE_LT_LOCAL | OP_FOR_NUMBER_LOOP => {
+            OP_WHILE_LT_INT
+            | OP_WHILE_LT_LOCAL
+            | OP_FOR_NUMBER_LOOP
+            | OP_IF_LT_INT
+            | OP_IF_EQ_INT => {
                 let w_idx = instr.c() as usize;
                 if let Some(exit_ip) = wide.get_mut(w_idx)
                     && *exit_ip >= pos as i64
