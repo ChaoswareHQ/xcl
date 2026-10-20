@@ -1,4 +1,4 @@
-﻿//! Data flow analysis: basic block construction, reaching definitions, and live variable analysis.
+//! Data flow analysis: basic block construction, reaching definitions, and live variable analysis.
 //!
 //! Provides the foundation for dead store elimination and constant propagation.
 
@@ -13,27 +13,31 @@ use alloc::{
     vec::Vec,
 };
 
-use crate::bytecode::{
-    Instr, OP_ADD_INT_STORE_LOCAL, OP_ADD_LOCAL_LOCAL, OP_ADD_LOCAL_LOCAL_STORE,
-    OP_ADD_LOCAL_STORE, OP_ADD_INT_LOCAL, OP_ADD_FLOAT_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_DEC_LOCAL,
-    OP_DIV_LOCAL_LOCAL, OP_DIV_LOCAL_LOCAL_STORE, OP_DIV_LOCAL_STORE, OP_DIV_FLOAT_LOCAL,
-    OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_GET_FIELD_LOCAL_STORE,
-    OP_ADD_FIELD_LOCAL_STORE,
-    OP_GET_INDEX_LOCAL_LOCAL_STORE, OP_INC_LOCAL, OP_INC_LOCAL_INT, OP_LOAD_CONST_LOCAL,
-    OP_LOAD_LOCAL_LOAD_LOCAL, OP_LOAD_LOCAL_PUSH_INT, OP_LOAD_LOCAL_STORE_LOCAL, OP_LT_LOCAL_LOCAL,
-    OP_MOD_EQ_INT, OP_MOD_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_LOCAL, OP_MUL_LOCAL_LOCAL_STORE,
-    OP_MUL_LOCAL_STORE, OP_MUL_INT_LOCAL, OP_MUL_FLOAT_LOCAL, OP_SUB_LOCAL_LOCAL,
-    OP_SUB_LOCAL_LOCAL_STORE, OP_SUB_LOCAL_STORE, OP_SUB_INT_LOCAL, OP_SUB_FLOAT_LOCAL,
-    OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL, OP_IF_LT_INT, OP_IF_EQ_INT,
-};
+use crate::bytecode::Instr;
 use crate::runtime::vm::ops::consts::{
-    OP_HALT, OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_LOCAL, OP_RETURN, OP_STORE_LOCAL,
+    OP_HALT, OP_RETURN,
 };
+use crate::runtime::vm::ops::meta;
 
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeSet;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
+
+/// Expand a slot mask into slot indices for the given instruction.
+fn slot_indices(mask: u8, instr: Instr) -> Vec<u32> {
+    let mut slots = Vec::new();
+    if mask & 1 != 0 {
+        slots.push(instr.a());
+    }
+    if mask & 2 != 0 {
+        slots.push(instr.b() as u32);
+    }
+    if mask & 4 != 0 {
+        slots.push(instr.c() as u32);
+    }
+    slots
+}
 
 /// A basic block in the bytecode control flow graph.
 #[derive(Debug, Clone)]
@@ -67,8 +71,10 @@ pub(crate) fn build_basic_blocks(code: &[Instr], wide: &[i64]) -> Vec<BasicBlock
 
     // First pass: mark all jump targets and fall-through targets
     for (i, instr) in code.iter().enumerate() {
-        match instr.op() {
-            OP_JUMP | OP_JUMP_IF_FALSE | OP_JUMP_IF_NIL => {
+        let kind = meta::branch_kind(instr.op());
+        match kind {
+            1 => {
+                // Absolute branch: target in operand a
                 let target = instr.a() as usize;
                 if target < len {
                     is_leader[target] = true;
@@ -78,28 +84,12 @@ pub(crate) fn build_basic_blocks(code: &[Instr], wide: &[i64]) -> Vec<BasicBlock
                     is_leader[i + 1] = true;
                 }
             }
-            OP_FOR_ITER_NEXT | OP_FOR_RANGE_NEXT => {
-                let target = instr.a() as usize;
-                if target < len {
-                    is_leader[target] = true;
-                }
-                if i + 1 < len {
-                    is_leader[i + 1] = true;
-                }
-            }
-            OP_WHILE_LT_INT
-            | OP_WHILE_LT_LOCAL
-            | OP_FOR_NUMBER_LOOP
-            | OP_IF_LT_INT
-            | OP_IF_EQ_INT => {
-                // The wide operand holds the exit target
+            2 => {
+                // Wide branch: exit target in wide operand c
                 // We can't resolve it here without wide_operands, so mark fall-through
                 if i + 1 < len {
                     is_leader[i + 1] = true;
                 }
-            }
-            OP_HALT => {
-                // No successors
             }
             _ => {}
         }
@@ -133,14 +123,24 @@ pub(crate) fn build_basic_blocks(code: &[Instr], wide: &[i64]) -> Vec<BasicBlock
     for block in &mut blocks {
         for (idx, instr) in code[block.start..=block.end].iter().enumerate() {
             let idx = block.start + idx;
-            match instr.op() {
-                OP_STORE_LOCAL => {
-                    block.defs.push(instr.a());
-                }
-                OP_LOAD_LOCAL => {
-                    block.uses.push(instr.a());
-                }
-                OP_JUMP | OP_JUMP_IF_FALSE | OP_JUMP_IF_NIL => {
+            let op = instr.op();
+            // Use metadata for slot reads/writes
+            for s in slot_indices(meta::reads(op), *instr) {
+                block.uses.push(s);
+            }
+            for s in slot_indices(meta::writes(op), *instr) {
+                block.defs.push(s);
+            }
+            // OP_FOR_NUMBER_LOOP is a packed-operand opt-out — special case
+            if op == crate::bytecode::OP_FOR_NUMBER_LOOP {
+                let var_slot = instr.a() >> 16;
+                block.uses.push(var_slot);
+                block.defs.push(var_slot);
+            }
+            let kind = meta::branch_kind(op);
+            match kind {
+                1 => {
+                    // Absolute branch: target in operand a
                     let target = instr.a() as usize;
                     if target < len && !block.successors.contains(&target) {
                         block.successors.push(target);
@@ -153,23 +153,8 @@ pub(crate) fn build_basic_blocks(code: &[Instr], wide: &[i64]) -> Vec<BasicBlock
                         }
                     }
                 }
-                OP_FOR_ITER_NEXT | OP_FOR_RANGE_NEXT => {
-                    let target = instr.a() as usize;
-                    if target < len && !block.successors.contains(&target) {
-                        block.successors.push(target);
-                    }
-                    if idx + 1 < len && idx == block.end {
-                        let ft = idx + 1;
-                        if !block.successors.contains(&ft) {
-                            block.successors.push(ft);
-                        }
-                    }
-                }
-                OP_WHILE_LT_INT
-                | OP_WHILE_LT_LOCAL
-                | OP_FOR_NUMBER_LOOP
-                | OP_IF_LT_INT
-                | OP_IF_EQ_INT => {
+                2 => {
+                    // Wide branch: exit target in wide operand c
                     // Fall-through to loop body (next instruction)
                     if idx + 1 < len && idx == block.end {
                         let ft = idx + 1;
@@ -188,9 +173,6 @@ pub(crate) fn build_basic_blocks(code: &[Instr], wide: &[i64]) -> Vec<BasicBlock
                         }
                     }
                 }
-                OP_HALT => {
-                    // No successors
-                }
                 _ => {}
             }
         }
@@ -200,15 +182,22 @@ pub(crate) fn build_basic_blocks(code: &[Instr], wide: &[i64]) -> Vec<BasicBlock
     // terminator (JUMP, HALT, RETURN) should fall through to the next block (end + 1).
     for block in &mut blocks {
         let last_instr = code[block.end];
-        match last_instr.op() {
-            OP_JUMP | OP_HALT | OP_RETURN => {
-                // Unconditional terminators have no fall-through
-            }
-            _ => {
+        let op = last_instr.op();
+        if op == OP_HALT || op == OP_RETURN {
+            // Unconditional terminators have no fall-through
+        } else if meta::branch_kind(op) == 1 {
+            // Absolute branch: only unconditional JUMP has no fall-through
+            // Conditional branches (JUMP_IF_FALSE, JUMP_IF_NIL, FOR_ITER_NEXT, FOR_RANGE_NEXT) fall through
+            if op != crate::runtime::vm::ops::consts::OP_JUMP {
                 let next = block.end + 1;
                 if next < len && !block.successors.contains(&next) {
                     block.successors.push(next);
                 }
+            }
+        } else {
+            let next = block.end + 1;
+            if next < len && !block.successors.contains(&next) {
+                block.successors.push(next);
             }
         }
     }
@@ -236,123 +225,19 @@ pub(crate) fn live_variables(code: &[Instr], blocks: &[BasicBlock]) -> Vec<BTree
     for (bi, block) in blocks.iter().enumerate() {
         for instr in &code[block.start..=block.end] {
             let op = instr.op();
-            match op {
-                // Simple load/store
-                OP_LOAD_LOCAL => {
-                    use_set[bi].insert(instr.a());
-                }
-                OP_STORE_LOCAL => {
-                    def_set[bi].insert(instr.a());
-                }
-                // Fused load+store: LOAD_CONST_LOCAL reads wide, writes slot a
-                OP_LOAD_CONST_LOCAL => {
-                    def_set[bi].insert(instr.a());
-                }
-                // LOAD_LOCAL_STORE_LOCAL: reads slot b, writes slot a
-                OP_LOAD_LOCAL_STORE_LOCAL => {
-                    use_set[bi].insert(instr.b() as u32);
-                    def_set[bi].insert(instr.a());
-                }
-                // LOAD_LOCAL_PUSH_INT: reads slot a
-                OP_LOAD_LOCAL_PUSH_INT => {
-                    use_set[bi].insert(instr.a());
-                }
-                // Binary fused ops: ADD_LOCAL_LOCAL, SUB_LOCAL_LOCAL, etc. â€” reads a and b
-                OP_ADD_LOCAL_LOCAL | OP_SUB_LOCAL_LOCAL | OP_MUL_LOCAL_LOCAL
-                | OP_DIV_LOCAL_LOCAL | OP_LT_LOCAL_LOCAL => {
-                    use_set[bi].insert(instr.a());
-                    use_set[bi].insert(instr.b() as u32);
-                }
-                // Store-back fused ops: ADD_LOCAL_STORE, SUB_LOCAL_STORE, etc.
-                // Reads slots a and b, writes slot a
-                OP_ADD_LOCAL_STORE | OP_SUB_LOCAL_STORE | OP_MUL_LOCAL_STORE
-                | OP_DIV_LOCAL_STORE => {
-                    use_set[bi].insert(instr.a());
-                    use_set[bi].insert(instr.b() as u32);
-                    def_set[bi].insert(instr.a());
-                }
-                // Three-operand fused: ADD_LOCAL_LOCAL_STORE â€” reads a and b, writes c
-                OP_ADD_LOCAL_LOCAL_STORE
-                | OP_MUL_LOCAL_LOCAL_STORE
-                | OP_SUB_LOCAL_LOCAL_STORE
-                | OP_DIV_LOCAL_LOCAL_STORE
-                | OP_MOD_LOCAL_LOCAL_STORE => {
-                    use_set[bi].insert(instr.b() as u32);
-                    use_set[bi].insert(instr.c() as u32);
-                    def_set[bi].insert(instr.a());
-                }
-                // Constant-operand fused ops: ADD_INT_LOCAL, SUB_INT_LOCAL, etc.
-                // Reads slot a, writes slot a
-                OP_ADD_INT_LOCAL | OP_SUB_INT_LOCAL | OP_MUL_INT_LOCAL
-                | OP_ADD_FLOAT_LOCAL | OP_SUB_FLOAT_LOCAL | OP_MUL_FLOAT_LOCAL | OP_DIV_FLOAT_LOCAL =>
-                {
-                    use_set[bi].insert(instr.a());
-                    def_set[bi].insert(instr.a());
-                }
-                // MOD_EQ_INT: reads slot a, pushes result (no local write)
-                OP_MOD_EQ_INT => {
-                    use_set[bi].insert(instr.a());
-                }
-                // INC/DEC: reads and writes slot a
-                OP_INC_LOCAL | OP_DEC_LOCAL => {
-                    use_set[bi].insert(instr.a());
-                    def_set[bi].insert(instr.a());
-                }
-                // INC_LOCAL_INT: reads and writes slot a (operand a = slot, b = const)
-                OP_INC_LOCAL_INT => {
-                    use_set[bi].insert(instr.a());
-                    def_set[bi].insert(instr.a());
-                }
-                // ADD_INT_STORE_LOCAL: reads slot b, writes slot a (operand a = dest, b = src, c = const)
-                OP_ADD_INT_STORE_LOCAL => {
-                    use_set[bi].insert(instr.b() as u32);
-                    def_set[bi].insert(instr.a());
-                }
-                // LOAD_LOCAL_LOAD_LOCAL: reads slot a and slot b
-                OP_LOAD_LOCAL_LOAD_LOCAL => {
-                    use_set[bi].insert(instr.a());
-                    use_set[bi].insert(instr.b() as u32);
-                }
-                // WHILE_LT_INT: reads slot a (operand a = slot, b = limit, c = exit_wide_idx)
-                OP_WHILE_LT_INT | OP_IF_LT_INT | OP_IF_EQ_INT => {
-                    use_set[bi].insert(instr.a());
-                }
-                // WHILE_LT_LOCAL: reads slot a and slot b (operand a = left, b = right, c = exit_wide_idx)
-                OP_WHILE_LT_LOCAL => {
-                    use_set[bi].insert(instr.a());
-                    use_set[bi].insert(instr.b() as u32);
-                }
-                // GET_INDEX_LOCAL_LOCAL_STORE: reads slot b (index) and slot c (array), writes slot a
-                OP_GET_INDEX_LOCAL_LOCAL_STORE => {
-                    use_set[bi].insert(instr.b() as u32);
-                    use_set[bi].insert(instr.c() as u32);
-                    def_set[bi].insert(instr.a());
-                }
-                // GET_FIELD_LOCAL_STORE: reads slot c (object), writes slot a
-                OP_GET_FIELD_LOCAL_STORE => {
-                    use_set[bi].insert(instr.c() as u32);
-                    def_set[bi].insert(instr.a());
-                }
-                // ADD_FIELD_LOCAL_STORE: reads slot a (accumulator) and slot c
-                // (object), writes slot a
-                OP_ADD_FIELD_LOCAL_STORE => {
-                    use_set[bi].insert(instr.a());
-                    use_set[bi].insert(instr.c() as u32);
-                    def_set[bi].insert(instr.a());
-                }
-                // ARRAY_PUSH_LOCAL: reads slot a (array) and slot b (value), writes slot a
-                OP_ARRAY_PUSH_LOCAL => {
-                    use_set[bi].insert(instr.a());
-                    use_set[bi].insert(instr.b() as u32);
-                    def_set[bi].insert(instr.a());
-                }
-                // FOR_NUMBER_LOOP: reads and writes the loop-var slot packed in a (var_slot = a >> 16)
-                OP_FOR_NUMBER_LOOP => {
-                    let var_slot = instr.a() >> 16;
-                    use_set[bi].insert(var_slot);
-                    def_set[bi].insert(var_slot);
-                }
-                _ => {}
+            // Use metadata for slot reads/writes
+            for s in slot_indices(meta::reads(op), *instr) {
+                use_set[bi].insert(s);
+            }
+            for s in slot_indices(meta::writes(op), *instr) {
+                def_set[bi].insert(s);
+            }
+            // OP_FOR_NUMBER_LOOP is a packed-operand opt-out — special case
+            // (see docs/tasks/opcode-slot-meta.md)
+            if op == crate::bytecode::OP_FOR_NUMBER_LOOP {
+                let var_slot = instr.a() >> 16;
+                use_set[bi].insert(var_slot);
+                def_set[bi].insert(var_slot);
             }
         }
     }
@@ -427,87 +312,20 @@ pub(crate) fn live_variables(code: &[Instr], blocks: &[BasicBlock]) -> Vec<BTree
             let op = instr.op();
 
             // Compute per-instruction use and def
+            // Compute per-instruction use and def from metadata
             let mut instr_use: BTreeSet<u32> = BTreeSet::new();
             let mut instr_def: BTreeSet<u32> = BTreeSet::new();
-            match op {
-                OP_LOAD_LOCAL => { instr_use.insert(instr.a()); }
-                OP_STORE_LOCAL => { instr_def.insert(instr.a()); }
-                OP_LOAD_CONST_LOCAL => { instr_def.insert(instr.a()); }
-                OP_LOAD_LOCAL_STORE_LOCAL => {
-                    instr_use.insert(instr.b() as u32);
-                    instr_def.insert(instr.a());
-                }
-                OP_LOAD_LOCAL_PUSH_INT => { instr_use.insert(instr.a()); }
-                OP_ADD_LOCAL_LOCAL | OP_SUB_LOCAL_LOCAL | OP_MUL_LOCAL_LOCAL
-                | OP_DIV_LOCAL_LOCAL | OP_LT_LOCAL_LOCAL => {
-                    instr_use.insert(instr.a());
-                    instr_use.insert(instr.b() as u32);
-                }
-                OP_ADD_LOCAL_STORE | OP_SUB_LOCAL_STORE | OP_MUL_LOCAL_STORE
-                | OP_DIV_LOCAL_STORE => {
-                    instr_use.insert(instr.a());
-                    instr_use.insert(instr.b() as u32);
-                    instr_def.insert(instr.a());
-                }
-                OP_ADD_LOCAL_LOCAL_STORE | OP_MUL_LOCAL_LOCAL_STORE
-                | OP_SUB_LOCAL_LOCAL_STORE | OP_DIV_LOCAL_LOCAL_STORE
-                | OP_MOD_LOCAL_LOCAL_STORE => {
-                    instr_use.insert(instr.b() as u32);
-                    instr_use.insert(instr.c() as u32);
-                    instr_def.insert(instr.a());
-                }
-                OP_ADD_INT_LOCAL | OP_SUB_INT_LOCAL | OP_MUL_INT_LOCAL
-                | OP_ADD_FLOAT_LOCAL | OP_SUB_FLOAT_LOCAL | OP_MUL_FLOAT_LOCAL | OP_DIV_FLOAT_LOCAL => {
-                    instr_use.insert(instr.a());
-                    instr_def.insert(instr.a());
-                }
-                OP_MOD_EQ_INT => { instr_use.insert(instr.a()); }
-                OP_INC_LOCAL | OP_DEC_LOCAL => {
-                    instr_use.insert(instr.a());
-                    instr_def.insert(instr.a());
-                }
-                OP_INC_LOCAL_INT => {
-                    instr_use.insert(instr.a());
-                    instr_def.insert(instr.a());
-                }
-                OP_ADD_INT_STORE_LOCAL => {
-                    instr_use.insert(instr.b() as u32);
-                    instr_def.insert(instr.a());
-                }
-                OP_LOAD_LOCAL_LOAD_LOCAL => {
-                    instr_use.insert(instr.a());
-                    instr_use.insert(instr.b() as u32);
-                }
-                OP_WHILE_LT_INT | OP_IF_LT_INT | OP_IF_EQ_INT => { instr_use.insert(instr.a()); }
-                OP_WHILE_LT_LOCAL => {
-                    instr_use.insert(instr.a());
-                    instr_use.insert(instr.b() as u32);
-                }
-                OP_GET_INDEX_LOCAL_LOCAL_STORE => {
-                    instr_use.insert(instr.b() as u32);
-                    instr_use.insert(instr.c() as u32);
-                    instr_def.insert(instr.a());
-                }
-                OP_GET_FIELD_LOCAL_STORE => {
-                    instr_use.insert(instr.c() as u32);
-                    instr_def.insert(instr.a());
-                }
-                OP_ADD_FIELD_LOCAL_STORE => {
-                    instr_use.insert(instr.a());
-                    instr_use.insert(instr.c() as u32);
-                    instr_def.insert(instr.a());
-                }
-                OP_ARRAY_PUSH_LOCAL => {
-                    instr_use.insert(instr.a());
-                    instr_use.insert(instr.b() as u32);
-                    instr_def.insert(instr.a());
-                }
-                OP_FOR_NUMBER_LOOP => {
-                    let var_slot = instr.a() >> 16;
-                    instr_use.insert(var_slot);
-                    instr_def.insert(var_slot);
-                }
-                _ => {}
+            for s in slot_indices(meta::reads(op), *instr) {
+                instr_use.insert(s);
+            }
+            for s in slot_indices(meta::writes(op), *instr) {
+                instr_def.insert(s);
+            }
+            // OP_FOR_NUMBER_LOOP is a packed-operand opt-out — special case
+            if op == crate::bytecode::OP_FOR_NUMBER_LOOP {
+                let var_slot = instr.a() >> 16;
+                instr_use.insert(var_slot);
+                instr_def.insert(var_slot);
             }
 
             // live at idx = instr_use union (live_after - instr_def)

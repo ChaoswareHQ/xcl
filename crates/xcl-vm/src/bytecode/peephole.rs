@@ -13,21 +13,16 @@ use alloc::{
 
 use super::instr::Instr;
 use super::opcodes::*;
+use crate::runtime::vm::ops::meta;
 
 #[inline(always)]
 fn is_direct_jump(op: u8) -> bool {
-    matches!(
-        op,
-        OP_JUMP | OP_JUMP_IF_FALSE | OP_JUMP_IF_NIL | OP_FOR_ITER_NEXT | OP_FOR_RANGE_NEXT
-    )
+    meta::branch_kind(op) == 1
 }
 
 #[inline(always)]
 fn is_wide_exit_jump(op: u8) -> bool {
-    matches!(
-        op,
-        OP_WHILE_LT_INT | OP_WHILE_LT_LOCAL | OP_FOR_NUMBER_LOOP | OP_IF_LT_INT | OP_IF_EQ_INT
-    )
+    meta::branch_kind(op) == 2
 }
 
 /// Drain instructions in `range` and adjust all jump targets after `range.start()`.

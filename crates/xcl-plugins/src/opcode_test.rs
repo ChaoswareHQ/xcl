@@ -3,10 +3,10 @@
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use xcl_macros::xcl_opcode;
+    use xcl_macros::opcode;
     use xcl_vm::{Instr, OpcodeResult, Value};
 
-    #[xcl_opcode(name = "OP_XCL_TEST", code = 200)]
+    #[opcode(name = "OP_XCL_TEST", code = 200)]
     fn op_xcl_test(vm: &mut xcl_vm::VM, _top: usize, _instr: Instr) -> OpcodeResult {
         vm.push_value(Value::from_i48(42));
         OpcodeResult::Next

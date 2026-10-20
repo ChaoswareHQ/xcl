@@ -1,30 +1,20 @@
-﻿//! Constant propagation: replaces LOAD_LOCAL with PUSH_INT when the slot holds a known constant.
+//! Constant propagation: replaces LOAD_LOCAL with PUSH_INT when the slot holds a known constant.
 //!
 //! Stops propagation at function calls, global access, and loop back-edges.
-
 
 // `alloc` re-exports needed by `no_std` builds (std prelude provides them).
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use alloc::{
-    vec::Vec,
-};
+use alloc::vec::Vec;
 
-use crate::bytecode::{
-    Instr, OP_ADD_FLOAT_LOCAL, OP_ADD_INT_LOCAL, OP_ADD_INT_STORE_LOCAL, OP_ADD_LOCAL_LOCAL_STORE,
-    OP_ADD_LOCAL_STORE, OP_ARRAY_PUSH_LOCAL, OP_CALL, OP_CALL_METHOD, OP_DEC_LOCAL,
-    OP_DIV_FLOAT_LOCAL, OP_DIV_LOCAL_LOCAL_STORE, OP_DIV_LOCAL_STORE, OP_FOR_ITER_NEXT,
-    OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_GET_FIELD_LOCAL_STORE, OP_ADD_FIELD_LOCAL_STORE,
-    OP_GET_INDEX_LOCAL_LOCAL_STORE, OP_INC_LOCAL, OP_INC_LOCAL_INT, OP_LOAD_CONST_LOCAL,
-    OP_LOAD_LOCAL_STORE_LOCAL, OP_MOD_EQ_INT, OP_MOD_LOCAL_LOCAL_STORE, OP_MUL_FLOAT_LOCAL,
-    OP_MUL_INT_LOCAL, OP_MUL_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_STORE, OP_SUB_FLOAT_LOCAL,
-    OP_SUB_INT_LOCAL, OP_SUB_LOCAL_LOCAL_STORE, OP_SUB_LOCAL_STORE, OP_WHILE_LT_INT,
-    OP_WHILE_LT_LOCAL,
-};
+use crate::bytecode::Instr;
 use crate::runtime::vm::ops::consts::{
-    OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_GLOBAL, OP_LOAD_LOCAL, OP_PUSH_INT,
-    OP_STORE_GLOBAL, OP_STORE_LOCAL,
+    OP_CALL, OP_CALL_METHOD, OP_DEC_LOCAL, OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT,
+    OP_INC_LOCAL, OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_CONST_LOCAL, OP_LOAD_GLOBAL,
+    OP_LOAD_LOCAL, OP_LOAD_LOCAL_STORE_LOCAL, OP_PUSH_INT, OP_STORE_GLOBAL, OP_STORE_LOCAL,
+    OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,
 };
+use crate::runtime::vm::ops::meta;
 
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeSet;
@@ -100,23 +90,21 @@ pub fn constant_propagation(code: &mut Vec<Instr>, wide: &[i64]) {
         let op = instr.op();
 
         match op {
-            // PUSH_INT k; STORE_LOCAL slot â†’ slot is known constant k
+            // PUSH_INT k; STORE_LOCAL slot → slot is known constant k
             OP_STORE_LOCAL => {
                 let slot = instr.a();
-                // Check if previous instruction was PUSH_INT
                 if i > 0 {
                     let prev = code[i - 1];
                     if prev.op() == OP_PUSH_INT {
                         constants.insert(slot, (i - 1, prev.a()));
                     } else {
-                        // Unknown value stored â€” clear constant
                         constants.remove(&slot);
                     }
                 } else {
                     constants.remove(&slot);
                 }
             }
-            // LOAD_LOCAL slot â†’ replace with PUSH_INT if known constant
+            // LOAD_LOCAL slot → replace with PUSH_INT if known constant
             OP_LOAD_LOCAL => {
                 let slot = instr.a();
                 if let Some((_, val)) = constants.get(&slot) {
@@ -129,18 +117,13 @@ pub fn constant_propagation(code: &mut Vec<Instr>, wide: &[i64]) {
             }
             OP_LOAD_GLOBAL | OP_STORE_GLOBAL => {
                 // Global access may have side effects; be conservative
-                // Don't clear all constants, but don't propagate through globals
             }
-            // Fused opcodes that store to locals invalidate those slots
+            // Fused opcodes that store to locals
             OP_LOAD_CONST_LOCAL => {
                 let slot = instr.a();
                 let kind = instr.c();
                 if kind == 0 {
-                    // Inline int
                     constants.insert(slot, (i, instr.b() as u32));
-                } else if kind == 6 {
-                    // Wide int â€” can't inline, remove from constants
-                    constants.remove(&slot);
                 } else {
                     constants.remove(&slot);
                 }
@@ -160,55 +143,32 @@ pub fn constant_propagation(code: &mut Vec<Instr>, wide: &[i64]) {
                     }
                 }
             }
-            // Fused ops that modify slots invalidate those slots
-            OP_ADD_LOCAL_STORE | OP_SUB_LOCAL_STORE | OP_MUL_LOCAL_STORE | OP_DIV_LOCAL_STORE => {
-                let slot = instr.a();
-                constants.remove(&slot);
-            }
-            // All three-operand fused stores write `a` (the sources are `b` and `c`).
-            OP_ADD_LOCAL_LOCAL_STORE
-            | OP_SUB_LOCAL_LOCAL_STORE
-            | OP_MUL_LOCAL_LOCAL_STORE
-            | OP_DIV_LOCAL_LOCAL_STORE
-            | OP_MOD_LOCAL_LOCAL_STORE
-            | OP_GET_INDEX_LOCAL_LOCAL_STORE
-            | OP_GET_FIELD_LOCAL_STORE
-            | OP_ADD_FIELD_LOCAL_STORE
-            | OP_ADD_INT_STORE_LOCAL
-            | OP_INC_LOCAL_INT => {
-                constants.remove(&instr.a());
-            }
-            // In-place array append mutates the array in slot `a`.
-            OP_ARRAY_PUSH_LOCAL => {
-                constants.remove(&instr.a());
-            }
-            OP_FOR_NUMBER_LOOP => {
-                constants.remove(&(instr.a() >> 16));
-            }
-            OP_ADD_INT_LOCAL | OP_SUB_INT_LOCAL | OP_MUL_INT_LOCAL => {
-                let slot = instr.a();
-                constants.remove(&slot);
-            }
-            // Float constant ops destroy integer constants in slot a
-            OP_ADD_FLOAT_LOCAL | OP_SUB_FLOAT_LOCAL | OP_MUL_FLOAT_LOCAL | OP_DIV_FLOAT_LOCAL => {
-                let slot = instr.a();
-                constants.remove(&slot);
-            }
-            // MOD_EQ_INT reads slot a but doesn't write any local
-            OP_MOD_EQ_INT => {
-                // No constant tracking needed — just reads a local
-            }
             OP_LOAD_LOCAL_STORE_LOCAL => {
-                let dst = instr.a();
-                let src = instr.b() as u32;
-                // If src is a known constant, dst becomes that constant
+                let dst = instr.b() as u32;
+                let src = instr.a();
                 if let Some((_, val)) = constants.get(&src) {
                     constants.insert(dst, (i, *val));
                 } else {
                     constants.remove(&dst);
                 }
             }
-            _ => {}
+            OP_FOR_NUMBER_LOOP => {
+                // Packed-operand opt-out — special case
+                constants.remove(&(instr.a() >> 16));
+            }
+            _ => {
+                // For all other opcodes, invalidate constants for written slots
+                let mask = meta::writes(op);
+                if mask & 1 != 0 {
+                    constants.remove(&instr.a());
+                }
+                if mask & 2 != 0 {
+                    constants.remove(&(instr.b() as u32));
+                }
+                if mask & 4 != 0 {
+                    constants.remove(&(instr.c() as u32));
+                }
+            }
         }
 
         i += 1;

@@ -17,22 +17,19 @@ use alloc::{
     vec::Vec,
 };
 
-use crate::bytecode::{
-    Instr, OP_ADD_INT_LOCAL, OP_ADD_LOCAL_LOCAL, OP_ADD_LOCAL_LOCAL_STORE,
-    OP_ADD_LOCAL_STORE, OP_ADD_FLOAT_LOCAL, OP_ARRAY_PUSH_LOCAL, OP_DEC_LOCAL,
-    OP_DIV_LOCAL_LOCAL, OP_DIV_LOCAL_LOCAL_STORE, OP_DIV_LOCAL_STORE, OP_DIV_FLOAT_LOCAL,
-    OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_GET_FIELD_LOCAL_STORE,
-    OP_ADD_FIELD_LOCAL_STORE,
-    OP_GET_INDEX_LOCAL_LOCAL_STORE, OP_INC_LOCAL, OP_INC_LOCAL_INT, OP_LOAD_CONST_LOCAL,
-    OP_LOAD_LOCAL_STORE_LOCAL, OP_MOD_LOCAL_LOCAL_STORE, OP_MUL_INT_LOCAL, OP_MUL_LOCAL_LOCAL,
-    OP_MUL_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_STORE, OP_MUL_FLOAT_LOCAL, OP_SUB_INT_LOCAL,
-    OP_SUB_LOCAL_LOCAL, OP_SUB_LOCAL_LOCAL_STORE, OP_SUB_LOCAL_STORE, OP_SUB_FLOAT_LOCAL,
-    OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,
-};
+use crate::bytecode::Instr;
 use crate::runtime::vm::ops::consts::{
-    OP_ADD, OP_DIV, OP_HALT, OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_LOCAL, OP_MUL,
-    OP_RETURN, OP_STORE_LOCAL, OP_SUB,
+    OP_ADD, OP_ADD_FIELD_LOCAL_STORE, OP_ADD_FLOAT_LOCAL, OP_ADD_INT_LOCAL, OP_ADD_LOCAL_LOCAL,
+    OP_ADD_LOCAL_LOCAL_STORE, OP_ADD_LOCAL_STORE, OP_DEC_LOCAL, OP_DIV, OP_DIV_FLOAT_LOCAL,
+    OP_DIV_LOCAL_LOCAL, OP_DIV_LOCAL_LOCAL_STORE, OP_DIV_LOCAL_STORE, OP_HALT, OP_INC_LOCAL,
+    OP_INC_LOCAL_INT, OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_LOCAL,
+    OP_LOAD_LOCAL_STORE_LOCAL, OP_MUL, OP_MUL_FLOAT_LOCAL, OP_MUL_INT_LOCAL,
+    OP_MUL_LOCAL_LOCAL, OP_MUL_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_STORE, OP_RETURN, OP_STORE_LOCAL,
+    OP_SUB, OP_SUB_FLOAT_LOCAL, OP_SUB_INT_LOCAL, OP_SUB_LOCAL_LOCAL, OP_SUB_LOCAL_LOCAL_STORE,
+    OP_SUB_LOCAL_STORE, OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_WHILE_LT_INT,
+    OP_WHILE_LT_LOCAL,
 };
+use crate::runtime::vm::ops::meta;
 
 use super::dataflow::{build_basic_blocks, BasicBlock};
 
@@ -40,38 +37,26 @@ use crate::HashMap;
 
 /// Returns the set of local slots **defined** by an instruction.
 ///
-/// Reuses the same operand semantics documented in `optimizer/dataflow.rs`.
+/// Uses the slot metadata from `meta::writes()` as the single source of truth.
 fn defined_slots(instr: Instr) -> Vec<u32> {
-    match instr.op() {
-        OP_STORE_LOCAL
-        | OP_LOAD_CONST_LOCAL
-        | OP_ADD_LOCAL_STORE
-        | OP_SUB_LOCAL_STORE
-        | OP_MUL_LOCAL_STORE
-        | OP_DIV_LOCAL_STORE
-        | OP_ADD_INT_LOCAL
-        | OP_SUB_INT_LOCAL
-        | OP_MUL_INT_LOCAL
-        | OP_ADD_FLOAT_LOCAL
-        | OP_SUB_FLOAT_LOCAL
-        | OP_MUL_FLOAT_LOCAL
-        | OP_DIV_FLOAT_LOCAL
-        | OP_INC_LOCAL
-        | OP_DEC_LOCAL
-        | OP_INC_LOCAL_INT => vec![instr.a()],
-        OP_LOAD_LOCAL_STORE_LOCAL => vec![instr.a()],
-        OP_ADD_LOCAL_LOCAL_STORE
-        | OP_SUB_LOCAL_LOCAL_STORE
-        | OP_MUL_LOCAL_LOCAL_STORE
-        | OP_DIV_LOCAL_LOCAL_STORE
-        | OP_GET_INDEX_LOCAL_LOCAL_STORE
-        | OP_GET_FIELD_LOCAL_STORE
-        | OP_ADD_FIELD_LOCAL_STORE
-        | OP_MOD_LOCAL_LOCAL_STORE => vec![instr.a()],
-        OP_ARRAY_PUSH_LOCAL => vec![instr.a()],
-        OP_FOR_NUMBER_LOOP => vec![instr.a() >> 16],
-        _ => Vec::new(),
+    let op = instr.op();
+    // OP_FOR_NUMBER_LOOP is a packed-operand opt-out — special case
+    // (see docs/tasks/opcode-slot-meta.md)
+    if op == OP_FOR_NUMBER_LOOP {
+        return vec![instr.a() >> 16];
     }
+    let mut slots = Vec::new();
+    let mask = meta::writes(op);
+    if mask & 1 != 0 {
+        slots.push(instr.a());
+    }
+    if mask & 2 != 0 {
+        slots.push(instr.b() as u32);
+    }
+    if mask & 4 != 0 {
+        slots.push(instr.c() as u32);
+    }
+    slots
 }
 
 /// Normalize commutative operands: for ADD/MUL return (min, max), for SUB/DIV keep order.

@@ -1431,7 +1431,7 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// `#[xcl_opcode(name = "OP_...", code = N)]` — Register an extension opcode handler.
+/// `#[opcode(name = "OP_...", code = N)]` — Register an extension opcode handler.
 ///
 /// Declares a function as an opcode handler and registers it in the VM's
 /// [`OPCODE_REGISTRY`](::xcl_plugins::OPCODE_REGISTRY) distributed slice.
@@ -1446,7 +1446,7 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// # Example
 ///
 /// ```ignore
-/// #[xcl_opcode(name = "OP_XCL_TEST", code = 200)]
+/// #[opcode(name = "OP_XCL_TEST", code = 200)]
 /// fn op_xcl_test(
 ///     vm: &mut ::xcl_vm::VM,
 ///     top: usize,
@@ -1457,7 +1457,7 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn xcl_opcode(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn opcode(attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
     let mut name: Option<String> = None;
     let mut code: Option<u8> = None;
@@ -1469,7 +1469,7 @@ pub fn xcl_opcode(attr: TokenStream, item: TokenStream) -> TokenStream {
             code = Some(meta.value()?.parse::<syn::LitInt>()?.base10_parse::<u8>()?);
             Ok(())
         } else {
-            Err(meta.error("unsupported xcl_opcode attribute"))
+            Err(meta.error("unsupported opcode attribute"))
         }
     });
     parse_macro_input!(attr with parser);
@@ -1479,7 +1479,7 @@ pub fn xcl_opcode(attr: TokenStream, item: TokenStream) -> TokenStream {
         None => {
             return syn::Error::new_spanned(
                 &func,
-                "#[xcl_opcode] requires `name = \"OP_...\"` attribute",
+                "#[opcode] requires `name = \"OP_...\"` attribute",
             )
             .to_compile_error()
             .into();
@@ -1509,7 +1509,7 @@ pub fn xcl_opcode(attr: TokenStream, item: TokenStream) -> TokenStream {
         None => {
             return syn::Error::new_spanned(
                 &func,
-                "#[xcl_opcode] requires `code = <int>` attribute (must be 128..=255)",
+                "#[opcode] requires `code = <int>` attribute (must be 128..=255)",
             )
             .to_compile_error()
             .into();
@@ -1553,19 +1553,56 @@ pub fn xcl_opcode(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 // Proc-macro for XCL core opcode generation.
 //
-// Exports `#[xcl_opcodes(scope = core)]` on a module and `#[xcl_op(...)]` on functions
+// Exports `#[opcodes(scope = core)]` on a module and `#[opcode(...)]` on functions
 // inside that module to generate opcode constants and a direct-call dispatch match.
 
-/// Parse `#[xcl_op(code = N, arity = M, stack = "...", flags = "...")]` attributes.
+/// Branch kind for an opcode.
+enum BranchKind {
+    Abs,  // absolute target in operand `a`
+    Wide, // wide-operand index in operand `c`
+}
+
+/// Slot operand mask: bit 0 = `a`, bit 1 = `b`, bit 2 = `c`.
+const SLOT_A: u8 = 0b001;
+const SLOT_B: u8 = 0b010;
+const SLOT_C: u8 = 0b100;
+
+/// Parse `#[opcode(code = N, arity = M, stack = "...", flags = "...")]` attributes.
 struct OpMeta {
     code: u8,
     name: Option<String>,
+    branch: Option<BranchKind>,
+    reads: u8,
+    writes: u8,
+}
+
+/// Parse a comma-separated list of operand letters ("a", "b", "c") into a slot mask.
+fn parse_slot_mask(s: &str, span: Span) -> syn::Result<u8> {
+    let mut mask: u8 = 0;
+    for ch in s.chars() {
+        match ch {
+            'a' => mask |= SLOT_A,
+            'b' => mask |= SLOT_B,
+            'c' => mask |= SLOT_C,
+            ',' => {} // separator, ignore
+            _ => {
+                return Err(syn::Error::new(
+                    span,
+                    format!("unknown operand '{}' in slot mask — expected 'a', 'b', or 'c'", ch),
+                ));
+            }
+        }
+    }
+    Ok(mask)
 }
 
 impl Parse for OpMeta {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let mut code: Option<u8> = None;
         let mut name: Option<String> = None;
+        let mut branch: Option<BranchKind> = None;
+        let mut reads: u8 = 0;
+        let mut writes: u8 = 0;
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -1587,6 +1624,35 @@ impl Parse for OpMeta {
                         return Err(syn::Error::new_spanned(value, "expected string literal"));
                     }
                 }
+                "branch" => {
+                    if let Expr::Lit(ExprLit { lit: Lit::Str(ref lit_str), .. }) = value {
+                        let s = lit_str.value();
+                        match s.as_str() {
+                            "abs" => branch = Some(BranchKind::Abs),
+                            "wide" => branch = Some(BranchKind::Wide),
+                            _ => return Err(syn::Error::new_spanned(
+                                value,
+                                "branch must be \"abs\" or \"wide\"",
+                            )),
+                        }
+                    } else {
+                        return Err(syn::Error::new_spanned(value, "expected string literal"));
+                    }
+                }
+                "reads" => {
+                    if let Expr::Lit(ExprLit { lit: Lit::Str(lit_str), .. }) = value {
+                        reads = parse_slot_mask(&lit_str.value(), lit_str.span())?;
+                    } else {
+                        return Err(syn::Error::new_spanned(value, "expected string literal"));
+                    }
+                }
+                "writes" => {
+                    if let Expr::Lit(ExprLit { lit: Lit::Str(lit_str), .. }) = value {
+                        writes = parse_slot_mask(&lit_str.value(), lit_str.span())?;
+                    } else {
+                        return Err(syn::Error::new_spanned(value, "expected string literal"));
+                    }
+                }
                 _ => {
                     // Ignore other keys like arity, stack, flags — they are metadata only
                 }
@@ -1597,14 +1663,14 @@ impl Parse for OpMeta {
         }
 
         let code = code.ok_or_else(|| syn::Error::new(Span::call_site(), "missing `code`"))?;
-        Ok(OpMeta { code, name })
+        Ok(OpMeta { code, name, branch, reads, writes })
     }
 }
 
-/// Extract xcl_op metadata from function attributes.
-fn extract_xcl_op_attrs(attrs: &[Attribute]) -> Option<OpMeta> {
+/// Extract op metadata from function attributes.
+fn extract_opcode_attrs(attrs: &[Attribute]) -> Option<OpMeta> {
     for attr in attrs {
-        if attr.path().is_ident("xcl_op")
+        if attr.path().is_ident("opcode")
             && let Meta::List(ml) = &attr.meta
         {
             let meta: OpMeta = syn::parse2(ml.tokens.clone()).ok()?;
@@ -1614,9 +1680,9 @@ fn extract_xcl_op_attrs(attrs: &[Attribute]) -> Option<OpMeta> {
     None
 }
 
-/// Check if an attribute is xcl_op (to filter it out).
-fn is_xcl_op_attr(attr: &Attribute) -> bool {
-    attr.path().is_ident("xcl_op")
+/// Check if an attribute is op (to filter it out).
+fn is_opcode_attr(attr: &Attribute) -> bool {
+    attr.path().is_ident("opcode")
 }
 
 /// Convert function name like `op_add` to constant name `OP_ADD`.
@@ -1628,7 +1694,7 @@ fn func_to_const(name: &str) -> String {
     }
 }
 
-/// Parse scope from `#[xcl_opcodes(scope = core)]`.
+/// Parse scope from `#[opcodes(scope = core)]`.
 struct OpcodesMeta {
     scope: String,
 }
@@ -1645,7 +1711,7 @@ impl Parse for OpcodesMeta {
 }
 
 #[proc_macro_attribute]
-pub fn xcl_opcodes(args: TokenStream, input: TokenStream) -> TokenStream {
+pub fn opcodes(args: TokenStream, input: TokenStream) -> TokenStream {
     let meta = parse_macro_input!(args as OpcodesMeta);
     let item_mod = parse_macro_input!(input as ItemMod);
 
@@ -1667,10 +1733,13 @@ pub fn xcl_opcodes(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut codes_seen = Vec::new();
     let mut names_seen = Vec::new();
     let mut name_arms = Vec::new();
+    let mut branch_assigns = Vec::new();
+    let mut slot_reads_assigns = Vec::new();
+    let mut slot_writes_assigns = Vec::new();
 
     for item in funcs {
         if let syn::Item::Fn(func) = &item {
-            let Some(op_meta) = extract_xcl_op_attrs(&func.attrs) else {
+            let Some(op_meta) = extract_opcode_attrs(&func.attrs) else {
                 cleaned_items.push(item);
                 continue;
             };
@@ -1734,9 +1803,34 @@ pub fn xcl_opcodes(args: TokenStream, input: TokenStream) -> TokenStream {
                 #code => #const_name,
             });
 
-            // Build cleaned function (remove xcl_op attrs, keep others, make pub(crate))
+            // Collect branch assignment for meta table
+            if let Some(bk) = &op_meta.branch {
+                let kind_val = match bk {
+                    BranchKind::Abs => 1u8,
+                    BranchKind::Wide => 2u8,
+                };
+                branch_assigns.push(quote! {
+                    t[#code as usize] = #kind_val;
+                });
+            }
+
+            // Collect slot reads/writes for meta table
+            let reads_val = op_meta.reads;
+            let writes_val = op_meta.writes;
+            if reads_val != 0 {
+                slot_reads_assigns.push(quote! {
+                    t[#code as usize] = #reads_val;
+                });
+            }
+            if writes_val != 0 {
+                slot_writes_assigns.push(quote! {
+                    t[#code as usize] = #writes_val;
+                });
+            }
+
+            // Build cleaned function (remove op attrs, keep others, make pub(crate))
             let mut cleaned_func = func.clone();
-            cleaned_func.attrs.retain(|a| !is_xcl_op_attr(a));
+            cleaned_func.attrs.retain(|a| !is_opcode_attr(a));
             let span = Span::call_site();
             cleaned_func.vis = Visibility::Restricted(VisRestricted {
                 pub_token: syn::token::Pub(span),
@@ -1795,6 +1889,44 @@ pub fn xcl_opcodes(args: TokenStream, input: TokenStream) -> TokenStream {
                     #(#name_arms)*
                     _ => return None,
                 })
+            }
+
+            pub mod meta {
+                /// Branch kind table: 0 = not a branch, 1 = absolute target in `a`, 2 = wide-operand index in `c`.
+                pub const BRANCH_KIND: [u8; 256] = {
+                    let mut t = [0u8; 256];
+                    #(#branch_assigns)*
+                    t
+                };
+
+                #[inline(always)]
+                pub const fn branch_kind(op: u8) -> u8 {
+                    BRANCH_KIND[op as usize]
+                }
+
+                /// Slot-reads mask: bit 0 = operand `a`, bit 1 = `b`, bit 2 = `c`.
+                pub const SLOT_READS: [u8; 256] = {
+                    let mut t = [0u8; 256];
+                    #(#slot_reads_assigns)*
+                    t
+                };
+
+                /// Slot-writes mask: bit 0 = operand `a`, bit 1 = `b`, bit 2 = `c`.
+                pub const SLOT_WRITES: [u8; 256] = {
+                    let mut t = [0u8; 256];
+                    #(#slot_writes_assigns)*
+                    t
+                };
+
+                #[inline(always)]
+                pub const fn reads(op: u8) -> u8 {
+                    SLOT_READS[op as usize]
+                }
+
+                #[inline(always)]
+                pub const fn writes(op: u8) -> u8 {
+                    SLOT_WRITES[op as usize]
+                }
             }
         }
     } else {

@@ -11,12 +11,11 @@ use alloc::{
     vec::Vec,
 };
 
-use crate::bytecode::{
-    Instr, OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_WHILE_LT_INT, OP_WHILE_LT_LOCAL,
-};
+use crate::bytecode::Instr;
 use crate::runtime::vm::ops::consts::{
-    OP_IF_EQ_INT, OP_IF_LT_INT, OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL, OP_LOAD_GLOBAL, OP_NOP,
+    OP_LOAD_GLOBAL, OP_NOP,
 };
+use crate::runtime::vm::ops::meta;
 
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;
@@ -261,18 +260,17 @@ fn patch_jump_targets_insert(code: &mut [Instr], wide: &mut [i64], pos: usize, c
     let pos_u32 = pos as u32;
     let count_u32 = count as u32;
     for instr in code.iter_mut() {
-        let op = instr.op();
-        match op {
-            OP_JUMP | OP_JUMP_IF_FALSE | OP_JUMP_IF_NIL | OP_FOR_ITER_NEXT | OP_FOR_RANGE_NEXT => {
+        let kind = meta::branch_kind(instr.op());
+        match kind {
+            1 => {
+                // Absolute branch: target in operand a
                 if instr.a() >= pos_u32 {
+                    let op = instr.op();
                     *instr = Instr::make(op, instr.a() + count_u32, instr.b(), instr.c());
                 }
             }
-            OP_WHILE_LT_INT
-            | OP_WHILE_LT_LOCAL
-            | OP_FOR_NUMBER_LOOP
-            | OP_IF_LT_INT
-            | OP_IF_EQ_INT => {
+            2 => {
+                // Wide branch: exit target in wide operand c
                 let w_idx = instr.c() as usize;
                 if let Some(exit_ip) = wide.get_mut(w_idx)
                     && *exit_ip >= pos as i64

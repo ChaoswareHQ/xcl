@@ -888,3 +888,43 @@ fn large_map_via_from_map_boxed() {
     assert!(map.contains_key("tag"));
     assert!(map.contains_key("ok"));
 }
+
+// ── Branch metadata regression tests (opcode-branch-meta) ──
+
+#[test]
+fn branch_meta_while_lt_int_loop() {
+    // A while loop whose condition uses the fused `if $i < N` form.
+    // This is the shape that looped forever when the wide index was stale.
+    assert_eq!(
+        eval_i64(
+            "$i = 0
+$s = 0
+while $i < 1000 {
+    $s = $s + 1
+    $i = $i + 1
+}
+$s"
+        ),
+        1000
+    );
+}
+
+#[test]
+fn branch_meta_if_eq_int_loop() {
+    // A loop containing `if $i == N` with a break-free structure.
+    // Uses the fused if-eq-int opcode path.
+    assert_eq!(
+        eval_i64(
+            "$i = 0
+$count = 0
+while $i < 500 {
+    if $i == 250 {
+        $count = $count + 1
+    }
+    $i = $i + 1
+}
+$count"
+        ),
+        1
+    );
+}
