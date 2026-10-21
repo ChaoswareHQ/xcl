@@ -40,6 +40,8 @@ never parses prose.
 | `decompile(source)` | `{"ok":bool,"text":string}` — the disassembly |
 | `program(source)` | the compiled image: instruction words, decoded operands, tables |
 | `run(source)` | `{"ok":bool,"value":string,"output":string}` — executes and captures `print` |
+| `trace(source)` | `run` plus `trace: [[ip, depth, opcode], …]` — the executed instruction stream (capped at 5000 steps) |
+| `plugin_demo()` | runs hand-built bytecode through the example plugin's two hot opcodes |
 
 ### `program` shape
 

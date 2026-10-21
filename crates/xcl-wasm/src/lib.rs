@@ -40,14 +40,14 @@
 
 use std::cell::RefCell;
 
+use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 use xcl_analysis::{LintConfig, SourceMap, check_source, json_string};
 use xcl_vm::runtime::opcode::layout;
-use std::sync::Arc;
 
 use xcl_vm::{
     Bytecode, CapSet, FuncValue, Instr, NativeEntry, NativeKind, OpcodeEntry, OpcodeResult,
-    ParseError, RawPtr, Value, VM,
+    ParseError, RawPtr, VM, Value,
 };
 
 /// Name used in diagnostics; the playground has no file on disk.
@@ -448,6 +448,62 @@ fn errors_json(errors: &[ParseError]) -> String {
     out
 }
 
+/// Upper bound on the number of steps sent to the page.
+const TRACE_STEPS: usize = 5000;
+
+/// Runs `source` and returns the executed instruction stream with the result.
+///
+/// `trace` entries are `[ip, depth, opcode]`. Depth 0 is the root frame; deeper
+/// entries come from a function call and refer to that function's own
+/// instructions, which is why the page shows them as a call rather than a
+/// Program row. `steps` is the true count; `truncated` says the array stopped
+/// at [`TRACE_STEPS`].
+#[wasm_bindgen]
+pub fn trace(source: &str) -> String {
+    OUTPUT.with(|buffer| buffer.borrow_mut().clear());
+
+    let mut vm = VM::new();
+    vm.register_natives(&PRELUDE);
+
+    let value = match xcl_vm::evaluate_recover(FILE, source, &mut vm) {
+        Ok(value) => value,
+        Err(errors) => {
+            return format!(
+                "{{\"ok\":false,\"value\":null,\"output\":\"\",\"steps\":0,\"truncated\":false,\"errors\":{}}}",
+                errors_json(&errors)
+            );
+        }
+    };
+
+    let output = OUTPUT.with(|buffer| buffer.borrow().clone());
+    let all = vm.trace();
+
+    let mut steps = String::with_capacity(all.len().min(TRACE_STEPS) * 14);
+    steps.push('[');
+    for (index, (ip, depth, op)) in all.iter().take(TRACE_STEPS).enumerate() {
+        if index > 0 {
+            steps.push(',');
+        }
+        steps.push('[');
+        steps.push_str(&ip.to_string());
+        steps.push(',');
+        steps.push_str(&depth.to_string());
+        steps.push(',');
+        steps.push_str(&op.to_string());
+        steps.push(']');
+    }
+    steps.push(']');
+
+    format!(
+        "{{\"ok\":true,\"value\":{},\"output\":{},\"steps\":{},\"truncated\":{},\"trace\":{}}}",
+        json_string(&value.as_string()),
+        json_string(&output),
+        all.len(),
+        all.len() > TRACE_STEPS,
+        steps
+    )
+}
+
 // ── Example plugin ──
 //
 // A playground-sized plugin: two instructions in the hot module space. Real
@@ -648,6 +704,37 @@ mod tests {
         run("print \"first\"");
         let json = run("1 + 1");
         assert!(json.contains("\"output\":\"\""), "{json}");
+    }
+
+    #[test]
+    fn plugin_demo_runs_hot_opcodes() {
+        let json = plugin_demo();
+        assert!(json.starts_with("{\"ok\":true"), "{json}");
+        assert!(json.contains("\"value\":\"-42\""), "{json}");
+        assert!(json.contains("OP_DEMO_DOUBLE"), "{json}");
+        assert!(json.contains("\"kind\":\"hot\""), "{json}");
+    }
+
+    #[test]
+    fn opcode_map_names_the_plugin_slots() {
+        let map = opcode_map();
+        assert!(map.contains("\"plugin\":{\"name\":\"example\""), "{map}");
+        assert!(map.contains("OP_DEMO_NEGATE"), "{map}");
+        assert!(map.contains("\"code\":200"), "{map}");
+    }
+
+    #[test]
+    fn trace_records_executed_instructions() {
+        let json = trace("1 + 2");
+        assert!(json.starts_with("{\"ok\":true"), "{json}");
+        assert!(json.contains("\"steps\":"), "{json}");
+        assert!(json.contains("\"trace\":[[0,0,"), "{json}");
+    }
+
+    #[test]
+    fn trace_reports_syntax_errors() {
+        let json = trace(")");
+        assert!(json.starts_with("{\"ok\":false"), "{json}");
     }
 
     #[test]
