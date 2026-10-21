@@ -69,9 +69,6 @@ windows = { version = "0.62.2", features = [
 criterion = "0.8.2"
 mlua = { version = "0.12", default-features = false, features = ["luau", "vendored"] }
 
-# xcl-bytecode
-clap = { version = "4", features = ["derive"] }
-
 [profile.release]
 opt-level = 3
 lto = "fat"

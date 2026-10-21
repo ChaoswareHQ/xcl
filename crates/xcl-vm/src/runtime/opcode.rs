@@ -60,6 +60,25 @@ pub struct OpcodeEntry {
     pub handler: OpcodeFn,
 }
 
+/// A cold plugin module reached through `OP_EXT`.
+///
+/// The hot space (`128..=255`) is one instruction per byte, which caps extensions
+/// at 128 instructions in total. A plugin that needs more declares a cold module
+/// instead: `OP_EXT` names the module in operand `a`, the module's own opcode
+/// travels in `c`, and `b` stays a 16-bit operand.
+///
+/// Cold instructions cost one extra lookup over hot bytes, so they are for code
+/// that runs rarely or that would otherwise not fit at all.
+pub struct ColdModule {
+    /// Module id, named by `OP_EXT` operand `a`. Must be unique across all crates.
+    pub id: u32,
+    /// Human-readable module name, used in diagnostics.
+    pub name: &'static str,
+    /// Instructions in this module. `OpcodeEntry::code` is the local opcode
+    /// (`0..=255`, carried in `c`).
+    pub ops: &'static [OpcodeEntry],
+}
+
 /// Returns the human-readable name for any core opcode.
 ///
 /// Extension opcode names are resolved via `xcl_plugins::registered_opcode_name`.
@@ -92,8 +111,8 @@ pub mod special_var_kind {
 ///
 /// ```text
 ///   0 ..= 126   core opcodes (see `runtime/vm/ops.rs`)
-///        127    OP_EXT       escape: `a` = 32-bit cold-module id
-/// 128 ..= 255   module slots hot plugin modules (one byte per module)
+///        127    OP_EXT       cold modules: `a` = module id, `c` = local opcode
+/// 128 ..= 255   hot extension opcodes, one byte per instruction
 /// ```
 ///
 /// The split is a single bit, so classification needs no comparison table:
@@ -105,12 +124,31 @@ pub mod special_var_kind {
 ///
 /// Within the core range, codes are either:
 /// * **defined** by a core handler,
-/// * **[`layout::OP_EXT`]**, the escape into cold plugin modules,
+/// * **[`layout::OP_EXT`]**, the escape reserved for cold plugin modules,
 /// * **growth** — listed in [`layout::CORE_GROWTH`] and free for the next core
 ///   superinstruction.
 ///
-/// The 128 module slots are bytes, not opcodes: for a module instruction the
-/// plugin-local opcode travels in operand `a`.
+/// # Module space (`128..=255`)
+///
+/// A module-space byte *is* the instruction: dispatch indexes `opcode_table`
+/// directly by it, with no second lookup, and `a`/`b`/`c` stay available as the
+/// handler's operands. The range is shared by every linked crate, so codes must
+/// be unique across the whole program — `xcl_plugins::register_all` rejects
+/// duplicates and names both owners.
+///
+/// **Std loads first.** `#[opcode]` routes an entry into
+/// `STD_OPCODE_REGISTRY` when it expands inside `xcl-plugins` and into
+/// `OPCODE_REGISTRY` otherwise; std registers first, so its codes are never
+/// taken by a plugin. A plugin that collides with std fails at registration
+/// instead of silently replacing an instruction.
+///
+/// `OP_EXT` is the cold tier: operand `a` names a module, `c` names the
+/// instruction inside it, and `b` stays a 16-bit operand. Modules are declared
+/// with `cold_module!` and registered by `xcl_plugins::register_all`. A cold
+/// instruction costs one extra lookup over a hot byte, so it is for plugins whose
+/// instruction set does not fit in 128 bytes — or that run rarely.
+///
+/// An unknown cold module or opcode is a no-op, matching an unclaimed hot byte.
 ///
 /// `every_core_code_has_a_defined_owner` below enforces the inventory, so an
 /// unaccounted code cannot appear silently.
@@ -136,8 +174,7 @@ pub mod layout {
     /// Core codes with no opcode today: reserved growth space for new
     /// superinstructions. Keep in sync when adding an opcode.
     pub const CORE_GROWTH: &[u8] = &[
-        41, 48, 49, 50, 51, 54, 55, 56, 57, 58, 59, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 86, 87,
-        88, 89,
+        49, 50, 51, 54, 55, 56, 57, 58, 59, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 86, 87, 88, 89,
     ];
 
     /// Returns `true` when `op` belongs to the core range.
@@ -178,13 +215,13 @@ mod layout_tests {
     }
 
     #[test]
-    fn escape_code_is_inside_the_core_range_and_free() {
+    fn escape_code_is_the_only_owner_of_its_byte() {
+        // `OP_EXT` is a real core opcode now: it carries the escape into cold
+        // plugin modules. It must stay inside the core range and must not be
+        // listed as growth space.
         assert!(layout::is_core(layout::OP_EXT));
-        assert!(
-            opcode_name_core(layout::OP_EXT).is_none(),
-            "OP_EXT code {} is already claimed by a core opcode",
-            layout::OP_EXT
-        );
+        assert_eq!(opcode_name_core(layout::OP_EXT), Some("OP_EXT"));
+        assert!(!layout::CORE_GROWTH.contains(&layout::OP_EXT));
     }
 
     #[test]
@@ -199,7 +236,7 @@ mod layout_tests {
 
     #[test]
     fn every_core_code_has_a_defined_owner() {
-        // 0 = unaccounted, 1 = defined opcode, 2 = growth, 3 = OP_EXT
+        // 0 = unaccounted, 1 = defined opcode, 2 = growth
         let mut owner = [0u8; 128];
         for op in layout::CORE_FIRST..=layout::CORE_LAST {
             if opcode_name_core(op).is_some() {
@@ -213,13 +250,6 @@ mod layout_tests {
             );
             owner[op as usize] = 2;
         }
-        assert_eq!(
-            owner[layout::OP_EXT as usize],
-            0,
-            "OP_EXT code {} is already a defined opcode",
-            layout::OP_EXT
-        );
-        owner[layout::OP_EXT as usize] = 3;
 
         let missing: Vec<u8> = (layout::CORE_FIRST..=layout::CORE_LAST)
             .filter(|op| owner[*op as usize] == 0)

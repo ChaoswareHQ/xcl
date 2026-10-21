@@ -24,6 +24,39 @@ mod core_ops {
 
     // ── Phase A + Tier 1: Stack/constants ──
 
+    /// Does any registered record with this name fit the value's shape?
+    ///
+    /// Records are maps and identity is structural, so a value matches a record
+    /// when it carries every declared field. Cost is O(registered types), which
+    /// is why this is only used on the `is` path.
+    fn record_named(vm: &VM, value: Value, name: &str) -> bool {
+        let Some(map) = value.as_map() else {
+            return false;
+        };
+        vm.type_entries.iter().any(|desc| {
+            desc.name == name
+                && desc.kind == crate::runtime::value::TypeKind::Record
+                && !desc.fields.is_empty()
+                && desc.fields.iter().all(|f| map.contains_key(f.name))
+        })
+    }
+
+    /// Does any registered record fitting the value's shape declare `cap`?
+    ///
+    /// "Any" rather than "the most specific": a value that satisfies two
+    /// records keeps the capabilities of both.
+    fn record_has_cap(vm: &VM, value: Value, cap: crate::runtime::primitives::Cap) -> bool {
+        let Some(map) = value.as_map() else {
+            return false;
+        };
+        vm.type_entries.iter().any(|desc| {
+            desc.kind == crate::runtime::value::TypeKind::Record
+                && !desc.fields.is_empty()
+                && desc.fields.iter().all(|f| map.contains_key(f.name))
+                && desc.caps.has(cap)
+        })
+    }
+
     /// No-operation opcode.
     #[opcode(code = 0, arity = 0, stack = "0 -> 0")]
     fn op_nop(__vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
@@ -152,6 +185,28 @@ mod core_ops {
             .unwrap_or(Value::nil());
         vm.push(v);
         OpcodeResult::Next
+    }
+
+    /// Calls the function value on top of the stack with no arguments, or
+    /// leaves the value in place when it is not a function.
+    ///
+    /// This is what a bare `$f` statement compiles to: writing `$f` calls the
+    /// value it holds, while `$x` holding a non-function stays a plain value
+    /// read (so `$x` as the last statement still yields the program result).
+    #[opcode(code = 41, arity = 0, stack = "1 -> 1")]
+    fn op_call_value_zero(
+        vm: &mut VM,
+        _locals: LocalSlice,
+        _top: usize,
+        _instr: Instr,
+    ) -> OpcodeResult {
+        let callee = vm.stack.last().copied().unwrap_or(Value::nil());
+        let Some(func) = callee.as_func() else {
+            return OpcodeResult::Next;
+        };
+        // The callee slot is replaced by the result on return.
+        let arg_base = vm.stack.len() - 1;
+        vm.enter_call_at(func, arg_base, 0)
     }
 
     // ── Arithmetic ──
@@ -481,6 +536,19 @@ mod core_ops {
         OpcodeResult::Return
     }
 
+    /// Escape into a cold plugin module.
+    ///
+    /// Operand `a` = module id, `c` = the module's local opcode, `b` = a 16-bit
+    /// operand for the callee. Modules are declared once and registered with
+    /// [`VM::register_cold_modules`](crate::runtime::vm::VM::register_cold_modules).
+    ///
+    /// An unknown module or opcode does nothing, matching how an unclaimed hot
+    /// byte behaves — a missing extension is a no-op, not a crash.
+    #[opcode(code = 127, arity = 0, stack = "0 -> 1")]
+    fn op_ext(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
+        vm.invoke_cold_opcode(instr.a(), instr.c(), top, instr)
+    }
+
     // ── Collections ──
 
     /// Constructs an array from `a` elements on the stack.
@@ -540,6 +608,39 @@ mod core_ops {
             }
             vm.push(Value::from_map_xcl(data, key_hashes, key_values, &vm.arena));
         }
+        OpcodeResult::Next
+    }
+
+    /// Builds a numeric range value from the two bounds on the stack.
+    ///
+    /// Stack: `start, end -> range`. `..` is language syntax, so the value is
+    /// produced by the VM itself and needs no plugin registered. The result is a
+    /// two-entry map tagged with [`SUBTYPE_RANGE`]: `for` iterates the bounds
+    /// directly (see `op_for_iter_start`) and `.start` / `.end` read them like
+    /// any other field.
+    #[opcode(code = 48, arity = 2, stack = "2 -> 1")]
+    fn op_make_range(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+        let end = vm.pop().as_int();
+        let start = vm.pop().as_int();
+        let mut entries: smallvec::SmallVec<
+            [(Value, Value, u64); crate::runtime::value::SMALL_MAP_MAX],
+        > = smallvec::SmallVec::with_capacity(2);
+        entries.push((
+            Value::from_str(String::from("start"), &vm.arena),
+            Value::from_i48(start),
+            fast_hash(b"start"),
+        ));
+        entries.push((
+            Value::from_str(String::from("end"), &vm.arena),
+            Value::from_i48(end),
+            fast_hash(b"end"),
+        ));
+        vm.push(Value::from_small_map_typed(
+            entries,
+            crate::runtime::value::SUBTYPE_RANGE,
+            crate::runtime::value::VARIANT_DEFAULT,
+            &vm.arena,
+        ));
         OpcodeResult::Next
     }
 
@@ -1362,26 +1463,41 @@ mod core_ops {
     }
 
     /// Tests if a value is of a given type. Stack: value, type_name -> bool.
+    ///
+    /// Resolutions, in order:
+    /// 1. primitive type or alias (`str`, `u32`, `range`)
+    /// 2. capability (`Order`, `Len`, `Pure`) — primitives answer from the
+    ///    static table, registered types answer from `TypeDescriptor::caps`
+    /// 3. registered record shape (`$p is Point`)
+    /// 4. sum-type `tag` field
     #[opcode(code = 52, arity = 2, stack = "2 -> 1")]
     fn op_type_test(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+        use crate::runtime::primitives::{capability_of_name, is_primitive_of, primitive_of_name};
         let type_name_s = vm.pop().as_str();
         let value = vm.pop();
-        let is_type = if let Some(tn) = type_name_s {
-            if let Some(map) = value.as_map() {
-                if let Some(tag_val) = map.get("tag") {
-                    if let Some(tag) = tag_val.as_str() {
-                        tag == tn
-                    } else {
-                        false
-                    }
-                } else {
+        let is_type = match type_name_s {
+            Some(tn) => {
+                if is_primitive_of(value, tn) {
+                    true
+                } else if let Some(cap) = capability_of_name(tn) {
+                    // Not satisfied by the static primitive table: a registered
+                    // type may still declare it.
+                    record_has_cap(vm, value, cap)
+                } else if tn == "any" || primitive_of_name(tn).is_some() {
+                    // A known primitive that did not match this value.
                     false
+                } else if record_named(vm, value, tn) {
+                    true
+                } else {
+                    // Not a primitive: sum-type variants carry a `tag` field.
+                    value
+                        .as_map()
+                        .and_then(|map| map.get("tag"))
+                        .and_then(|tag| tag.as_str())
+                        .is_some_and(|tag| tag == tn)
                 }
-            } else {
-                false
             }
-        } else {
-            false
+            None => false,
         };
         vm.push(Value::bool(is_type));
         OpcodeResult::Next

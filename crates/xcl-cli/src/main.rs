@@ -12,12 +12,12 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Default, Debug)]
 struct CliOpts {
-    help:        bool,
-    version:     bool,
-    eval:        Option<String>,
-    quiet:       bool,
-    decompile:   bool,
-    files:       Vec<String>,
+    help: bool,
+    version: bool,
+    eval: Option<String>,
+    quiet: bool,
+    decompile: bool,
+    files: Vec<String>,
     script_args: Vec<String>,
 }
 
@@ -42,9 +42,9 @@ where
 
         if arg.starts_with("--") {
             match arg.as_str() {
-                "--help"      => opts.help = true,
-                "--version"   => opts.version = true,
-                "--quiet"     => opts.quiet = true,
+                "--help" => opts.help = true,
+                "--version" => opts.version = true,
+                "--quiet" => opts.quiet = true,
                 "--decompile" => opts.decompile = true,
                 "--eval" => {
                     if let Some(val) = args.next() {
@@ -129,7 +129,27 @@ fn print_version() {
     println!("xcl {}", VERSION);
 }
 
-fn run_source(source: &str, quiet: bool, script_name: &str, script_args: &[String]) -> xcl_vm::Value {
+/// Disassembles `source` when the `debug` feature is enabled.
+///
+/// Without the feature the flag stays accepted, so scripts and docs that pass
+/// `-d` fail with an actionable message instead of "unknown option".
+#[cfg(feature = "debug")]
+fn decompile(source: &str) -> String {
+    xcl_debug::decompile::decompile_source(source)
+}
+
+#[cfg(not(feature = "debug"))]
+fn decompile(_source: &str) -> String {
+    eprintln!("xcl: error: this build has no disassembler; rebuild with `--features debug`");
+    process::exit(1);
+}
+
+fn run_source(
+    source: &str,
+    quiet: bool,
+    script_name: &str,
+    script_args: &[String],
+) -> xcl_vm::Value {
     let mut vm = xcl_plugins::new_vm();
     let args: Vec<xcl_vm::Value> = script_args
         .iter()
@@ -195,8 +215,7 @@ fn main() {
     if let Some(expr) = &opts.eval {
         if opts.decompile {
             // Decompile mode: show bytecode instead of running
-            let output = xcl_debug::decompile::decompile_source(expr);
-            print!("{}", output);
+            print!("{}", decompile(expr));
         } else {
             let result = run_source(expr, opts.quiet, "<eval>", &opts.script_args);
             check_result_exit(result);
@@ -208,10 +227,7 @@ fn main() {
     if opts.decompile && !opts.files.is_empty() {
         for file in &opts.files {
             match fs::read_to_string(file) {
-                Ok(source) => {
-                    let output = xcl_debug::decompile::decompile_source(&source);
-                    print!("{}", output);
-                }
+                Ok(source) => print!("{}", decompile(&source)),
                 Err(e) => {
                     eprintln!("xcl: error: cannot read '{}': {}", file, e);
                     process::exit(1);
@@ -259,7 +275,10 @@ fn check_result_exit(result: xcl_vm::Value) {
         && let Some(tag) = map.get("tag")
         && tag.as_str() == Some("Err")
     {
-        let msg = map.get("message").and_then(|v| v.as_str()).unwrap_or("unknown error");
+        let msg = map
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
         eprintln!("xcl: runtime error: {}", msg);
         process::exit(1);
     }

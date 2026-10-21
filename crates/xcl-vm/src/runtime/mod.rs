@@ -4,10 +4,15 @@
 //! executing compiled bytecode on a stack-based virtual machine with NaN-boxed values.
 
 pub mod opcode;
+pub mod primitives;
 pub mod value;
 pub mod vm;
 
-pub use opcode::{OpcodeEntry, OpcodeFn, OpcodeResult, opcode_name};
+pub use opcode::{ColdModule, OpcodeEntry, OpcodeFn, OpcodeResult, opcode_name};
+pub use primitives::{
+    Cap, CapSet, PRIMITIVES, PrimKind, Primitive, capability_name, capability_of_name, caps,
+    is_primitive_of, primitive_of_name, primitive_of_value,
+};
 pub use value::{
     BuiltinImpl, DomainCtx, FuncValue, GlobalOverrideGuard, HandleKind, ImplDescriptor, ImplMethod,
     IntoValue, NamedParam, NativeArg, NativeEntry, NativeKind, RawPtr, SUBTYPE_ERROR,

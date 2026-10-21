@@ -55,6 +55,64 @@ use crate::compiler::ast::{
 use crate::compiler::lexer::{Token, TokenWithText, extract_string};
 use crate::compiler::span::Span;
 
+/// Maximum number of parse errors before stopping recovery.
+const ERROR_CAP: usize = 10;
+/// Maximum tokens to skip during statement synchronisation.
+const SYNC_SKIP_CAP: usize = 200;
+
+/// A single parse error with a stable code, message, span, and optional help text.
+#[derive(Debug, Clone)]
+pub struct ParseError {
+    /// Stable error code (e.g. `"E0001"`).
+    pub code: &'static str,
+    /// Human-readable message (no file/line prefix).
+    pub message: String,
+    /// Source location where the error occurred.
+    pub span: Span,
+    /// Optional suggestion for fixing the error.
+    pub help: Option<String>,
+}
+
+impl ParseError {
+    /// Renders the error in the same format the parser previously used for panics.
+    ///
+    /// ```text
+    /// XCL <file>:<line>: <message>
+    ///   = help: <help>
+    /// ```
+    pub fn render(&self) -> String {
+        let mut out = format!("XCL {}:{}: {}", self.span.file, self.span.line, self.message);
+        if let Some(ref help) = self.help {
+            out.push_str(&format!("\n  = help: {}", help));
+        }
+        out
+    }
+}
+
+/// Result of a recovering parse: AST nodes collected so far plus any errors.
+#[derive(Debug, Default)]
+pub struct ParseOutput {
+    /// AST nodes parsed (may be partial if errors occurred).
+    pub ast: Vec<AstNode>,
+    /// Errors encountered during parsing.
+    pub errors: Vec<ParseError>,
+}
+
+/// Canonical list of parse error codes and their short summaries.
+///
+/// Documentation and analysis tooling can enumerate this slice to produce
+/// error-code reference pages.
+pub static PARSE_ERROR_CODES: &[(&str, &str)] = &[
+    ("E0001", "expected token not found"),
+    ("E0002", "unexpected token in expression"),
+    ("E0003", "assignment to read-only special variable"),
+    ("E0004", "parameter missing $ prefix"),
+    ("E0005", "parentheses not separated from callee"),
+    ("E0006", "unsupported shell special variable"),
+    ("E0007", "invalid positional argument"),
+    ("E0008", "unexpected -> in expression"),
+];
+
 struct Parser<'a> {
     tokens: &'a [TokenWithText],
     pos: usize,
@@ -67,6 +125,10 @@ struct Parser<'a> {
     /// When false, a `{` after a call is a control-flow body, not a block-lambda
     /// argument (`if ready { ... }`, `while $f $i { ... }`, `for $i in range 3 { ... }`).
     brace_arg_allowed: bool,
+    /// Collected parse errors (populated by `parse_recover`).
+    errors: Vec<ParseError>,
+    /// When true, the error cap has been reached; parsing should stop.
+    error_cap_reached: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -78,6 +140,134 @@ impl<'a> Parser<'a> {
             pipeline_depth: 0,
             arg_depth: 0,
             brace_arg_allowed: true,
+            errors: Vec::new(),
+            error_cap_reached: false,
+        }
+    }
+
+    /// Record a parse error. No-op once the error cap is reached.
+    fn error(&mut self, code: &'static str, span: Span, message: impl Into<String>) {
+        if self.error_cap_reached {
+            return;
+        }
+        let err = ParseError {
+            code,
+            message: message.into(),
+            span,
+            help: None,
+        };
+        self.errors.push(err);
+        if self.errors.len() >= ERROR_CAP {
+            self.error_cap_reached = true;
+        }
+    }
+
+    /// Record a parse error with an optional help suggestion.
+    fn error_with_help(
+        &mut self,
+        code: &'static str,
+        span: Span,
+        message: impl Into<String>,
+        help: impl Into<String>,
+    ) {
+        if self.error_cap_reached {
+            return;
+        }
+        let err = ParseError {
+            code,
+            message: message.into(),
+            span,
+            help: Some(help.into()),
+        };
+        self.errors.push(err);
+        if self.errors.len() >= ERROR_CAP {
+            self.error_cap_reached = true;
+        }
+    }
+
+    /// Skip tokens until we reach a safe synchronisation point for the next
+    /// statement.  Stops at `;` (consumed), `}` (not consumed), a token that
+    /// can begin a statement, or end of input.  Tracks brace depth so that `}`
+    /// inside nested `{ ... }` doesn't end the scan early.  Never skips more
+    /// than `SYNC_SKIP_CAP` tokens.
+    fn sync_statement(&mut self) {
+        let mut skipped = 0;
+        let mut brace_depth: isize = 0;
+        while !self.at_eof() {
+            if skipped >= SYNC_SKIP_CAP {
+                break;
+            }
+            let tok = self.current().unwrap().token.clone();
+            match tok {
+                Token::LBrace => {
+                    brace_depth += 1;
+                    self.consume();
+                    skipped += 1;
+                }
+                Token::RBrace => {
+                    if brace_depth > 0 {
+                        brace_depth -= 1;
+                        self.consume();
+                        skipped += 1;
+                    }
+                    // At depth 0: stop — the enclosing block handles the `}`.
+                    else {
+                        break;
+                    }
+                }
+                Token::Semi => {
+                    self.consume();
+                    break;
+                }
+                _ => {
+                    // Check if this token can start a statement.
+                    if self.token_can_start_statement() {
+                        break;
+                    }
+                    self.consume();
+                    skipped += 1;
+                }
+            }
+        }
+    }
+
+    /// Returns true if the current token can begin a top-level statement.
+    fn token_can_start_statement(&self) -> bool {
+        match self.current().map(|t| &t.token) {
+            Some(
+                Token::Return
+                | Token::Break
+                | Token::Continue
+                | Token::If
+                | Token::For
+                | Token::While
+                | Token::Ident
+                | Token::IdentPlain
+                | Token::SpecialVar
+                | Token::UnsupportedSpecialVar,
+            ) => true,
+            // Expression-starting tokens
+            Some(
+                Token::Int
+                | Token::Float
+                | Token::IntHex
+                | Token::IntBin
+                | Token::IntOct
+                | Token::String
+                | Token::RawString
+                | Token::MultiLineString
+                | Token::True
+                | Token::False
+                | Token::None_
+                | Token::LParen
+                | Token::LBracket
+                | Token::LBrace
+                | Token::Minus
+                | Token::Not
+                | Token::Pipe
+                | Token::BitNot,
+            ) => true,
+            _ => false,
         }
     }
 
@@ -110,10 +300,8 @@ impl<'a> Parser<'a> {
     fn expect(&mut self, want: Token) {
         let t = self.consume();
         if t.token != want {
-            panic!(
-                "XCL {}:{}: expected {:?}, got {:?} ({})",
-                t.span.file, t.span.line, want, t.token, t.text
-            );
+            let msg = format!("expected {:?}, got {:?} ({})", want, t.token, t.text);
+            self.error("E0001", t.span.clone(), msg);
         }
     }
 
@@ -649,10 +837,7 @@ impl<'a> Parser<'a> {
             return callee;
         }
         let span = self.span();
-        let mut args = match self.paren_value_args() {
-            Some(list) => list,
-            None => vec![self.call_arg()],
-        };
+        let mut args = vec![self.call_arg()];
         while self.starts_positional_arg() && !self.has_newline_before_current() {
             args.push(self.call_arg());
         }
@@ -955,10 +1140,7 @@ impl<'a> Parser<'a> {
             && !self.has_newline_before_current()
         {
             let callee = e;
-            let mut args = match self.paren_value_args() {
-                Some(list) => list,
-                None => vec![self.call_arg()],
-            };
+            let mut args = vec![self.call_arg()];
             while self.starts_positional_arg() && !self.has_newline_before_current() {
                 args.push(self.call_arg());
             }
@@ -969,6 +1151,30 @@ impl<'a> Parser<'a> {
                 span: self.span(),
                 callee: Box::new(callee),
                 args,
+            };
+        }
+        // A bare `$f` at a statement boundary calls the function value it holds
+        // (the VM leaves the value alone when it is not a function, so `$x` as
+        // the last statement still yields the program result).
+        let first_token_is_dollar_ident = matches!(
+            self.tokens.get(start_pos).map(|t| &t.token),
+            Some(Token::Ident)
+        );
+        if first_token_is_dollar_ident
+            && matches!(&e, AstNode::Ident { .. })
+            && !self.starts_positional_arg()
+            && (self.at_eof()
+                || self.at(Token::Semi)
+                || self.at(Token::RBrace)
+                || self.has_newline_before_current())
+        {
+            if self.at(Token::Semi) {
+                self.consume();
+            }
+            return AstNode::Call {
+                span: self.span(),
+                callee: Box::new(e),
+                args: Vec::new(),
             };
         }
         // Bare IdentPlain or FieldAccess starting with IdentPlain at a statement
@@ -1220,6 +1426,7 @@ impl<'a> Parser<'a> {
                                 | Token::F32
                                 | Token::F64
                                 | Token::Bool
+                                | Token::None_
                                 | Token::Any
                         )
                     );
@@ -1569,20 +1776,17 @@ impl<'a> Parser<'a> {
                     };
                 }
                 Some(Token::LParen) if !starts_with_ident_plain && self.adjacent_to_previous() => {
-                    // `$f(...)` and `$obj.method(...)` are calls on a value, so
-                    // the parentheses hold an argument list. A plain `f(...)` is
-                    // a definition form and is left to the call detection below,
-                    // and `$f (x)` (with a space) stays a grouped argument.
-                    match self.paren_value_args() {
-                        Some(args) => {
-                            e = AstNode::Call {
-                                span: self.span(),
-                                callee: Box::new(e),
-                                args,
-                            };
-                        }
-                        None => break,
-                    }
+                    // `$f(...)` / `f(...)` are not call syntax. The only
+                    // parenthesized form that follows a callee is a *spaced*
+                    // grouped argument (`f (x)`), which the call loop below
+                    // handles.
+                    let span = self.span();
+                    panic!(
+                        "XCL {}:{}: `(...)` must be separated from the callee by a space — \
+                         calls use space-separated arguments (`f arg1 arg2`); \
+                         `f (expr)` passes one grouped expression",
+                        span.file, span.line
+                    );
                 }
                 Some(Token::LBracket) => {
                     // Lookahead: if [ is followed by ] or by expr,], it's an index.
@@ -1696,13 +1900,10 @@ impl<'a> Parser<'a> {
                 } else {
                     Box::new(e)
                 };
-                // A parenthesized argument list is allowed for a dotted callee
-                // (`math.sqrt(16)`, `$obj.method(1, 2)`). For a plain identifier
-                // `f(...)` keeps its definition meaning, so it is not handled here.
-                let paren_ok = matches!(callee.as_ref(), AstNode::FieldAccess { .. });
                 while self.starts_positional_arg() && !self.has_newline_before_current() {
+                    // In a control-flow header the brace is the body, not an
+                    // argument.
                     if self.at(Token::LBrace) && !self.brace_arg_allowed {
-                        // The brace is the body of the enclosing `if`/`while`/`for`.
                         break;
                     }
                     if let Some(items) = self.try_expansion(&args) {
@@ -1712,12 +1913,6 @@ impl<'a> Parser<'a> {
                             args,
                             items,
                         };
-                    }
-                    if args.is_empty() && paren_ok && self.at(Token::LParen) {
-                        if let Some(mut list) = self.paren_value_args() {
-                            args.append(&mut list);
-                            continue;
-                        }
                     }
                     args.push(self.call_arg());
                 }
@@ -1757,6 +1952,17 @@ impl<'a> Parser<'a> {
     }
 
     fn call_arg(&mut self) -> CallArg {
+        // A parenthesized expression directly after a callee (`f(x)`) is not a
+        // call. With a space (`f (x)`) it is one grouped argument.
+        if self.at(Token::LParen) && self.adjacent_to_previous() {
+            let span = self.span();
+            panic!(
+                "XCL {}:{}: `(...)` must be separated from the callee by a space — \
+                 calls use space-separated arguments (`f arg1 arg2`); \
+                 `f (expr)` passes one grouped expression",
+                span.file, span.line
+            );
+        }
         if self.at(Token::IdentPlain) {
             let next = self.pos + 1;
             if matches!(self.tokens.get(next).map(|t| &t.token), Some(Token::Colon)) {
@@ -1783,62 +1989,6 @@ impl<'a> Parser<'a> {
         let value = self.unary();
         self.arg_depth -= 1;
         CallArg { value, name: None }
-    }
-
-    /// One element of a parenthesized argument list. Unlike [`Self::call_arg`],
-    /// the parentheses already delimit the expression, so a full expression is
-    /// allowed: `$f(1 + 2)` passes one argument.
-    fn paren_arg(&mut self) -> CallArg {
-        if self.at(Token::IdentPlain)
-            && matches!(
-                self.tokens.get(self.pos + 1).map(|t| &t.token),
-                Some(Token::Colon)
-            )
-        {
-            let name = self.consume().text.clone();
-            self.consume();
-            self.arg_depth += 1;
-            let value = self.expr();
-            self.arg_depth -= 1;
-            return CallArg {
-                value,
-                name: Some(name),
-            };
-        }
-        self.arg_depth += 1;
-        let value = self.expr();
-        self.arg_depth -= 1;
-        CallArg { value, name: None }
-    }
-
-    /// Parses a parenthesized argument list for a function value or method
-    /// call: `$f()`, `$f(1)`, `$f(a, b)`, `$f(tag: "x", 1)`.
-    ///
-    /// Returns `None` with the position restored when the parentheses do not
-    /// form a list, so the caller can fall back to the grouped-expression form.
-    fn paren_value_args(&mut self) -> Option<Vec<CallArg>> {
-        if !self.at(Token::LParen) {
-            return None;
-        }
-        let start = self.pos;
-        self.consume(); // `(`
-        let mut args = Vec::new();
-        while !self.at(Token::RParen) && !self.at_eof() {
-            args.push(self.paren_arg());
-            if self.at(Token::Comma) {
-                self.consume();
-            } else {
-                break;
-            }
-        }
-        if !self.at(Token::RParen) {
-            // Not a well-formed argument list; let the normal grouped-expression
-            // parser handle (and report) it.
-            self.pos = start;
-            return None;
-        }
-        self.consume(); // `)`
-        Some(args)
     }
 
     fn primary(&mut self) -> AstNode {
@@ -1921,45 +2071,22 @@ impl<'a> Parser<'a> {
                 let name = t.text.clone();
                 // Check if this looks like a function definition: `name( ... ) {` or `name( ... ) ->`
                 // If so, don't parse as a call — let the caller handle it
-                if self.at(Token::LParen) && self.lookahead_fn_def_from_paren() {
-                    return AstNode::Ident { span, name };
-                }
-                // Standard function call: `name(args)` — parse with parentheses
                 if self.at(Token::LParen) {
-                    self.consume(); // consume (
-                    let mut args = Vec::new();
-                    while !self.at(Token::RParen) && !self.at_eof() {
-                        if self.at(Token::Comma) {
-                            self.consume();
-                            continue;
-                        }
-                        // Named arg: `name: value`
-                        if self.at(Token::IdentPlain) {
-                            let next = self.pos + 1;
-                            if matches!(self.tokens.get(next).map(|t| &t.token), Some(Token::Colon))
-                            {
-                                let aname = self.consume().text.clone();
-                                self.consume(); // :
-                                let aval = self.expr();
-                                args.push(CallArg {
-                                    value: aval,
-                                    name: Some(aname),
-                                });
-                                continue;
-                            }
-                        }
-                        let aval = self.expr();
-                        args.push(CallArg {
-                            value: aval,
-                            name: None,
-                        });
+                    if self.lookahead_fn_def_from_paren() {
+                        return AstNode::Ident { span, name };
                     }
-                    self.expect(Token::RParen);
-                    return AstNode::Call {
-                        span: span.clone(),
-                        callee: Box::new(AstNode::Ident { span, name }),
-                        args,
-                    };
+                    // `name(...)` (no space) is not call syntax: parentheses
+                    // after a name delimit parameters in a definition. Calls are
+                    // space-separated. A *spaced* `name (expr)` is a grouped
+                    // argument and is handled by the call loop below.
+                    if self.adjacent_to_previous() {
+                        let span = self.span();
+                        panic!(
+                            "XCL {}:{}: `{}(...)` is not call syntax — calls use space-separated \
+                             arguments (`{} arg1 arg2`); parentheses are for definitions",
+                            span.file, span.line, name, name
+                        );
+                    }
                 }
                 // Space-separated domain-style call: `domain func arg`
                 let mut args = Vec::new();
@@ -1986,7 +2113,19 @@ impl<'a> Parser<'a> {
                     if self.at(Token::LBrace) && !self.brace_arg_allowed {
                         break;
                     }
-                    if self.looks_like_arg() {
+                    if let Some(items) = self.try_expansion(&args) {
+                        return AstNode::DomainCall {
+                            span: span.clone(),
+                            callee: Box::new(AstNode::Ident {
+                                span: span.clone(),
+                                name,
+                            }),
+                            args,
+                            items,
+                        };
+                    }
+                    // An explicit comma continues the list across a newline.
+                    if self.starts_positional_arg() {
                         args.push(self.call_arg());
                     }
                 }
@@ -2138,70 +2277,10 @@ impl<'a> Parser<'a> {
 
     #[inline]
     fn looks_like_arg(&self) -> bool {
-        // If there's a newline before the current token, it's not an arg
         if self.has_newline_before_current() {
             return false;
         }
-        match self.current().map(|t| &t.token) {
-            None => false,
-            Some(Token::Ident) => {
-                // $-prefixed identifiers are args if:
-                // 1. Followed by = (named arg: $x = value)
-                // 2. Followed by . (field access: $x.field)
-                // 3. Followed by [ (index access: $x[0])
-                // NOT if followed by another $-ident (that's a call: $f $x)
-                let next = self.tokens.get(self.pos + 1).map(|t| &t.token);
-                matches!(
-                    next,
-                    Some(Token::Assign)
-                        | Some(Token::CoalesceAssign)
-                        | Some(Token::AddAssign)
-                        | Some(Token::SubAssign)
-                        | Some(Token::MulAssign)
-                        | Some(Token::DivAssign)
-                        | Some(Token::BitOrAssign)
-                        | Some(Token::BitXorAssign)
-                        | Some(Token::PowAssign)
-                        | Some(Token::Dot)
-                        | Some(Token::LBracket)
-                )
-            }
-            Some(Token::LBrace) => {
-                // Allow both block-lambda { stmts } and dict literals { key: val } as args
-                true
-            }
-            Some(t) => matches!(
-                t,
-                Token::Bool
-                    | Token::Any
-                    | Token::Str
-                    | Token::I8
-                    | Token::I16
-                    | Token::I32
-                    | Token::I64
-                    | Token::U8
-                    | Token::U16
-                    | Token::U32
-                    | Token::U64
-                    | Token::F32
-                    | Token::F64
-                    | Token::Int
-                    | Token::Float
-                    | Token::IntHex
-                    | Token::IntBin
-                    | Token::IntOct
-                    | Token::String
-                    | Token::RawString
-                    | Token::MultiLineString
-                    | Token::True
-                    | Token::False
-                    | Token::None_
-                    | Token::LBracket
-                    | Token::LParen
-                    | Token::BitNot
-                    | Token::SpecialVar
-            ),
-        }
+        self.starts_positional_arg()
     }
 
     /// Check if there's a newline between the previous token and the current token.
@@ -2247,7 +2326,6 @@ impl<'a> Parser<'a> {
             Some(Token::Ident) => !matches!(
                 self.tokens.get(self.pos + 1).map(|t| &t.token),
                 Some(Token::Assign)
-                    | Some(Token::Semi)
                     | Some(Token::Colon)
                     | Some(Token::CoalesceAssign)
                     | Some(Token::AddAssign)

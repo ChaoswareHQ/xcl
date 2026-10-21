@@ -1,0 +1,11 @@
+[package]
+name = "luau-runner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone: must NOT join the xcl workspace (see luajit-runner/Cargo.toml).
+[workspace]
+
+[dependencies]
+mlua = { version = "0.12", default-features = false, features = ["luau", "vendored"] }

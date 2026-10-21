@@ -1,0 +1,13 @@
+[package]
+name = "luajit-runner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone: must NOT join the xcl workspace. The workspace already builds
+# mlua with the `luau` backend for the criterion harness, and both backends
+# cannot be enabled in one dependency graph.
+[workspace]
+
+[dependencies]
+mlua = { version = "0.12", default-features = false, features = ["luajit", "vendored"] }

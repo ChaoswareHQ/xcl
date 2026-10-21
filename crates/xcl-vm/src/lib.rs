@@ -244,12 +244,13 @@ pub use compiler::lexer;
 pub use compiler::parser;
 pub use compiler::span::Span;
 pub use runtime::{
-    BuiltinImpl, DomainCtx, DomainSlot, FuncValue, GlobalOverrideGuard, HandleKind, ImplDescriptor,
-    ImplMethod, IntoValue, NamedParam, NativeArg, NativeEntry, NativeKind, OpcodeEntry, OpcodeFn,
-    OpcodeResult, RawPtr, SUBTYPE_ERROR, SUBTYPE_HANDLE, SUBTYPE_NONE, SUBTYPE_RANGE,
-    SUBTYPE_RESULT, SUBTYPE_USER_BASE, TraitDescriptor, TraitMethod, TypeDescriptor, TypeField,
-    TypeKind, TypeVariant, VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK, VM, Value, XclType,
-    extract_arg, opcode_name,
+    BuiltinImpl, Cap, CapSet, ColdModule, DomainCtx, DomainSlot, FuncValue, GlobalOverrideGuard, HandleKind,
+    ImplDescriptor, ImplMethod, IntoValue, NamedParam, NativeArg, NativeEntry, NativeKind,
+    OpcodeEntry, OpcodeFn, OpcodeResult, PrimKind, Primitive, RawPtr, SUBTYPE_ERROR,
+    SUBTYPE_HANDLE, SUBTYPE_NONE, SUBTYPE_RANGE, SUBTYPE_RESULT, SUBTYPE_USER_BASE,
+    TraitDescriptor, TraitMethod, TypeDescriptor, TypeField, TypeKind, TypeVariant,
+    VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK, VM, Value, XclType, capability_of_name, extract_arg,
+    is_primitive_of, opcode_name, primitive_of_name, primitive_of_value,
 };
 
 /// Evaluates XCL source code using the provided virtual machine.

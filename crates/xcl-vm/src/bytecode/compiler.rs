@@ -1330,6 +1330,27 @@ impl Compiler {
             }
 
             AstNode::Call { callee, args, .. } => {
+                // A bare `$f` statement: call the value when it holds a function.
+                // (`$x` holding anything else is left on the stack as before.)
+                if args.is_empty() {
+                    if let AstNode::Ident { name, .. } = callee.as_ref() {
+                        let local = self
+                            .locals
+                            .iter()
+                            .position(|n| n.as_ref() == name.as_str())
+                            .map(|i| i as u32);
+                        if let Some(slot) = local {
+                            self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
+                            self.emit(Instr::none(OP_CALL_VALUE_ZERO));
+                            return;
+                        }
+                        if let Some(slot) = self.root_read_slot(name) {
+                            self.emit(Instr::a1(OP_LOAD_ROOT, slot));
+                            self.emit(Instr::none(OP_CALL_VALUE_ZERO));
+                            return;
+                        }
+                    }
+                }
                 // Try to inline: if callee is a plain identifier matching an inlineable function
                 if let AstNode::Ident { name, .. } = callee.as_ref() {
                     // A `$`-variable with the same name shadows the global function,
@@ -1689,8 +1710,6 @@ impl Compiler {
             }
 
             AstNode::Range { start, end, .. } => {
-                let i = self.intern("range");
-                self.emit(Instr::a1(OP_PUSH_STR, i));
                 if let Some(s) = start {
                     self.node(s);
                 } else {
@@ -1701,7 +1720,7 @@ impl Compiler {
                 } else {
                     self.emit(Instr::none(OP_PUSH_NIL));
                 }
-                self.emit(Instr::a2(OP_CALL, 2, 0));
+                self.emit(Instr::none(OP_MAKE_RANGE));
             }
 
             AstNode::Lambda { params, body, .. } => {
@@ -2558,7 +2577,6 @@ fn is_known_global(name: &str) -> bool {
             | "println"
             | "input"
             | "len"
-            | "range"
             | "enumerate"
             | "zip"
             | "filter"

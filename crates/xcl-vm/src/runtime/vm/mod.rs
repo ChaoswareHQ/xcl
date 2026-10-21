@@ -581,6 +581,8 @@ pub struct VM {
     pub(crate) context_stack: HashMap<String, Vec<Value>>,
     /// Dispatch table for extension opcodes (codes 128..=255).
     opcode_table: [Option<super::opcode::OpcodeFn>; 256],
+    /// Cold plugin modules reachable through `OP_EXT`, sorted by id.
+    cold_modules: Vec<(u32, &'static super::opcode::ColdModule)>,
     #[cfg(feature = "opcode-stats")]
     opcode_counter: OpcodeCounter,
     /// Name of the currently running script (`$0`).
@@ -664,6 +666,7 @@ impl VM {
             closures: Arc::new([]),
             context_stack: HashMap::new(),
             opcode_table: [None; 256],
+            cold_modules: Vec::new(),
             #[cfg(feature = "opcode-stats")]
             opcode_counter: OpcodeCounter::new(),
             script_name: "<input>".into(),
@@ -770,9 +773,87 @@ impl VM {
     }
 
     /// Registers opcode entries from a static slice.
+    /// Registers extension opcode handlers from a static slice.
+    ///
+    /// Only module-space codes (`128..=255`) are accepted: the core range is
+    /// claimed by `dispatch_core` and `OP_EXT`, and a handler placed there would
+    /// either be shadowed or silently take over a reserved slot.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an entry uses a code below 128. Duplicate codes across crates
+    /// are caught earlier, in `xcl_plugins::register_all`, which knows the std and
+    /// plugin slices separately.
     pub fn register_opcodes(&mut self, entries: &'static [super::opcode::OpcodeEntry]) {
         for entry in entries.iter() {
+            assert!(
+                crate::runtime::opcode::layout::is_module_slot(entry.code),
+                "opcode `{}` uses code {} — extension opcodes must be in 128..=255; \
+                 codes below 128 belong to the core (and 127 is OP_EXT)",
+                entry.name,
+                entry.code
+            );
             self.opcode_table[entry.code as usize] = Some(entry.handler);
+        }
+    }
+
+    /// Registers cold plugin modules reachable through `OP_EXT`.
+    ///
+    /// Kept sorted by id so the escape path can binary-search. Registration is a
+    /// startup cost; the table never changes afterwards.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a duplicate module id, or on two instructions sharing a local
+    /// opcode inside one module.
+    pub fn register_cold_modules(&mut self, entries: &'static [super::opcode::ColdModule]) {
+        for module in entries.iter() {
+            for (i, op) in module.ops.iter().enumerate() {
+                assert!(
+                    module.ops[..i].iter().all(|prev| prev.code != op.code),
+                    "cold module `{}` (id {}) declares opcode {} twice: `{}` collides with an earlier entry",
+                    module.name,
+                    module.id,
+                    op.code,
+                    op.name
+                );
+            }
+            self.cold_modules.push((module.id, module));
+        }
+        self.cold_modules.sort_unstable_by_key(|(id, _)| *id);
+        for pair in self.cold_modules.windows(2) {
+            assert!(
+                pair[0].0 != pair[1].0,
+                "cold module id {} is claimed by both `{}` and `{}`",
+                pair[0].0,
+                pair[0].1.name,
+                pair[1].1.name
+            );
+        }
+    }
+
+    /// Runs the instruction `local` of cold module `module_id`.
+    ///
+    /// Called by [`OP_EXT`](crate::runtime::opcode::layout::OP_EXT) only, so the
+    /// binary search is not on any hot path.
+    #[inline]
+    pub(crate) fn invoke_cold_opcode(
+        &mut self,
+        module_id: u32,
+        local: u8,
+        top: usize,
+        instr: Instr,
+    ) -> Action {
+        let Ok(idx) = self
+            .cold_modules
+            .binary_search_by_key(&module_id, |(id, _)| *id)
+        else {
+            return Action::Next;
+        };
+        let module = self.cold_modules[idx].1;
+        match module.ops.iter().find(|op| op.code == local) {
+            Some(op) => (op.handler)(self, top, instr),
+            None => Action::Next,
         }
     }
 
@@ -1397,17 +1478,24 @@ impl VM {
         #[cfg(feature = "opcode-stats")]
         self.opcode_counter.record(i.op());
 
-        // Core opcode dispatch
-        if let Some(result) = ops::dispatch_core(self, locals, top, i) {
-            return result;
+        let op = i.op();
+        // The space is partitioned by one bit (`opcode::layout`), so a module-space
+        // instruction goes straight to its handler instead of paying a call into
+        // `dispatch_core` that can only return `None`. Core-only programs never
+        // take this branch, so the check costs a predicted-not-taken test.
+        if op & crate::runtime::opcode::layout::MODULE_SPACE_MASK != 0 {
+            return match self.opcode_table[op as usize] {
+                Some(handler) => handler(self, top, i),
+                None => Action::Next,
+            };
         }
 
-        // Extension opcode lookup
-        let op_code = i.op();
-        if let Some(handler) = self.opcode_table[op_code as usize] {
-            handler(self, top, i)
-        } else {
-            Action::Next
+        // Core opcode dispatch. Only module-space codes can own a handler (see
+        // `register_opcodes`), so an unhandled code here is `OP_EXT` — reserved,
+        // not implemented — or an unclaimed growth slot.
+        match ops::dispatch_core(self, locals, top, i) {
+            Some(result) => result,
+            None => Action::Next,
         }
     }
 }
@@ -1937,7 +2025,7 @@ mod tests {
                 if $# == 3 { return $3 }
                 return "bad"
             }
-            f("x", "y", "z")
+            f "x" "y" "z"
         "#;
         let result = eval_with_args(src, "script.xcl", &[]);
         assert_eq!(result.as_str(), Some("z"));
@@ -1947,7 +2035,7 @@ mod tests {
     fn test_script_name_inside_function() {
         let src = r#"
             f() { return $0 }
-            f()
+            f
         "#;
         let result = eval_with_args(src, "script.xcl", &[]);
         assert_eq!(result.as_str(), Some("script.xcl"));
@@ -1967,8 +2055,8 @@ mod tests {
             f($x) { return $x }
             g($x) { return $x }
             h($x, $y) { return $y }
-            h(f("a"), g("b"))
-            f("c")
+            h (f "a") (g "b")
+            f "c"
         "#;
         let tokens = crate::compiler::lexer::lex(src, "<test>");
         let ast = crate::compiler::parser::parse(&tokens, src);
@@ -2165,7 +2253,7 @@ mod tests {
     #[test]
     fn test_named_call_in_while() {
         let result = eval_with_args(
-            "inc($x) { return $x + 1 }; $i = 0; $r = 0; while $i < 5 { $r = inc($r); $i = $i + 1 }; $r",
+            "inc($x) { return $x + 1 }; $i = 0; $r = 0; while $i < 5 { $r = inc $r; $i = $i + 1 }; $r",
             "script.xcl",
             &[],
         );
@@ -2354,11 +2442,11 @@ mod tests {
         let src = r#"
             f($n) {
                 if $n <= 0 { return 0 }
-                return f($n - 1) + 1
+                return f ($n - 1) + 1
             }
             $a = [1, 2, 3]
             $a = $a + [4]
-            f(10)
+            f 10
         "#;
         let tokens = lex(src, "<test>");
         let ast = parse(&tokens, src);
@@ -2409,7 +2497,7 @@ mod tests {
     fn frame_code_pointer_survives_repeated_runs() {
         // Compile three different programs and run them round-robin 50 times
         // each on one VM to catch stale pointer issues.
-        let src_recursion = "f($n) { if $n <= 0 { return 1 } return f($n - 1) * 2 }; f(10)";
+        let src_recursion = "f($n) { if $n <= 0 { return 1 } return f ($n - 1) * 2 }; f 10";
         let src_closure = "$f = |$x| $x * 3; $f 7";
         let src_tail = "ping($n) { if $n <= 0 { return 7 } return pong ($n - 1) }; pong($n) { if $n <= 0 { return 9 } return ping ($n - 1) }; ping 5";
 
@@ -2458,7 +2546,7 @@ mod tests {
     fn call_value_after_run() {
         // Keep a function Value returned by run, call it via call_value after
         // the VM has run a different program.
-        let src1 = "$f = |$x| $x + 10; $f";
+        let src1 = "mk($n) { return |$x| $x + $n }; mk 10";
         let src2 = "42 * 2";
 
         let tokens1 = lex(src1, "<test>");

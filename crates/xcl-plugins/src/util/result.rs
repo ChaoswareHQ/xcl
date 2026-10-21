@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn result_method_in_condition() {
-        let src = "$r = util.ok 5\npick() { if $r.is_ok { return 1 } return 0 }\npick()";
+        let src = "$r = util.ok 5\npick() { if $r.is_ok { return 1 } return 0 }\npick";
         assert_eq!(evaluate_new(src).as_i48(), 1);
     }
 

@@ -86,18 +86,89 @@ fn infer_domain_from_span(span: proc_macro2::Span) -> Option<String> {
 
 /// Parse helper attributes `#[xcl(domain = "...", kind = "...", summary = "...", super = "...")]`
 /// from a DeriveInput's attrs.
-fn parse_xcl_helper_attrs(
-    input: &syn::DeriveInput,
-) -> (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-) {
-    let mut domain = None;
-    let mut kind = None;
-    let mut summary = None;
-    let mut super_type = None;
+/// Returns `true` when the macro is expanding inside the standard plugin crate.
+///
+/// `CARGO_PKG_NAME` is set by cargo for the crate being compiled, so this is a
+/// reliable way to route a registration into the std-first registry without
+/// asking every author to spell it out.
+fn is_std_crate() -> bool {
+    std::env::var("CARGO_PKG_NAME").ok().as_deref() == Some("xcl-plugins")
+}
+
+/// Capability names accepted by `flags = "…"` and `caps = "…"`, mapped to
+/// the `Cap` variant that carries each bit.
+const CAPABILITY_NAMES: &[(&str, &str)] = &[
+    ("numeric", "Numeric"),
+    ("eq", "Eq"),
+    ("ord", "Ord"),
+    ("hash", "Hash"),
+    ("display", "Display"),
+    ("index", "Index"),
+    ("iterable", "Iterable"),
+    ("copy", "Copy"),
+    ("repr", "Repr"),
+    ("len", "Len"),
+    ("indexmut", "IndexMut"),
+    ("contains", "Contains"),
+    ("cast", "Cast"),
+    ("disposable", "Disposable"),
+    ("pure", "Pure"),
+    ("deterministic", "Deterministic"),
+    ("commutative", "Commutative"),
+    ("diverges", "Diverges"),
+];
+
+/// Expands a capability list such as `"PURE | DETERMINISTIC"` or
+/// `"Len, Contains"` into a constant [`CapSet`](::xcl_vm::CapSet) expression.
+fn capability_set_tokens(list: &str, span: Span) -> syn::Result<proc_macro2::TokenStream> {
+    capability_set_tokens_at(list, span, quote!(::xcl_vm))
+}
+
+/// Like [`capability_set_tokens`], but resolves `CapSet`/`Cap` through `root`.
+///
+/// Code generated *inside* `xcl-vm` must use `crate::runtime::primitives`
+/// rather than `::xcl_vm`.
+fn capability_set_tokens_at(
+    list: &str,
+    span: Span,
+    root: proc_macro2::TokenStream,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let mut set = quote!(#root::CapSet::EMPTY);
+    for raw in list.split(['|', ',']) {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let key = name.to_ascii_lowercase().replace('_', "");
+        let Some((_, variant)) = CAPABILITY_NAMES.iter().find(|(k, _)| *k == key) else {
+            let valid = CAPABILITY_NAMES
+                .iter()
+                .map(|(_, v)| *v)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(syn::Error::new(
+                span,
+                format!("unknown capability `{name}` — expected one of: {valid}"),
+            ));
+        };
+        let ident = syn::Ident::new(variant, span);
+        set = quote!(#set.with(#root::Cap::#ident));
+    }
+    Ok(set)
+}
+
+/// Values parsed from a `#[xcl(...)]` helper attribute on a derived type.
+#[derive(Default)]
+struct XclTypeAttrs {
+    domain: Option<String>,
+    kind: Option<String>,
+    summary: Option<String>,
+    super_type: Option<String>,
+    caps: Option<String>,
+}
+
+fn parse_xcl_helper_attrs(input: &syn::DeriveInput) -> XclTypeAttrs {
+    let mut attrs = XclTypeAttrs::default();
 
     for attr in &input.attrs {
         if attr.path().is_ident("xcl")
@@ -108,6 +179,7 @@ fn parse_xcl_helper_attrs(
                 let mut k = None;
                 let mut s = None;
                 let mut sup = None;
+                let mut c = None;
                 while !input.is_empty() {
                     let lookahead = input.lookahead1();
                     let ident: syn::Ident = if lookahead.peek(syn::Token![super]) {
@@ -123,34 +195,36 @@ fn parse_xcl_helper_attrs(
                         "kind" => k = Some(lit.value()),
                         "summary" => s = Some(lit.value()),
                         "super" => sup = Some(lit.value()),
+                        "caps" => c = Some(lit.value()),
                         _ => {}
                     }
                     if input.peek(syn::Token![,]) {
                         input.parse::<syn::Token![,]>()?;
                     }
                 }
-                Ok((d, k, s, sup))
+                Ok((d, k, s, sup, c))
             });
-            if let Ok((d, k, s, sup)) = parsed {
-                domain = d.or(domain);
-                kind = k.or(kind);
-                summary = s.or(summary);
-                super_type = sup.or(super_type);
+            if let Ok((d, k, s, sup, c)) = parsed {
+                attrs.domain = d.or(attrs.domain);
+                attrs.kind = k.or(attrs.kind);
+                attrs.summary = s.or(attrs.summary);
+                attrs.super_type = sup.or(attrs.super_type);
+                attrs.caps = c.or(attrs.caps);
             }
         }
     }
 
     // Auto-detect domain from source file path if not provided
-    if domain.is_none() {
-        domain = infer_domain_from_span(input.ident.span());
+    if attrs.domain.is_none() {
+        attrs.domain = infer_domain_from_span(input.ident.span());
     }
 
     // Auto-detect summary from /// doc comments if not provided
-    if summary.is_none() {
-        summary = extract_doc_summary(&input.attrs);
+    if attrs.summary.is_none() {
+        attrs.summary = extract_doc_summary(&input.attrs);
     }
 
-    (domain, kind, summary, super_type)
+    attrs
 }
 
 /// Convert a Rust type to an XCL type string.
@@ -221,21 +295,31 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
     let name = &input.ident;
     let name_str = name.to_string();
 
-    let (attr_domain, kind, summary, super_type) = parse_xcl_helper_attrs(&input);
+    let attrs = parse_xcl_helper_attrs(&input);
 
     // Auto-detect domain from type name if not explicitly provided
-    let domain = attr_domain.unwrap_or_else(|| name_str.to_lowercase());
+    let domain = attrs.domain.unwrap_or_else(|| name_str.to_lowercase());
     let domain_expr = quote!(Some(#domain));
 
-    let summary_expr = match summary {
+    let caps_expr = match attrs.caps {
+        Some(list) => match capability_set_tokens(&list, name.span()) {
+            Ok(ts) => ts,
+            Err(e) => return e.to_compile_error().into(),
+        },
+        None => quote!(::xcl_vm::CapSet::EMPTY),
+    };
+
+    let summary_expr = match attrs.summary {
         Some(s) => quote!(Some(#s)),
         None => quote!(None),
     };
 
-    let parent_type_expr = match super_type {
+    let parent_type_expr = match attrs.super_type {
         Some(s) => quote!(Some(#s)),
         None => quote!(None),
     };
+
+    let kind = attrs.kind;
 
     match &input.data {
         syn::Data::Struct(data_struct) => {
@@ -284,6 +368,7 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
                     variants: &[],
                     summary: #summary_expr,
                     parent_type: #parent_type_expr,
+                    caps: #caps_expr,
                 };
 
                 #[allow(dead_code)]
@@ -369,6 +454,7 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
                     variants: #variants_tokens,
                     summary: #summary_expr,
                     parent_type: #parent_type_expr,
+                    caps: #caps_expr,
                 };
 
                 #[allow(dead_code)]
@@ -587,6 +673,14 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let auto_import_val = parsed.auto_import;
 
+    let caps_expr = match &parsed.caps {
+        Some(list) => match capability_set_tokens(list, func.sig.ident.span()) {
+            Ok(ts) => ts,
+            Err(e) => return e.to_compile_error().into(),
+        },
+        None => quote!(::xcl_vm::CapSet::EMPTY),
+    };
+
     if uses_typed_params {
         // Generate a wrapper that converts &[Value] to typed Rust args
         let wrapper_ident =
@@ -618,6 +712,7 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
                 summary: #summary_static,
                 arg_desc: #arg_desc_static,
                 auto_import: #auto_import_val,
+                caps: #caps_expr,
             };
         };
 
@@ -643,6 +738,7 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
                 summary: #summary_static,
                 arg_desc: #arg_desc_static,
                 auto_import: #auto_import_val,
+                caps: #caps_expr,
             };
         };
 
@@ -710,6 +806,7 @@ struct NativeAttr {
     arg_desc: Vec<(String, String)>,
     named: Vec<NamedParamSpec>,
     auto_import: bool,
+    caps: Option<String>,
 }
 
 struct NamedParamSpec {
@@ -737,6 +834,7 @@ impl syn::parse::Parse for NativeAttr {
                 arg_desc: Vec::new(),
                 named: Vec::new(),
                 auto_import: false,
+                caps: None,
             });
         }
 
@@ -751,6 +849,7 @@ impl syn::parse::Parse for NativeAttr {
         let mut arg_desc = Vec::new();
         let mut named = Vec::new();
         let mut auto_import = false;
+        let mut caps = None;
 
         loop {
             if input.is_empty() {
@@ -843,6 +942,7 @@ impl syn::parse::Parse for NativeAttr {
                     "args" => args = Some(val),
                     "ret" => ret = Some(val),
                     "summary" => summary = Some(val),
+                    "flags" | "caps" => caps = Some(val),
                     _ => {}
                 }
             }
@@ -865,6 +965,7 @@ impl syn::parse::Parse for NativeAttr {
             arg_desc,
             named,
             auto_import,
+            caps,
         })
     }
 }
@@ -1005,6 +1106,14 @@ pub fn xcl_type(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote!(&[#(#entries),*])
     };
 
+    let caps_expr = match &parsed.caps {
+        Some(list) => match capability_set_tokens(list, proc_macro2::Span::call_site()) {
+            Ok(ts) => ts,
+            Err(e) => return e.to_compile_error().into(),
+        },
+        None => quote!(::xcl_vm::CapSet::EMPTY),
+    };
+
     let expanded = quote! {
         #item
 
@@ -1017,6 +1126,8 @@ pub fn xcl_type(attr: TokenStream, item: TokenStream) -> TokenStream {
             fields: #fields_tokens,
             variants: #variants_tokens,
             summary: #summary_tokens,
+            parent_type: None,
+            caps: #caps_expr,
         };
     };
 
@@ -1028,6 +1139,7 @@ struct TypeAttr {
     domain: Option<String>,
     kind: String,
     summary: Option<String>,
+    caps: Option<String>,
     fields: Vec<FieldSpec>,
     variants: Vec<VariantSpec>,
 }
@@ -1049,6 +1161,7 @@ impl syn::parse::Parse for TypeAttr {
         let mut domain = None;
         let mut kind = None;
         let mut summary = None;
+        let mut caps = None;
         let mut fields = Vec::new();
         let mut variants = Vec::new();
 
@@ -1071,6 +1184,7 @@ impl syn::parse::Parse for TypeAttr {
                     "domain" => domain = Some(lit.value()),
                     "kind" => kind = Some(lit.value()),
                     "summary" => summary = Some(lit.value()),
+                    "caps" | "flags" => caps = Some(lit.value()),
                     _ => {}
                 }
             } else if input.peek(syn::token::Paren) {
@@ -1107,6 +1221,7 @@ impl syn::parse::Parse for TypeAttr {
             domain,
             kind: kind.unwrap_or_else(|| "Opaque".to_string()),
             summary,
+            caps,
             fields,
             variants,
         })
@@ -1425,6 +1540,7 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                         summary: #summary_expr,
                         arg_desc: &[],
                         auto_import: #auto_import_val,
+                        caps: ::xcl_vm::CapSet::EMPTY,
                     };
 
                     fn #wrapper_name(args: &[::xcl_vm::Value]) -> ::xcl_vm::Value {
@@ -1532,6 +1648,15 @@ pub fn opcode(attr: TokenStream, item: TokenStream) -> TokenStream {
     let func_name = &func.sig.ident;
     let func_name_str = func_name.to_string();
 
+    // The crate an opcode is defined in decides when it is registered. The
+    // standard plugin crate always registers first, so a third-party plugin
+    // can never shadow or collide with a std opcode silently.
+    let registry_path = if is_std_crate() {
+        quote!(::xcl_plugins::STD_OPCODE_REGISTRY)
+    } else {
+        quote!(::xcl_plugins::OPCODE_REGISTRY)
+    };
+
     let const_ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
 
     let static_ident = syn::Ident::new(
@@ -1544,7 +1669,7 @@ pub fn opcode(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         pub const #const_ident: u8 = #code;
 
-        #[::linkme::distributed_slice(::xcl_plugins::OPCODE_REGISTRY)]
+        #[::linkme::distributed_slice(#registry_path)]
         #[allow(non_upper_case_globals)]
         static #static_ident: ::xcl_vm::OpcodeEntry = ::xcl_vm::OpcodeEntry {
             code: #code,
@@ -1579,6 +1704,7 @@ struct OpMeta {
     branch: Option<BranchKind>,
     reads: u8,
     writes: u8,
+    flags: Option<String>,
 }
 
 /// Parse a comma-separated list of operand letters ("a", "b", "c") into a slot mask.
@@ -1611,6 +1737,7 @@ impl Parse for OpMeta {
         let mut branch: Option<BranchKind> = None;
         let mut reads: u8 = 0;
         let mut writes: u8 = 0;
+        let mut flags: Option<String> = None;
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -1683,8 +1810,19 @@ impl Parse for OpMeta {
                         return Err(syn::Error::new_spanned(value, "expected string literal"));
                     }
                 }
+                "flags" => {
+                    if let Expr::Lit(ExprLit {
+                        lit: Lit::Str(lit_str),
+                        ..
+                    }) = value
+                    {
+                        flags = Some(lit_str.value());
+                    } else {
+                        return Err(syn::Error::new_spanned(value, "expected string literal"));
+                    }
+                }
                 _ => {
-                    // Ignore other keys like arity, stack, flags — they are metadata only
+                    // Ignore other keys like arity, stack — they are metadata only
                 }
             }
             if input.peek(Token![,]) {
@@ -1699,6 +1837,7 @@ impl Parse for OpMeta {
             branch,
             reads,
             writes,
+            flags,
         })
     }
 }
@@ -1772,6 +1911,7 @@ pub fn opcodes(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut branch_assigns = Vec::new();
     let mut slot_reads_assigns = Vec::new();
     let mut slot_writes_assigns = Vec::new();
+    let mut caps_assigns = Vec::new();
 
     for item in funcs {
         if let syn::Item::Fn(func) = &item {
@@ -1861,6 +2001,21 @@ pub fn opcodes(args: TokenStream, input: TokenStream) -> TokenStream {
             if writes_val != 0 {
                 slot_writes_assigns.push(quote! {
                     t[#code as usize] = #writes_val;
+                });
+            }
+
+            // Collect declared capabilities for the meta table
+            if let Some(ref flags) = op_meta.flags {
+                let caps_expr = match capability_set_tokens_at(
+                    flags,
+                    func.sig.ident.span(),
+                    quote!(crate::runtime::primitives),
+                ) {
+                    Ok(ts) => ts,
+                    Err(e) => return e.to_compile_error().into(),
+                };
+                caps_assigns.push(quote! {
+                    t[#code as usize] = #caps_expr.bits();
                 });
             }
 
@@ -1962,6 +2117,21 @@ pub fn opcodes(args: TokenStream, input: TokenStream) -> TokenStream {
                     #[inline(always)]
                     pub const fn writes(op: u8) -> u8 {
                         SLOT_WRITES[op as usize]
+                    }
+
+                    /// Capability bits declared by each opcode via `flags = "..."`.
+                    ///
+                    /// 0 means "not declared", which is *not* the same as "impure":
+                    /// an undeclared opcode is simply unknown to the optimizer.
+                    pub const CAPS: [u32; 256] = {
+                        let mut t = [0u32; 256];
+                        #(#caps_assigns)*
+                        t
+                    };
+
+                    #[inline(always)]
+                    pub const fn caps(op: u8) -> u32 {
+                        CAPS[op as usize]
                     }
                 }
             }

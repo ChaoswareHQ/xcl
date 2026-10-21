@@ -708,12 +708,25 @@ impl Value {
         entries: smallvec::SmallVec<[(Value, Value, u64); SMALL_MAP_MAX]>,
         arena: &bumpalo::Bump,
     ) -> Self {
+        Self::from_small_map_typed(entries, SUBTYPE_NONE, VARIANT_DEFAULT, arena)
+    }
+
+    /// Like [`Value::from_small_map`], but stores a subtype/variant tag in the
+    /// header so the value can be recognised without a field lookup (for
+    /// example [`SUBTYPE_RANGE`]).
+    #[inline(always)]
+    pub fn from_small_map_typed(
+        entries: smallvec::SmallVec<[(Value, Value, u64); SMALL_MAP_MAX]>,
+        subtype: u16,
+        variant: u8,
+        arena: &bumpalo::Bump,
+    ) -> Self {
         let obj = arena.alloc(HeapMap {
             header: HeapHeader {
                 kind: KIND_MAP,
                 flags: 0,
-                subtype: SUBTYPE_NONE,
-                variant: VARIANT_DEFAULT,
+                subtype,
+                variant,
             },
             repr: MapRepr::Small(entries),
         });
@@ -1821,6 +1834,9 @@ pub struct NativeEntry {
     /// resolve to `collections.map` when the domain is auto-import enabled.
     /// Domains like `https` should set this to false to avoid conflicts (e.g., `get` is too common).
     pub auto_import: bool,
+    /// Capabilities of the function value itself, declared by the registering macro
+    /// (`#[xcl_fn(flags = "PURE | DETERMINISTIC")]`). Empty is always safe.
+    pub caps: crate::runtime::primitives::CapSet,
 }
 
 /// A wrapper around a raw function pointer that implements [`Sync`] and [`Send`].
@@ -1897,6 +1913,10 @@ pub struct TypeDescriptor {
     /// When set, method resolution falls back to this parent type if a method
     /// is not found on the current type.
     pub parent_type: Option<&'static str>,
+    /// Capabilities this type provides, declared by the registering macro
+    /// (`#[xcl(caps = "Len, Contains")]`). A declared capability is a promise the
+    /// type's methods must keep.
+    pub caps: crate::runtime::primitives::CapSet,
 }
 
 /// Classification of custom types in the type registry.

@@ -23,54 +23,124 @@
 //! xcl-bytecode stats example/benchmark.xcl
 //! ```
 
-use clap::{Parser, Subcommand};
 use std::fs;
 use xcl_vm::bytecode::{Bytecode, compile};
 use xcl_vm::lexer::lex;
 use xcl_vm::parser::parse;
 
 /// XCL Bytecode Debugger — diagnose why XCL is slower than Luau
-#[derive(Parser)]
-#[command(name = "xcl-bytecode", version, about, long_about = None)]
 struct Cli {
-    #[command(subcommand)]
-    command: Commands,
+    command: Command,
 }
 
-#[derive(Subcommand)]
-enum Commands {
-    /// Disassemble bytecode instructions
+enum Command {
     Disassemble {
-        /// Path to XCL source file
         file: String,
-        /// Show raw hex values
-        #[arg(short, long)]
         raw: bool,
     },
-    /// Trace execution step by step
     Trace {
-        /// Path to XCL source file
         file: String,
-        /// Maximum steps to trace (0 = unlimited)
-        #[arg(short, long, default_value = "0")]
         steps: usize,
-        /// Show stack changes only
-        #[arg(short, long)]
         stack_only: bool,
     },
-    /// Profile execution with per-opcode timing
     Profile {
-        /// Path to XCL source file
         file: String,
-        /// Number of runs to average
-        #[arg(short, long, default_value = "3")]
         runs: usize,
     },
-    /// Show opcode frequency statistics
     Stats {
-        /// Path to XCL source file
         file: String,
     },
+    Help,
+    Version,
+}
+
+const USAGE: &str = "
+Usage: xcl-bytecode <COMMAND> [OPTIONS]
+
+Commands:
+  disassemble <file> [--raw]      Disassemble bytecode instructions
+  trace <file> [-s N] [--stack-only]
+                                  Trace execution step by step (steps 0 = unlimited)
+  profile <file> [-r N]           Profile execution with per-opcode timing
+  stats <file>                    Show opcode frequency statistics
+
+Options:
+  -h, --help       Show this help message
+  -v, --version    Show version information
+";
+
+fn fail(message: &str) -> ! {
+    eprintln!("xcl-bytecode: error: {message}");
+    eprintln!("Try 'xcl-bytecode --help' for usage.");
+    std::process::exit(1)
+}
+
+fn parse_args<I: IntoIterator<Item = String>>(iter: I) -> Cli {
+    let mut args = iter.into_iter().skip(1);
+    let Some(command) = args.next() else {
+        fail("missing command");
+    };
+
+    if command == "-h" || command == "--help" {
+        return Cli {
+            command: Command::Help,
+        };
+    }
+    if command == "-v" || command == "--version" {
+        return Cli {
+            command: Command::Version,
+        };
+    }
+
+    let mut file: Option<String> = None;
+    let mut raw = false;
+    let mut stack_only = false;
+    let mut steps = 0usize;
+    let mut runs = 3usize;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--raw" => raw = true,
+            "--stack-only" => stack_only = true,
+            "-s" | "--steps" => {
+                steps = args
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| fail("steps requires a number"));
+            }
+            "-r" | "--runs" => {
+                runs = args
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| fail("runs requires a number"));
+            }
+            other if other.starts_with('-') => fail(&format!("unknown option '{other}'")),
+            other => {
+                if file.is_some() {
+                    fail(&format!("unexpected argument '{other}'"));
+                }
+                file = Some(other.to_string());
+            }
+        }
+    }
+
+    let Some(file) = file else {
+        fail(&format!("'{command}' requires a file"));
+    };
+
+    let command = match command.as_str() {
+        "disassemble" | "dis" => Command::Disassemble { file, raw },
+        "trace" => Command::Trace {
+            file,
+            steps,
+            stack_only,
+        },
+        "profile" => Command::Profile { file, runs },
+        "stats" => Command::Stats { file },
+        other => fail(&format!("unknown command '{other}'")),
+    };
+
+    Cli { command }
 }
 
 fn get_opcode_name(op: u8) -> &'static str {
@@ -173,14 +243,39 @@ fn cmd_disassemble(bc: &Bytecode, raw: bool) {
             0 | 1 | 2 | 3 | 17 | 26 | 33 | 34 => String::new(),
 
             // Single operand a
-            4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 28 | 29 | 30 | 35 | 36 | 37 | 38 | 46 | 52
-            | 53 | 80 | 81 => match op {
-                7 => format!(" a={} \"{}\"", a, bc.string_table.get(a as usize).map_or("?", |s| s.as_ref())),
-                8 => format!(" a={} ${}", a, bc.local_names.get(a as usize).map_or("$?", |s| s.as_ref())),
-                9 => format!(" a={} ${}", a, bc.local_names.get(a as usize).map_or("$?", |s| s.as_ref())),
-                10 => format!(" a={} @{}", a, bc.global_names.get(a as usize).map_or("?", |s| s.as_ref())),
-                11 => format!(" a={} @{}", a, bc.global_names.get(a as usize).map_or("?", |s| s.as_ref())),
-                5 | 6 => format!(" a={} (wide[{}]={})", a, a, bc.wide_operands.get(a as usize).unwrap_or(&i64::MIN)),
+            4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 28 | 29 | 30 | 35 | 36 | 37 | 38 | 46 | 52 | 53
+            | 80 | 81 => match op {
+                7 => format!(
+                    " a={} \"{}\"",
+                    a,
+                    bc.string_table.get(a as usize).map_or("?", |s| s.as_ref())
+                ),
+                8 => format!(
+                    " a={} ${}",
+                    a,
+                    bc.local_names.get(a as usize).map_or("$?", |s| s.as_ref())
+                ),
+                9 => format!(
+                    " a={} ${}",
+                    a,
+                    bc.local_names.get(a as usize).map_or("$?", |s| s.as_ref())
+                ),
+                10 => format!(
+                    " a={} @{}",
+                    a,
+                    bc.global_names.get(a as usize).map_or("?", |s| s.as_ref())
+                ),
+                11 => format!(
+                    " a={} @{}",
+                    a,
+                    bc.global_names.get(a as usize).map_or("?", |s| s.as_ref())
+                ),
+                5 | 6 => format!(
+                    " a={} (wide[{}]={})",
+                    a,
+                    a,
+                    bc.wide_operands.get(a as usize).unwrap_or(&i64::MIN)
+                ),
                 _ => format!(" a={}", a),
             },
 
@@ -194,7 +289,11 @@ fn cmd_disassemble(bc: &Bytecode, raw: bool) {
                         bc.local_names.get(b as usize).map_or("$?", |s| s.as_ref())
                     )
                 }
-                66 => format!(" a=\"{}\" b={}", bc.string_table.get(a as usize).map_or("?", |s| s.as_ref()), b),
+                66 => format!(
+                    " a=\"{}\" b={}",
+                    bc.string_table.get(a as usize).map_or("?", |s| s.as_ref()),
+                    b
+                ),
                 _ => format!(" a={} b={}", a, b),
             },
 
@@ -204,14 +303,21 @@ fn cmd_disassemble(bc: &Bytecode, raw: bool) {
                     let kind = if c == 1 { "float" } else { "int" };
                     format!(
                         " a=${} b=wide[{}] c={}",
-                        bc.local_names.get(a as usize).map_or("$?", |s| s.as_ref()), b, kind
+                        bc.local_names.get(a as usize).map_or("$?", |s| s.as_ref()),
+                        b,
+                        kind
                     )
                 }
                 _ => format!(" a={} b={} c={}", a, b, c),
             },
 
             // For loop special
-            90 => format!(" a=${} b=-{} c={}", bc.local_names.get(a as usize).map_or("$?", |s| s.as_ref()), b, c),
+            90 => format!(
+                " a=${} b=-{} c={}",
+                bc.local_names.get(a as usize).map_or("$?", |s| s.as_ref()),
+                b,
+                c
+            ),
 
             _ => format!(" a={} b={} c={}", a, b, c),
         };
@@ -541,14 +647,16 @@ fn cmd_stats(bc: &Bytecode) {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let cli = parse_args(std::env::args());
 
     match cli.command {
-        Commands::Disassemble { file, raw } => {
+        Command::Help => print!("{USAGE}"),
+        Command::Version => println!("xcl-bytecode {}", env!("CARGO_PKG_VERSION")),
+        Command::Disassemble { file, raw } => {
             let bc = load_and_compile(&file);
             cmd_disassemble(&bc, raw);
         }
-        Commands::Trace {
+        Command::Trace {
             file,
             steps,
             stack_only,
@@ -556,11 +664,11 @@ fn main() {
             let bc = load_and_compile(&file);
             cmd_trace(&bc, steps, stack_only);
         }
-        Commands::Profile { file, runs } => {
+        Command::Profile { file, runs } => {
             let bc = load_and_compile(&file);
             cmd_profile(&bc, runs);
         }
-        Commands::Stats { file } => {
+        Command::Stats { file } => {
             let bc = load_and_compile(&file);
             cmd_stats(&bc);
         }

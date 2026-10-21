@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 mimalloc.workspace = true
-xcl-debug.workspace = true
+xcl-debug = { workspace = true, optional = true }
 xcl-plugins.workspace = true
 xcl-vm.workspace = true
 
@@ -23,3 +23,6 @@ xcl-vm.workspace = true
 default = []
 # Enable the Cranelift JIT in the VM (`cargo build -p xcl-cli --features jit`).
 jit = ["xcl-vm/jit"]
+# Enable bytecode disassembly (`xcl -d`). Off by default so the shipping binary
+# does not carry the disassembler.
+debug = ["dep:xcl-debug"]

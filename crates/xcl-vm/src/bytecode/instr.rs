@@ -71,4 +71,19 @@ impl Instr {
     pub const fn a2(op: u8, a: u32, b: u16) -> Self {
         Self::make(op, a, b, 0)
     }
+
+    /// Creates an instruction with all three operands filled.
+    ///
+    /// Used by encoding forms that carry a small third field, such as
+    /// `OP_EXT` (`a` = module id, `b` = operand, `c` = module-local opcode).
+    #[inline(always)]
+    pub const fn a2c(op: u8, a: u32, b: u16, c: u8) -> Self {
+        Self::make(op, a, b, c)
+    }
+
+    /// Returns a copy of this instruction with operand `c` replaced.
+    #[inline(always)]
+    pub const fn with_c(self, c: u8) -> Self {
+        Self::make(self.op(), self.a(), self.b(), c)
+    }
 }

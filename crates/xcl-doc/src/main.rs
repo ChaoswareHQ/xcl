@@ -1,5 +1,4 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::PathBuf;
 
@@ -9,43 +8,83 @@ mod model;
 mod render;
 mod serve;
 
-#[derive(Parser)]
-#[command(name = "xcl-doc", version, about = "Documentation generator for XCL")]
-struct Cli {
-    #[command(subcommand)]
-    command: Cmd,
+enum Cmd {
+    Build { out: PathBuf, src: Option<PathBuf> },
+    Serve { dir: PathBuf, port: u16 },
+    Index,
+    Help,
+    Version,
 }
 
-#[derive(Subcommand)]
-enum Cmd {
-    /// Build the HTML documentation.
-    Build {
-        /// Output directory.
-        #[arg(short, long, default_value = "target/xcl-docs")]
-        out: PathBuf,
+const USAGE: &str = "
+Usage: xcl-doc <COMMAND> [OPTIONS]
 
-        /// Optional path to a user .xcl file or directory to include.
-        #[arg(short, long)]
-        src: Option<PathBuf>,
-    },
+Commands:
+  build [-o DIR] [-s PATH]   Build the HTML documentation
+  serve [-d DIR] [-p PORT]   Serve the documentation on a local port
+  index                      Print the search index to stdout
 
-    /// Serve the documentation on a local port.
-    Serve {
-        #[arg(short, long, default_value = "target/xcl-docs")]
-        dir: PathBuf,
+Options:
+  -h, --help       Show this help message
+  -v, --version    Show version information
+";
 
-        #[arg(short, long, default_value_t = 8080)]
-        port: u16,
-    },
+fn fail(message: &str) -> ! {
+    eprintln!("xcl-doc: error: {message}");
+    eprintln!("Try 'xcl-doc --help' for usage.");
+    std::process::exit(1)
+}
 
-    /// Print the search index to stdout.
-    Index,
+fn parse_args<I: IntoIterator<Item = String>>(iter: I) -> Cmd {
+    let mut args = iter.into_iter().skip(1);
+    let Some(command) = args.next() else {
+        fail("missing command");
+    };
+
+    match command.as_str() {
+        "-h" | "--help" => return Cmd::Help,
+        "-v" | "--version" => return Cmd::Version,
+        "index" => return Cmd::Index,
+        "build" | "serve" => {}
+        other => fail(&format!("unknown command '{other}'")),
+    }
+
+    let mut out = PathBuf::from("target/xcl-docs");
+    let mut src: Option<PathBuf> = None;
+    let mut dir = PathBuf::from("target/xcl-docs");
+    let mut port: u16 = 8080;
+
+    while let Some(arg) = args.next() {
+        let mut value = |flag: &str| -> String {
+            args.next()
+                .unwrap_or_else(|| fail(&format!("{flag} requires a value")))
+        };
+        match arg.as_str() {
+            "-o" | "--out" => out = PathBuf::from(value("--out")),
+            "-s" | "--src" => src = Some(PathBuf::from(value("--src"))),
+            "-d" | "--dir" => dir = PathBuf::from(value("--dir")),
+            "-p" | "--port" => {
+                port = value("--port")
+                    .parse()
+                    .unwrap_or_else(|_| fail("--port requires a number"));
+            }
+            other => fail(&format!("unknown option '{other}'")),
+        }
+    }
+
+    if command == "build" {
+        Cmd::Build { out, src }
+    } else {
+        Cmd::Serve { dir, port }
+    }
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = parse_args(std::env::args());
 
-    match cli.command {
+    match cli {
+        Cmd::Help => print!("{USAGE}"),
+        Cmd::Version => println!("xcl-doc {}", env!("CARGO_PKG_VERSION")),
         Cmd::Build { out, src } => {
             let mut model = collect::collect_std();
             if let Some(path) = src {
@@ -82,7 +121,10 @@ fn write_docs(root: &PathBuf, model: &model::DocModel) -> Result<()> {
     for d in &model.domains {
         let sub = root.join(&d.name);
         fs::create_dir_all(&sub)?;
-        fs::write(sub.join("index.html"), render::domain::render(&d.name, model))?;
+        fs::write(
+            sub.join("index.html"),
+            render::domain::render(&d.name, model),
+        )?;
     }
 
     // Natives — one page each, in functions/
@@ -102,8 +144,10 @@ fn write_docs(root: &PathBuf, model: &model::DocModel) -> Result<()> {
     }
 
     // Search index — static/search-index.js
-    fs::write(root.join("static").join("search-index.js"),
-        render::search::render_js(model))?;
+    fs::write(
+        root.join("static").join("search-index.js"),
+        render::search::render_js(model),
+    )?;
 
     Ok(())
 }

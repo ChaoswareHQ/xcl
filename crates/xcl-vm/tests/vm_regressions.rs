@@ -15,6 +15,10 @@ fn eval_i64(src: &str) -> i64 {
     eval(src).as_i48()
 }
 
+fn eval_bool(src: &str) -> bool {
+    eval(src).as_bool()
+}
+
 // ── Values returned by `run` must survive the VM (escape barrier) ──
 
 #[test]
@@ -167,12 +171,141 @@ fn constant_range_loop_nonzero_start() {
     assert_eq!(eval_i64("$s = 0; for $i in 1..4 { $s = $s + $i }; $s"), 6);
 }
 
+// `..` is syntax, so the value form must work with no plugin registered:
+// these run on a bare `VM::new()`, exactly like the fused loops above.
+
+#[test]
+fn range_value_needs_no_plugin() {
+    let v = eval("0..3");
+    let map = v.as_map().expect("range is a map");
+    assert_eq!(map.get("start").map(|v| v.as_i48()), Some(0));
+    assert_eq!(map.get("end").map(|v| v.as_i48()), Some(3));
+}
+
+#[test]
+fn range_value_iterates() {
+    assert_eq!(
+        eval_i64("$r = 0..4; $s = 0; for $i in $r { $s = $s + $i }; $s"),
+        6
+    );
+}
+
+#[test]
+fn range_value_survives_a_function_return() {
+    assert_eq!(
+        eval_i64("mk($n) { return 0..$n }; $r = mk 3; $s = 0; for $i in $r { $s = $s + $i }; $s"),
+        3
+    );
+}
+
+#[test]
+fn empty_range_iterates_zero_times() {
+    assert_eq!(
+        eval_i64("$r = 3..3; $n = 0; for $i in $r { $n = $n + 1 }; $n"),
+        0
+    );
+}
+
 #[test]
 fn nonconstant_range_loop() {
     assert_eq!(
         eval_i64("$n = 10; $s = 0; for $i in 0..$n { $s = $s + $i }; $s"),
         45
     );
+}
+
+// ── `is` resolves primitives, aliases and capabilities from the VM table ──
+
+#[test]
+fn is_reports_primitive_types() {
+    assert!(eval_bool("$x = \"hi\"; $x is str"));
+    assert!(eval_bool("$n = 5; $n is int"));
+    assert!(eval_bool("$f = 1.5; $f is float"));
+    assert!(eval_bool("$b = true; $b is bool"));
+    assert!(eval_bool("$z = none; $z is none"));
+    assert!(eval_bool("$a = [1]; $a is array"));
+    assert!(eval_bool("$m = {a: 1}; $m is map"));
+}
+
+#[test]
+fn is_treats_sized_names_as_aliases() {
+    // The VM has one integer representation, so a width is never observable.
+    assert!(eval_bool("$n = 300; $n is u32"));
+    assert!(eval_bool("$n = 300; $n is i64"));
+    assert!(eval_bool("$n = 300; $n is u8"));
+    assert!(!eval_bool("$n = 300; $n is float"));
+    assert!(!eval_bool("$x = \"1\"; $x is i64"));
+}
+
+#[test]
+fn is_reports_capabilities() {
+    assert!(eval_bool("$n = 2; $n is Numeric"));
+    assert!(eval_bool("$n = 2; $n is Ord"));
+    assert!(eval_bool("$n = 2; $n is Copy"));
+    assert!(eval_bool("$s = \"hi\"; $s is Hash"));
+    assert!(!eval_bool("$s = \"hi\"; $s is Numeric"));
+    assert!(!eval_bool("$z = none; $z is Numeric"));
+}
+
+#[test]
+fn is_reports_container_capabilities() {
+    assert!(eval_bool("$a = [1, 2]; $a is Iterable"));
+    assert!(eval_bool("$a = [1, 2]; $a is Index"));
+    // Arrays are mutable in place, so they are not Copy.
+    assert!(!eval_bool("$a = [1, 2]; $a is Copy"));
+    // Maps support index but not `for`.
+    assert!(eval_bool("$m = {a: 1}; $m is Index"));
+    assert!(!eval_bool("$m = {a: 1}; $m is Iterable"));
+}
+
+#[test]
+fn is_distinguishes_a_range_from_a_plain_map() {
+    assert!(eval_bool("$r = 0..3; $r is range"));
+    assert!(eval_bool("$r = 0..3; $r is Iterable"));
+    assert!(!eval_bool("$r = 0..3; $r is str"));
+    assert!(!eval_bool("$m = {start: 0, end: 3}; $m is range"));
+}
+
+#[test]
+fn is_accepts_any() {
+    assert!(eval_bool("$n = 1; $n is any"));
+    assert!(eval_bool("$m = {a: 1}; $m is any"));
+}
+
+// ── Registered types answer `is` from their descriptor ──
+
+#[test]
+fn is_matches_a_registered_record_by_shape() {
+    // `Child` declares fields x and y, `Base` only x.
+    assert!(eval_with_records("$p = {x: 1, y: 2}; $p is Child").as_bool());
+    assert!(eval_with_records("$p = {x: 1, y: 2}; $p is Base").as_bool());
+    assert!(!eval_with_records("$p = {x: 1, y: 2}; $p is Unrelated").as_bool());
+    assert!(!eval_with_records("$p = {x: 1}; $p is Child").as_bool());
+}
+
+#[test]
+fn is_reads_declared_capabilities_from_the_descriptor() {
+    // `Child` is registered with `caps = Iterable`; `Base` declares none, so a
+    // value that only satisfies `Base` does not inherit it.
+    assert!(eval_with_records("$p = {x: 1, y: 2}; $p is Iterable").as_bool());
+    assert!(!eval_with_records("$p = {x: 1}; $p is Iterable").as_bool());
+    assert!(!eval_with_records("$p = {x: 1, y: 2}; $p is Numeric").as_bool());
+}
+
+#[test]
+fn opcode_flags_reach_the_capability_table() {
+    use xcl_vm::Cap;
+    use xcl_vm::runtime::vm::ops::{consts, meta};
+
+    // `op_add` declares `flags = "PURE | DETERMINISTIC | COMMUTATIVE"`.
+    let add = meta::caps(consts::OP_ADD);
+    assert_ne!(add & Cap::Pure.bit(), 0);
+    assert_ne!(add & Cap::Deterministic.bit(), 0);
+    assert_ne!(add & Cap::Commutative.bit(), 0);
+    assert_eq!(add & Cap::Numeric.bit(), 0);
+
+    // Declaring nothing is different from declaring impurity: 0 means unknown.
+    assert_eq!(meta::caps(consts::OP_PUSH_NIL), 0);
 }
 
 // ── Additional regression tests ──
@@ -391,7 +524,7 @@ $x"
 fn string_literal_push_return() {
     // Ensure OP_PUSH_STR uses string_values correctly
     assert_eq!(
-        eval("hello() { return \"world\" }; hello()").as_str(),
+        eval("hello() { return \"world\" }; hello").as_str(),
         Some("world")
     );
 }
@@ -438,19 +571,19 @@ odd 10"
 #[test]
 fn named_call_zero_args() {
     assert_eq!(
-        eval("greet() { return \"hi\" }; greet()").as_str(),
+        eval("greet() { return \"hi\" }; greet").as_str(),
         Some("hi")
     );
 }
 
 #[test]
 fn named_call_one_arg() {
-    assert_eq!(eval_i64("double($x) { return $x * 2 }; double(21)"), 42);
+    assert_eq!(eval_i64("double($x) { return $x * 2 }; double 21"), 42);
 }
 
 #[test]
 fn named_call_two_args() {
-    assert_eq!(eval_i64("add($a, $b) { return $a + $b }; add(20, 22)"), 42);
+    assert_eq!(eval_i64("add($a, $b) { return $a + $b }; add 20 22"), 42);
 }
 
 #[test]
@@ -490,7 +623,7 @@ f() {
     defer { g 1 }
     return 7
 }
-f()"
+f"
         ),
         7
     );
@@ -569,8 +702,7 @@ fn tail_call_with_accumulator() {
     // Tail-recursive sum with accumulator
     assert_eq!(
         eval_i64(
-            "sum($n, $acc) { if $n <= 0 { return $acc } return sum ($n - 1, $acc + $n) }
-sum(100, 0)"
+            "sum($n, $acc) { if $n <= 0 { return $acc } return sum ($n - 1) ($acc + $n) }\nsum 100 0"
         ),
         5050
     );
@@ -932,7 +1064,6 @@ $count"
 fn parenthesized_first_arg_does_not_end_the_call() {
     // `f (a) b c` used to compile as `f(a)` followed by a discarded `b c`.
     assert_eq!(eval_i64("f($a, $b) { return $a * 10 + $b }; f (1) 7"), 17);
-    assert_eq!(eval_i64("f($a, $b) { return $a * 10 + $b }; f(1) 7"), 17);
     assert_eq!(
         eval_i64("g($a, $b, $c) { return $a + $b + $c }; g (1) 2 3"),
         6
@@ -985,7 +1116,7 @@ fn function_with_300_locals() {
     src.push_str("    $sum = $l299 - $l0\n");
     src.push_str("    return $sum\n");
     src.push_str("}\n");
-    src.push_str("f()");
+    src.push('f');
     let result = eval(&src);
     assert_eq!(
         result.as_i48(),
@@ -1016,14 +1147,14 @@ fn fused_call_name_matches_old_path() {
     // Call a user function with 0, 1, and 3 args (including recursive Fibonacci)
     // 0 args
     assert_eq!(
-        eval("greet() { return \"hi\" }; greet()").as_str(),
+        eval("greet() { return \"hi\" }; greet").as_str(),
         Some("hi")
     );
     // 1 arg
-    assert_eq!(eval_i64("double($x) { return $x * 2 }; double(21)"), 42);
+    assert_eq!(eval_i64("double($x) { return $x * 2 }; double 21"), 42);
     // 3 args
     assert_eq!(
-        eval_i64("sum3($a, $b, $c) { return $a + $b + $c }; sum3(10, 20, 12)"),
+        eval_i64("sum3($a, $b, $c) { return $a + $b + $c }; sum3 10 20 12"),
         42
     );
     // Recursive Fibonacci
@@ -1054,7 +1185,7 @@ fn fused_call_name_builtin() {
     // The fused opcode correctly falls through the cold path (global_index miss,
     // domain methods miss, fallback scan miss) and returns nil, which is the
     // same behavior as the old OP_PUSH_STR + OP_CALL path.
-    let result = eval("$s = \"hello\"; len($s)");
+    let result = eval("$s = \"hello\"; len $s");
     assert!(
         result.is_nil(),
         "expected nil (no builtins without plugins), got {:?}",
@@ -1074,7 +1205,7 @@ fn fused_call_name_on_local_is_unchanged() {
 fn frame_code_pointer_survives_repeated_runs() {
     // Compile three different programs and run them round-robin 50 times
     // each on one VM to catch stale pointer issues.
-    let src_recursion = "f($n) { if $n <= 0 { return 1 } return f($n - 1) * 2 }; f(10)";
+    let src_recursion = "f($n) { if $n <= 0 { return 1 } return f ($n - 1) * 2 }; f 10";
     let src_closure = "$f = |$x| $x * 3; $f 7";
     let src_tail = "ping($n) { if $n <= 0 { return 7 } return pong ($n - 1) }; pong($n) { if $n <= 0 { return 9 } return ping ($n - 1) }; ping 5";
 
@@ -1126,7 +1257,7 @@ fn tail_call_across_bytecodes_after_run() {
 fn call_value_after_run() {
     // Keep a function Value returned by run, call it via call_value after
     // the VM has run a different program.
-    let src1 = "$f = |$x| $x + 10; $f";
+    let src1 = "mk($n) { return |$x| $x + $n }; mk 10";
     let src2 = "42 * 2";
 
     let tokens1 = xcl_vm::lexer::lex(src1, "<test>");
@@ -1183,6 +1314,7 @@ static RECORD_TYPES: &[xcl_vm::TypeDescriptor] = &[
         variants: &[],
         summary: None,
         parent_type: None,
+        caps: xcl_vm::CapSet::EMPTY,
     },
     xcl_vm::TypeDescriptor {
         name: "Child",
@@ -1192,6 +1324,7 @@ static RECORD_TYPES: &[xcl_vm::TypeDescriptor] = &[
         variants: &[],
         summary: None,
         parent_type: Some("Base"),
+        caps: xcl_vm::CapSet::EMPTY.with(xcl_vm::Cap::Iterable),
     },
 ];
 
@@ -1408,28 +1541,36 @@ fn local_variable_beats_a_same_named_function() {
     assert_eq!(eval_i64(src), 42);
 }
 
-// ── Parenthesized value calls ──
+// ── Parenthesized calls are rejected ──
 
 #[test]
-fn parenthesized_value_call_takes_a_list() {
-    assert_eq!(
-        eval_i64("$f = |$a, $b| $a * 10 + $b\n$r = $f(1, 2)\n$r"),
-        12
-    );
+#[should_panic(expected = "is not call syntax")]
+fn parenthesized_named_call_is_rejected() {
+    eval("add($a, $b) { return $a + $b }; add(3, 4)");
 }
 
 #[test]
-fn parenthesized_value_call_can_be_empty() {
-    // `$f()` is a zero-argument call, not a grouped expression.
-    assert_eq!(eval_i64("$f = |$a| 7\n$r = $f()\n$r"), 7);
+#[should_panic(expected = "is not call syntax")]
+fn parenthesized_zero_arg_call_is_rejected() {
+    eval("status() { return \"ok\" }; status()");
 }
 
 #[test]
-fn parenthesized_value_call_args_are_full_expressions() {
-    assert_eq!(
-        eval_i64("$f = |$a, $b| $a * 10 + $b\n$r = $f(1 + 2, 3)\n$r"),
-        33
-    );
+#[should_panic(expected = "must be separated from the callee by a space")]
+fn parenthesized_value_call_is_rejected() {
+    eval("$f = |$x| $x * 2; $f(21)");
+}
+
+#[test]
+fn bare_value_statement_calls_a_function() {
+    // `$f` on its own is the zero-argument call form; `$f()` is not allowed.
+    assert_eq!(eval_i64("$f = |$a| 41\n$f"), 41);
+}
+
+#[test]
+fn bare_value_statement_keeps_a_non_function_value() {
+    // A non-function value is left untouched, so `$x` still yields the result.
+    assert_eq!(eval_i64("$x = 7\n$x"), 7);
 }
 
 #[test]
@@ -1453,19 +1594,19 @@ fn value_call_condition_with_false_result() {
 #[test]
 fn zero_argument_function_condition_is_called() {
     // `if ready` must call `ready`, not read a variable called `ready`.
-    let src = "ready() { return true }\npick() { if ready { return 1 } return 0 }\npick()";
+    let src = "ready() { return true }\npick() { if ready { return 1 } return 0 }\npick";
     assert_eq!(eval_i64(src), 1);
 }
 
 #[test]
 fn negated_zero_argument_function_condition_is_called() {
-    let src = "ready() { return false }\npick() { if not ready { return 1 } return 0 }\npick()";
+    let src = "ready() { return false }\npick() { if not ready { return 1 } return 0 }\npick";
     assert_eq!(eval_i64(src), 1);
 }
 
 #[test]
 fn zero_argument_function_iterable_is_called() {
-    let src = "items() { return [1, 2, 3] }\ntotal() { $s = 0\n for $i in items { $s = $s + $i }\n return $s }\ntotal()";
+    let src = "items() { return [1, 2, 3] }\ntotal() { $s = 0\n for $i in items { $s = $s + $i }\n return $s }\ntotal";
     assert_eq!(eval_i64(src), 6);
 }
 
@@ -1479,12 +1620,12 @@ fn while_condition_call_does_not_consume_the_body() {
 
 #[test]
 fn top_level_variable_is_visible_in_functions() {
-    assert_eq!(eval_i64("$x = 5\nget() { return $x }\nget()"), 5);
+    assert_eq!(eval_i64("$x = 5\nget() { return $x }\nget"), 5);
 }
 
 #[test]
 fn top_level_array_is_visible_in_functions() {
-    let src = "$items = [1, 2, 3]\ntotal() { $s = 0\n for $i in $items { $s = $s + $i }\n return $s }\ntotal()";
+    let src = "$items = [1, 2, 3]\ntotal() { $s = 0\n for $i in $items { $s = $s + $i }\n return $s }\ntotal";
     assert_eq!(eval_i64(src), 6);
 }
 
@@ -1497,7 +1638,7 @@ fn parameter_shadows_top_level_variable() {
 fn local_assignment_shadows_top_level_variable() {
     // A name assigned in the body is a local for the whole body, so the
     // top-level `$x` is not modified.
-    let src = "$x = 5\nset() { $x = 9\n return $x }\n$local = set()\n$x + $local";
+    let src = "$x = 5\nset($v) { $x = $v + 9\n return $x }\n$local = set 0\n$x + $local";
     assert_eq!(eval_i64(src), 14);
 }
 
@@ -1513,7 +1654,7 @@ fn lambda_captures_enclosing_parameter() {
 
 #[test]
 fn lambda_captures_enclosing_local() {
-    let src = "outer() { $n = 10\n return |$x| $x + $n }\n$g = outer()\n$g 1";
+    let src = "outer($seed) { $n = $seed + 10\n return |$x| $x + $n }\n$g = outer 0\n$g 1";
     assert_eq!(eval_i64(src), 11);
 }
 

@@ -240,26 +240,23 @@ calculate($a: i32, $b: f64) -> f64 {
 }
 ```
 
-Calls use **space-separated arguments**:
+Calls use **space-separated arguments**. Parentheses are not call syntax — they delimit parameters in a definition:
 
 ```xcl
 $result = add 3 4
+
+# ILLEGAL — `add(...)` is not a call
+# add(3, 4)
 ```
 
-A parenthesized argument list is also accepted, with `,` between arguments; `()` is a zero-argument call and each element is a full expression:
+A *spaced* parenthesis is a grouped expression passed as one argument:
 
 ```xcl
-add(3, 4)
-status()
-math.sqrt(16)
-add(1 + 2, 3)
-
-$double(21)            # value calls: ...( ...) must follow the callee directly
+add (1 + 2) 3          # 6
+apply (|$x| $x + 1) 41
 ```
 
-With a space before the parenthesis the group is one expression, so `$double (21)` is the same single argument and `g 0 ($f 2)` passes the result of `$f 2`.
-
-`name(...)` followed by `{` or `->` is a definition, so the two forms never conflict.
+`name(...)` followed by `{` or `->` is a function definition, so definitions are unaffected.
 
 A zero-argument function is called by writing its name at a statement boundary, or in a condition:
 
@@ -272,18 +269,22 @@ status
 if status { print "ready" }
 ```
 
-Function values are called with `$callee args`:
+Function values are called with `$callee args`, and a zero-argument value call is a bare `$f` statement:
 
 ```xcl
 $double = |$x| $x * 2
 $result = $double 21          # 42
-$result = $double(21)         # 42, parenthesized form
+
+$greet = { print "hi" }
+$greet                        # calls it (zero arguments)
 
 apply($f, $v) {
     return $f $v
 }
 apply (|$x| $x + 1) 41        # 42
 ```
+
+Writing `$x` for a non-function value is just a value read, so a trailing `$x` still yields the script's result.
 
 **Lambdas** use pipes:
 
@@ -315,9 +316,9 @@ They are read-only from a function body. Assigning the same name inside a functi
 
 ```xcl
 $x = 5
-set() { $x = 9; return $x }
-set()                          # 9
-$x                             # still 5
+set($v) { $x = $v; return $x }
+$local = set 9                 # 9 — the function's own $x
+$x                             # 5 — the top-level variable
 ```
 
 ### Named Arguments
@@ -578,7 +579,7 @@ println (util.unwrap_or $bad 0)   # 0
 
 The constructors `Ok` and `Err` also work: `Ok 42`, `Err "not_found"`.
 
-Method syntax is available in statements and conditions, or with an explicit argument list: `if $r.is_ok { ... }`, `$r.unwrap`, `$e.unwrap_or(0)`.
+Method syntax is available in statements and conditions, or with space-separated arguments: `if $r.is_ok { ... }`, `$r.unwrap`, `$e.unwrap_or 0`.
 
 Standard error-kind strings live in `xcl_plugins::errors` (`not_found`, `permission_denied`, `is_a_directory`, and so on) so scripts can match on `kind` consistently.
 
