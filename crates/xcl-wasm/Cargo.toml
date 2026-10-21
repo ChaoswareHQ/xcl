@@ -1,0 +1,23 @@
+[package]
+name = "xcl-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+homepage.workspace = true
+
+[lib]
+# `cdylib` for the browser build, `rlib` so the same functions are testable on
+# the host (`wasm-bindgen` emits ordinary functions outside wasm).
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+xcl-analysis.workspace = true
+# The decompiler, without the plugin registry: `linkme` has no equivalent on
+# wasm32-unknown-unknown, so the playground links core instructions only.
+xcl-debug = { workspace = true, default-features = false }
+xcl-vm = { workspace = true, features = ["trace"] }
+wasm-bindgen.workspace = true
