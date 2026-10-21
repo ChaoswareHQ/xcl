@@ -585,6 +585,13 @@ pub struct VM {
     cold_modules: Vec<(u32, &'static super::opcode::ColdModule)>,
     #[cfg(feature = "opcode-stats")]
     opcode_counter: OpcodeCounter,
+    /// Executed instructions as `(ip, frame depth, opcode)`, in order.
+    ///
+    /// Recording is opt-in (`trace` feature) so normal builds pay nothing. It
+    /// exists for the playground, which replays the list to show a program
+    /// running one instruction at a time.
+    #[cfg(feature = "trace")]
+    trace: Vec<(u32, u8, u8)>,
     /// Name of the currently running script (`$0`).
     script_name: Box<str>,
     /// Top-level positional script arguments.
@@ -669,6 +676,8 @@ impl VM {
             cold_modules: Vec::new(),
             #[cfg(feature = "opcode-stats")]
             opcode_counter: OpcodeCounter::new(),
+            #[cfg(feature = "trace")]
+            trace: Vec::new(),
             script_name: "<input>".into(),
             script_args: Vec::new(),
             call_cache: [(Value::nil(), Value::nil()); CALL_CACHE_SLOTS],
@@ -1247,6 +1256,11 @@ impl VM {
         self.call_cache[slot] = (callee, func);
     }
 
+    /// Upper bound on recorded instructions, so a runaway program cannot grow
+    /// the trace without limit. The playground is the only consumer.
+    #[cfg(feature = "trace")]
+    const TRACE_CAP: usize = 200_000;
+
     /// Dispatch loop, monomorphised on whether a native loop is installed.
     ///
     /// `JIT == false` contains no JIT code at all, so interpreted programs pay
@@ -1258,6 +1272,8 @@ impl VM {
         let _ = jit;
         self.stack.clear();
         self.frame_depth = 0;
+        #[cfg(feature = "trace")]
+        self.trace.clear();
         if self.frames.len() > 4096 {
             self.frames.truncate(4096);
         }
@@ -1388,6 +1404,13 @@ impl VM {
             }
 
             let instr = unsafe { *code_ptr.add(ip) };
+
+            // Trace hook: record which instruction this frame is about to run.
+            // Compiled out entirely without the `trace` feature.
+            #[cfg(feature = "trace")]
+            if self.trace.len() < Self::TRACE_CAP {
+                self.trace.push((ip as u32, top as u8, instr.op()));
+            }
 
             // Enter a native loop when the root frame reaches a compiled
             // header. The check is gated on the loop-header opcode, so
@@ -1856,6 +1879,16 @@ impl VM {
             }
         }
         map
+    }
+
+    /// Returns the executed instruction stream as `(ip, depth, opcode)`.
+    ///
+    /// Recording is opt-in through the `trace` feature. Depth 0 is the root
+    /// frame; deeper entries come from function calls and refer to that
+    /// function's own instruction list.
+    #[cfg(feature = "trace")]
+    pub fn trace(&self) -> &[(u32, u8, u8)] {
+        &self.trace
     }
 
     /// Pushes a closure onto the current execution frame's defer stack.

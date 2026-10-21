@@ -13,6 +13,9 @@ homepage.workspace = true
 default = ["std"]
 std = []
 opcode-stats = []
+# Records the executed instruction stream for the browser playground.
+# Off by default: the hook compiles out entirely when the feature is absent.
+trace = []
 # Cranelift-backed JIT for integer loops. Off by default; requires `std`.
 jit = ["std", "dep:xcl-jit"]
 

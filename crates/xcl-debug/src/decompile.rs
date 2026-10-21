@@ -426,8 +426,22 @@ fn format_operand_c(op: u8, c: u8, bc: &Bytecode) -> String {
 fn opcode_name(op: u8) -> &'static str {
     xcl_vm::opcode_name(op)
         .or_else(|| superinstruction_name(op))
-        .or_else(|| xcl_plugins::registered_opcode_name(op))
+        .or_else(|| extension_opcode_name(op))
         .unwrap_or("OP_UNKNOWN")
+}
+
+/// Names contributed by registered extension opcodes.
+///
+/// Without the `plugins` feature (the wasm build) only core instructions can
+/// appear in a program, so there is nothing to look up.
+#[cfg(feature = "plugins")]
+fn extension_opcode_name(op: u8) -> Option<&'static str> {
+    xcl_plugins::registered_opcode_name(op)
+}
+
+#[cfg(not(feature = "plugins"))]
+fn extension_opcode_name(_op: u8) -> Option<&'static str> {
+    None
 }
 
 /// Fallback names for superinstructions not covered by the macro.

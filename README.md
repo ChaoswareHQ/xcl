@@ -638,6 +638,8 @@ The code space is `0..=126` for core instructions, `127` for `OP_EXT` (a 32-bit 
 | `xcl-cli` | `xcl` command-line runner |
 | `xcl-debug` | `xcl-debug` (tokens/AST) and `xcl-bytecode` (disassemble/trace/profile/stats) |
 | `xcl-doc` | Documentation generator that reads macro metadata and produces an HTML site |
+| `xcl-analysis` | Linter: rustc-style diagnostics, rule catalogue, `--lint` JSON contract |
+| `xcl-wasm` | Browser build for the playground: lint, disassemble, run, opcode map (`wasm32-unknown-unknown`) |
 
 ## Writing Native Functions
 
