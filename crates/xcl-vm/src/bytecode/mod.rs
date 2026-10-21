@@ -52,15 +52,9 @@
 // `alloc` re-exports needed by `no_std` builds (std prelude provides them).
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use alloc::{
-    boxed::Box,
-    string::String,
-    sync::Arc,
-    vec::Vec,
-};
+use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 #[cfg(feature = "std")]
 use std::sync::Arc;
-
 
 mod compiler;
 mod instr;
@@ -71,9 +65,10 @@ pub mod opcodes {
 
     pub use crate::runtime::vm::ops::consts::*;
 }
-pub use opcodes::*;
-pub use instr::Instr;
 pub use compiler::compile;
+pub use compiler::compile_unoptimized;
+pub use instr::Instr;
+pub use opcodes::*;
 
 /// Compiled XCL bytecode unit ready for execution by the VM runtime.
 ///

@@ -765,17 +765,39 @@ impl Compiler {
     }
 
     fn compile(&mut self, ast: &[AstNode]) -> Bytecode {
+        self.compile_with(ast, true, &mut Vec::new())
+    }
+
+    /// Compiles `ast`, optionally without the optimizing passes.
+    ///
+    /// `ranges` receives `(first_ip, line)` for every top-level statement that
+    /// emitted at least one instruction. The offsets are only meaningful when
+    /// `optimize` is `false`: both optimizing passes rewrite the instruction
+    /// stream, which would invalidate them.
+    fn compile_with(
+        &mut self,
+        ast: &[AstNode],
+        optimize: bool,
+        ranges: &mut Vec<(u32, u32)>,
+    ) -> Bytecode {
         for n in ast {
+            let start = self.ip();
             self.node(n);
+            let line = node_line(n);
+            if line != 0 && self.ip() > start {
+                ranges.push((start, line));
+            }
         }
         self.emit(Instr::none(OP_HALT));
 
-        // Run peephole optimizer to fuse common patterns
         let mut code: Vec<Instr> = core::mem::take(&mut self.code);
-        peephole_optimize_once(&mut code, &mut self.wide);
+        if optimize {
+            // Run peephole optimizer to fuse common patterns
+            peephole_optimize_once(&mut code, &mut self.wide);
 
-        // Run data flow analysis to eliminate dead stores
-        crate::optimizer::optimize(&mut code, &mut self.wide, self.pinned_slots);
+            // Run data flow analysis to eliminate dead stores
+            crate::optimizer::optimize(&mut code, &mut self.wide, self.pinned_slots);
+        }
 
         let strings = core::mem::take(&mut self.strings);
         let string_values: Vec<Value> = strings
@@ -2620,4 +2642,60 @@ pub fn compile(ast: &[AstNode]) -> Bytecode {
         .with_root_vars(&root_vars)
         .with_inline_map(inline_map);
     c.compile(ast)
+}
+
+/// Compiles without the peephole and data-flow passes, returning the bytecode
+/// together with the source line of every top-level statement.
+///
+/// Each entry is `(first_ip, line)` and the entries are in source order, so
+/// `ip -> line` is a scan of the map. Debuggers and the playground use this to
+/// point at the statement that produced an instruction; normal execution keeps
+/// using [`compile`], whose optimizing passes rewrite the offsets.
+pub fn compile_unoptimized(ast: &[AstNode]) -> (Bytecode, Vec<(u32, u32)>) {
+    let inline_map = collect_inlineable(ast);
+    let root_vars = collect_top_level_vars(ast);
+    let mut c = Compiler::new()
+        .with_root_vars(&root_vars)
+        .with_inline_map(inline_map);
+    let mut ranges = Vec::new();
+    let bytecode = c.compile_with(ast, false, &mut ranges);
+    (bytecode, ranges)
+}
+
+/// First source line of a node. `0` means the span was synthesised.
+fn node_line(node: &AstNode) -> u32 {
+    let span = match node {
+        AstNode::Assign { span, .. }
+        | AstNode::Return { span, .. }
+        | AstNode::Break { span }
+        | AstNode::Continue { span }
+        | AstNode::If { span, .. }
+        | AstNode::For { span, .. }
+        | AstNode::While { span, .. }
+        | AstNode::FunctionDef { span, .. }
+        | AstNode::Lambda { span, .. }
+        | AstNode::Call { span, .. }
+        | AstNode::DomainCall { span, .. }
+        | AstNode::Ident { span, .. }
+        | AstNode::Int { span, .. }
+        | AstNode::Float { span, .. }
+        | AstNode::Str { span, .. }
+        | AstNode::Bool { span, .. }
+        | AstNode::Nil { span }
+        | AstNode::BinaryOp { span, .. }
+        | AstNode::UnaryOp { span, .. }
+        | AstNode::Pipeline { span, .. }
+        | AstNode::ArrayLit { span, .. }
+        | AstNode::DictLit { span, .. }
+        | AstNode::Index { span, .. }
+        | AstNode::FieldAccess { span, .. }
+        | AstNode::Range { span, .. }
+        | AstNode::Block { span, .. }
+        | AstNode::TypeDef { span, .. }
+        | AstNode::ImplDef { span, .. }
+        | AstNode::TypeTest { span, .. }
+        | AstNode::TypeCast { span, .. }
+        | AstNode::SpecialVar { span, .. } => span,
+    };
+    span.line
 }

@@ -183,10 +183,17 @@ pub fn decompile(source: &str) -> String {
 ///
 /// Every instruction carries its packed 64-bit word and the fields unpacked
 /// from it, so the page can show both the byte layout and the decoded operands.
+/// Branch instructions also carry their `target` ip, and `lines` maps the first
+/// instruction of every top-level statement back to the source line, which is
+/// what lets the trace player highlight the editor.
+///
+/// The image is compiled without the optimizing passes on purpose: those passes
+/// rewrite offsets, so an unoptimized image is the only one where `ip` in a
+/// trace still means the same thing as `ip` in this table.
 #[wasm_bindgen]
 pub fn program(source: &str) -> String {
-    let bytecode = match compile(source) {
-        Ok(bytecode) => bytecode,
+    let (bytecode, ranges) = match compile_unoptimized(source) {
+        Ok(compiled) => compiled,
         Err(errors) => {
             return format!("{{\"ok\":false,\"errors\":{}}}", errors_json(&errors));
         }
@@ -219,6 +226,19 @@ pub fn program(source: &str) -> String {
         bytecode.user_functions.iter().map(|(name, _)| &**name),
     );
 
+    out.push_str(",\"lines\":[");
+    for (index, (ip, line)) in ranges.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push('[');
+        out.push_str(&ip.to_string());
+        out.push(',');
+        out.push_str(&line.to_string());
+        out.push(']');
+    }
+    out.push(']');
+
     out.push_str(",\"code\":[");
     for (ip, instr) in bytecode.instructions.iter().enumerate() {
         if ip > 0 {
@@ -245,6 +265,26 @@ pub fn program(source: &str) -> String {
         out.push_str(&instr.b().to_string());
         out.push_str(",\"c\":");
         out.push_str(&instr.c().to_string());
+
+        // The graph view needs the edge targets, and only the VM knows which
+        // operand holds one.
+        let branch = xcl_vm::runtime::vm::ops::meta::branch_kind(op);
+        if branch != 0 {
+            let target = if branch == 1 {
+                Some(instr.a() as usize)
+            } else {
+                bytecode
+                    .wide_operands
+                    .get(instr.c() as usize)
+                    .map(|value| *value as usize)
+            };
+            out.push_str(",\"branch\":");
+            out.push_str(&branch.to_string());
+            if let Some(target) = target.filter(|target| *target < bytecode.instructions.len()) {
+                out.push_str(",\"target\":");
+                out.push_str(&target.to_string());
+            }
+        }
 
         // Resolve the operands a reader would otherwise have to look up.
         if takes_string_operand(op)
@@ -399,7 +439,9 @@ fn write_value(out: &mut String, value: Value) {
     }
 }
 
-/// Lexes, parses, and compiles, or returns every syntax error.
+/// Lexes, parses, and compiles with the optimizing passes, or returns every
+/// syntax error. `run` uses this path, so the Output panel sees exactly what a
+/// normal VM execution produces.
 fn compile(source: &str) -> Result<Bytecode, Vec<ParseError>> {
     let tokens = xcl_vm::lexer::lex(source, FILE);
     let parsed = xcl_vm::parse_recover(&tokens, source);
@@ -407,6 +449,21 @@ fn compile(source: &str) -> Result<Bytecode, Vec<ParseError>> {
         return Err(parsed.errors);
     }
     Ok(xcl_vm::bytecode::compile(&parsed.ast))
+}
+
+/// A compiled image plus `(first_ip, line)` for every top-level statement.
+type TraceImage = (Bytecode, Vec<(u32, u32)>);
+
+/// Lexes, parses, and compiles without the optimizing passes, returning the
+/// bytecode plus the statement-to-line map. `program` and `trace` share this
+/// path so their instruction offsets agree.
+fn compile_unoptimized(source: &str) -> Result<TraceImage, Vec<ParseError>> {
+    let tokens = xcl_vm::lexer::lex(source, FILE);
+    let parsed = xcl_vm::parse_recover(&tokens, source);
+    if !parsed.errors.is_empty() {
+        return Err(parsed.errors);
+    }
+    Ok(xcl_vm::bytecode::compile_unoptimized(&parsed.ast))
 }
 
 /// `,"name":["a","b"]`
@@ -465,8 +522,8 @@ pub fn trace(source: &str) -> String {
     let mut vm = VM::new();
     vm.register_natives(&PRELUDE);
 
-    let value = match xcl_vm::evaluate_recover(FILE, source, &mut vm) {
-        Ok(value) => value,
+    let bytecode = match compile_unoptimized(source) {
+        Ok((bytecode, _)) => bytecode,
         Err(errors) => {
             return format!(
                 "{{\"ok\":false,\"value\":null,\"output\":\"\",\"steps\":0,\"truncated\":false,\"errors\":{}}}",
@@ -474,6 +531,8 @@ pub fn trace(source: &str) -> String {
             );
         }
     };
+
+    let value = vm.run(&bytecode);
 
     let output = OUTPUT.with(|buffer| buffer.borrow().clone());
     let all = vm.trace();
@@ -741,5 +800,44 @@ mod tests {
     fn run_reports_a_syntax_error() {
         let json = run(")");
         assert!(json.starts_with("{\"ok\":false"), "{json}");
+    }
+
+    #[test]
+    fn program_maps_statements_to_lines() {
+        let json = program("$a = 1\n$b = 2\nprint $a + $b");
+        assert!(json.contains("\"lines\":[[0,1],[2,2],[4,3]]"), "{json}");
+    }
+
+    #[test]
+    fn program_carries_branch_targets() {
+        // A `while` loop compiles to a backward jump, so at least one row must
+        // expose the target the graph view draws an edge to.
+        let json = program("$i = 0\nwhile $i < 3 { $i = $i + 1 }");
+        assert!(json.contains("\"branch\":"), "{json}");
+        assert!(json.contains("\"target\":"), "{json}");
+    }
+
+    #[test]
+    fn trace_and_run_agree() {
+        // The trace runs the unoptimized image while `run` uses the optimized
+        // one. Semantics must not depend on which passes ran.
+        for source in [
+            "1 + 2",
+            "$t = 0\nfor $i in 0..10 { $t = $t + $i }\n$t",
+            "sum($n) { $a = 0\n$i = 1\nwhile $i <= $n { $a = $a + $i\n$i = $i + 1 }\nreturn $a }\nsum 10",
+            "print \"a\"\n1",
+        ] {
+            let run_json = run(source);
+            let trace_json = trace(source);
+            let value = run_json
+                .split("\"value\":\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or("<missing>");
+            assert!(
+                trace_json.contains(&format!("\"value\":\"{value}\"")),
+                "{source}\nrun:   {run_json}\ntrace: {trace_json}"
+            );
+        }
     }
 }
