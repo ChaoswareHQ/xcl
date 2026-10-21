@@ -96,6 +96,16 @@ impl LintLevel {
         })
     }
 
+    /// The spelling accepted by `-A`/`-W`/`-D`/`-F`.
+    pub fn name(self) -> &'static str {
+        match self {
+            LintLevel::Allow => "allow",
+            LintLevel::Warn => "warn",
+            LintLevel::Deny => "deny",
+            LintLevel::Forbid => "forbid",
+        }
+    }
+
     /// Maps a lint level to the diagnostic [`Level`] used when rendering.
     ///
     /// `Allow` and `Forbid` map to `Warn`/`Deny` respectively; they differ only
@@ -166,10 +176,11 @@ impl Group {
 }
 
 /// One configuration override.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Override {
-    /// A rule code (`W0001`), a group name (`style`), or `warnings`.
-    pub target: &'static str,
+    /// A rule code (`W0001`), a rule name (`unused_binding`), a group name
+    /// (`style`), or `warnings`.
+    pub target: String,
     /// The lint level to apply.
     pub level: LintLevel,
 }
@@ -193,8 +204,14 @@ impl LintConfig {
     }
 
     /// Adds an override and returns `self`, for chaining.
-    pub fn set(mut self, target: &'static str, level: LintLevel) -> Self {
-        self.overrides.push(Override { target, level });
+    ///
+    /// The target is stored as given; use [`crate::rule::normalize_target`] to
+    /// turn user input into a target this configuration can match.
+    pub fn set(mut self, target: impl Into<String>, level: LintLevel) -> Self {
+        self.overrides.push(Override {
+            target: target.into(),
+            level,
+        });
         self
     }
 
@@ -209,15 +226,33 @@ impl LintConfig {
     /// Implements `Forbid` sticky semantics: if the current effective level is
     /// `Forbid`, later overrides for the same target are ignored.
     pub fn level_for(&self, code: &str, group: Group, default: LintLevel) -> LintLevel {
+        self.resolve(default, &|target| target == code || target == group.name())
+    }
+
+    /// Returns the effective lint level for a whole [`crate::rule::Rule`].
+    ///
+    /// Unlike [`LintConfig::level_for`] this also matches the rule's own name and
+    /// every group listed in [`crate::rule::Rule::groups`], so `-W pedantic`
+    /// reaches a rule that only lists `pedantic` as a secondary group.
+    pub fn level_for_rule(&self, rule: &crate::rule::Rule) -> LintLevel {
+        self.resolve(rule.default_level, &|target| {
+            target == rule.code
+                || target == rule.name
+                || target == rule.group.name()
+                || rule.groups.contains(&target)
+        })
+    }
+
+    /// Folds the overrides over `default`, in order.
+    fn resolve(&self, default: LintLevel, matches: &dyn Fn(&str) -> bool) -> LintLevel {
         let mut level = default;
         for o in &self.overrides {
             // Once forbidden, stay forbidden — ignore later overrides for the same target.
             if level == LintLevel::Forbid {
                 break;
             }
-            let targets_rule = o.target == code || o.target == group.name();
             let targets_warnings = o.target == "warnings" && level == LintLevel::Warn;
-            if targets_rule || targets_warnings {
+            if targets_warnings || matches(&o.target) {
                 level = o.level;
             }
         }
@@ -239,7 +274,7 @@ impl LintConfig {
         diagnostic: &mut crate::diagnostic::Diagnostic,
         rule: &crate::rule::Rule,
     ) -> Option<()> {
-        let effective = self.level_for(diagnostic.code, rule.group, rule.default_level);
+        let effective = self.level_for_rule(rule);
         if effective == LintLevel::Allow {
             return None;
         }
@@ -301,7 +336,9 @@ mod tests {
 
     #[test]
     fn specific_codes_beat_the_warnings_switch() {
-        let cfg = LintConfig::new().deny_warnings().set("W0002", LintLevel::Allow);
+        let cfg = LintConfig::new()
+            .deny_warnings()
+            .set("W0002", LintLevel::Allow);
         assert_eq!(
             cfg.level_for("W0002", Group::Style, LintLevel::Warn),
             LintLevel::Allow

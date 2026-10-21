@@ -709,19 +709,40 @@ The generated site includes domain pages, function references, search, and dark 
 xcl [OPTIONS] [FILE]...
 
 Options:
-  -h, --help          Show help
-  -v, --version       Show version
-  -e, --eval <EXPR>   Evaluate the given expression
-  -q, --quiet         Suppress result output
-  -d, --decompile     Decompile to bytecode and print (do not run)
-  --                  All following arguments are script arguments ($1, $2, ...)
+  -h, --help              Show help
+  -v, --version           Show version
+  -e, --eval <EXPR>       Evaluate the given expression
+  -q, --quiet             Suppress result output
+  -d, --decompile         Decompile to bytecode and print (do not run)
+  --                      All following arguments are script arguments ($1, $2, ...)
+
+Linting:
+  --lint                  Analyse and report diagnostics instead of running
+  --error-format <FMT>    `human` (default) or `json` (one object per line)
+  --explain <CODE>        Explain a rule by code (W0001) or name (unused_binding)
+  --list-lints            List every rule, its group, and its default level
+  -A, --allow <TARGET>    Silence a rule, rule group, or `warnings`
+  -W, --warn <TARGET>     Report a rule as a warning
+  -D, --deny <TARGET>     Report a rule as an error
+  -F, --forbid <TARGET>   Report a rule as an error; cannot be overridden later
+      --deny-warnings     Shorthand for `-D warnings`
 ```
 
 ```bash
 xcl script.xcl -- a b "c d"
 xcl -e 'print $1' -- hello
 xcl -d -e 'print 1 + 2'
+
+# Linting
+xcl --lint script.xcl                     # warnings on stderr, exit 0
+xcl -D warnings --lint script.xcl         # warnings become errors, exit 1
+xcl --lint --error-format=json script.xcl # NDJSON on stdout, for tools and agents
+xcl -A style --lint script.xcl            # silence a whole group
+xcl --explain W0001                       # what the rule means and how to fix it
 ```
+
+The linter is a `lint` feature, on by default; `--no-default-features` drops it
+for a size-constrained build, the same way `-d` needs `--features debug`.
 
 ## Building and Benchmarking
 

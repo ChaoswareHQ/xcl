@@ -81,9 +81,13 @@ impl ParseError {
     ///   = help: <help>
     /// ```
     pub fn render(&self) -> String {
-        let mut out = format!("XCL {}:{}: {}", self.span.file, self.span.line, self.message);
+        let mut out = format!(
+            "XCL {}:{}: {}",
+            self.span.file, self.span.line, self.message
+        );
         if let Some(ref help) = self.help {
-            out.push_str(&format!("\n  = help: {}", help));
+            use core::fmt::Write;
+            let _ = write!(out, "\n  = help: {}", help);
         }
         out
     }
@@ -129,10 +133,22 @@ struct Parser<'a> {
     errors: Vec<ParseError>,
     /// When true, the error cap has been reached; parsing should stop.
     error_cap_reached: bool,
+    /// Recursion depth guard — prevents unbounded nesting on pathological input.
+    recursion_depth: usize,
+    /// Address of a local in the frame that created this parser.
+    ///
+    /// Used to measure how much stack the recursive descent has consumed. A
+    /// fixed depth limit cannot be both safe and generous: frame size differs
+    /// by orders of magnitude between debug and release builds, so a limit that
+    /// survives a debug build is needlessly small in release, and a limit tuned
+    /// for release crashes in debug. Measuring the real stack is exact.
+    stack_base: usize,
 }
 
 impl<'a> Parser<'a> {
     fn new(tokens: &'a [TokenWithText], source: &'a str) -> Self {
+        let anchor = 0u8;
+        let stack_base = core::ptr::addr_of!(anchor) as usize;
         Self {
             tokens,
             pos: 0,
@@ -142,7 +158,62 @@ impl<'a> Parser<'a> {
             brace_arg_allowed: true,
             errors: Vec::new(),
             error_cap_reached: false,
+            recursion_depth: 0,
+            stack_base,
         }
+    }
+
+    /// Hard ceiling on nesting depth.
+    ///
+    /// Secondary to [`Self::STACK_BUDGET`]: on a platform with a huge stack this
+    /// catches pathological input, and on a downward-growing stack the budget
+    /// check fires first. Chosen well above what real programs nest.
+    const RECURSION_LIMIT: usize = 128;
+
+    /// Stack the recursive descent may consume before it stops, in bytes.
+    ///
+    /// The thread that runs the parser typically has a 1 MB stack on Windows
+    /// and 8 MB on Linux, so this leaves a third of the smallest case for the
+    /// caller. Debug builds use far more stack per level than release builds
+    /// (measured roughly 13 KB versus under 2 KB), which is why the check is a
+    /// measurement rather than a frame count: 640 KB is about 48 levels in a
+    /// debug build and several hundred in release.
+    const STACK_BUDGET: usize = 640 * 1024;
+
+    /// Stack consumed since the parser was created.
+    #[inline(never)]
+    fn stack_used(&self) -> usize {
+        let here = 0u8;
+        let addr = core::ptr::addr_of!(here) as usize;
+        // Stacks grow downwards on every platform XCL targets; on an
+        // upward-growing stack this reports 0 and the depth limit applies.
+        self.stack_base.saturating_sub(addr)
+    }
+
+    /// Increment recursion depth. Returns false when parsing must stop.
+    fn enter_recursion(&mut self) -> bool {
+        self.recursion_depth += 1;
+        let over_depth = self.recursion_depth > Self::RECURSION_LIMIT;
+        let low_stack = self.stack_used() > Self::STACK_BUDGET;
+        if over_depth || low_stack {
+            // Record the termination error BEFORE setting the cap flag,
+            // so it's not suppressed by the cap check inside `error()`.
+            let span = self.span();
+            self.errors.push(ParseError {
+                code: "E0002",
+                message: "parse aborted: expression nesting is too deep".to_string(),
+                span,
+                help: Some("split the expression into smaller statements".to_string()),
+            });
+            self.error_cap_reached = true;
+            return false;
+        }
+        true
+    }
+
+    /// Decrement recursion depth.
+    fn exit_recursion(&mut self) {
+        self.recursion_depth = self.recursion_depth.saturating_sub(1);
     }
 
     /// Record a parse error. No-op once the error cap is reached.
@@ -157,7 +228,9 @@ impl<'a> Parser<'a> {
             help: None,
         };
         self.errors.push(err);
-        if self.errors.len() >= ERROR_CAP {
+        if self.errors.len() >= ERROR_CAP || self.at_eof() {
+            // Past EOF nothing can be recovered, and every further error would
+            // point at the same place; one report is enough.
             self.error_cap_reached = true;
         }
     }
@@ -180,7 +253,7 @@ impl<'a> Parser<'a> {
             help: Some(help.into()),
         };
         self.errors.push(err);
-        if self.errors.len() >= ERROR_CAP {
+        if self.errors.len() >= ERROR_CAP || self.at_eof() {
             self.error_cap_reached = true;
         }
     }
@@ -262,7 +335,7 @@ impl<'a> Parser<'a> {
                 | Token::LParen
                 | Token::LBracket
                 | Token::LBrace
-                | Token::Minus
+                | Token::Sub
                 | Token::Not
                 | Token::Pipe
                 | Token::BitNot,
@@ -281,26 +354,65 @@ impl<'a> Parser<'a> {
     }
 
     fn span(&self) -> Span {
-        self.current()
-            .map(|t| t.span.clone())
-            .unwrap_or_else(Span::empty)
+        match self.current() {
+            Some(token) => token.span.clone(),
+            None => self.eof_span(),
+        }
+    }
+
+    /// Location just past the last source character.
+    ///
+    /// [`Span::empty`] has no file name, so an error reported at end of input
+    /// used to render as `--> :1:1` and point nowhere. Recovering an error from
+    /// the source keeps the file name and puts the caret after the last
+    /// character, which is where an unfinished construct actually ends.
+    fn eof_span(&self) -> Span {
+        let file = self
+            .tokens
+            .first()
+            .map(|token| token.span.file.clone())
+            .unwrap_or_default();
+        let mut line = 1u32;
+        let mut col = 1u32;
+        for ch in self.source.chars() {
+            if ch == '\n' {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        Span::new(file, line, col)
     }
 
     fn consume(&mut self) -> TokenWithText {
-        let t = self.current().cloned().unwrap_or_else(|| TokenWithText {
-            token: Token::RParen,
-            text: String::new(),
-            span: Span::empty(),
-            byte_offset: 0,
-        });
+        // `eof_span` walks the source, so it only runs when there is no token
+        // left; consuming a real token stays a clone.
+        let t = match self.current() {
+            Some(token) => token.clone(),
+            None => TokenWithText {
+                token: Token::RParen,
+                text: String::new(),
+                span: self.eof_span(),
+                byte_offset: 0,
+            },
+        };
         self.pos += 1;
         t
     }
 
     fn expect(&mut self, want: Token) {
+        let at_end = self.at_eof();
         let t = self.consume();
         if t.token != want {
-            let msg = format!("expected {:?}, got {:?} ({})", want, t.token, t.text);
+            // At EOF `consume` invents a token to keep callers simple, so
+            // reporting what it invented would name a token the user never
+            // wrote. Say what actually happened instead.
+            let msg = if at_end {
+                format!("unexpected end of input, expected {:?}", want)
+            } else {
+                format!("expected {:?}, got {:?} ({})", want, t.token, t.text)
+            };
             self.error("E0001", t.span.clone(), msg);
         }
     }
@@ -313,6 +425,9 @@ impl<'a> Parser<'a> {
     fn program(&mut self) -> Vec<AstNode> {
         let mut out = Vec::new();
         while !self.at_eof() {
+            if self.error_cap_reached {
+                break;
+            }
             if self.at(Token::Semi) {
                 self.consume();
                 continue;
@@ -323,7 +438,12 @@ impl<'a> Parser<'a> {
                 self.consume();
                 continue;
             }
+            let errors_before = self.errors.len();
             out.push(self.statement());
+            // If the statement recorded errors, try to synchronise.
+            if self.errors.len() > errors_before {
+                self.sync_statement();
+            }
         }
         out
     }
@@ -355,12 +475,17 @@ impl<'a> Parser<'a> {
             Some(Token::SpecialVar) | Some(Token::UnsupportedSpecialVar)
                 if self.lookahead_assign() =>
             {
-                panic!(
-                    "XCL {}:{}: special variable `{}` is read-only",
-                    self.span().file,
-                    self.span().line,
-                    self.current().map(|t| t.text.as_str()).unwrap_or("")
-                )
+                let name = self.current().map(|t| t.text.as_str()).unwrap_or("");
+                let span = self.span();
+                let msg = format!("special variable `{}` is read-only", name);
+                self.error("E0003", span.clone(), msg);
+                // Consume the special var and the `=` to advance past the bad statement
+                self.consume();
+                if self.at(Token::Assign) {
+                    self.consume();
+                }
+                // Return a nil node as a placeholder
+                AstNode::Nil { span }
             }
             _ => self.expr_stmt(),
         }
@@ -1009,10 +1134,23 @@ impl<'a> Parser<'a> {
         // Parameters must use $ prefix: $x, $name, etc.
         let t = self.consume();
         if !matches!(&t.token, Token::Ident) {
-            panic!(
-                "XCL {}:{}: parameter must use $ prefix, got '{}' (use ${} instead)",
-                t.span.line, t.span.col, t.text, t.text
+            let msg = format!(
+                "parameter must use $ prefix, got '{}' (use ${} instead)",
+                t.text, t.text
             );
+            self.error_with_help(
+                "E0004",
+                t.span.clone(),
+                msg,
+                format!("prefix the parameter with $: ${}", t.text),
+            );
+            // Return a dummy param so parsing can continue
+            return Param {
+                name: t.text.clone(),
+                type_annotation: None,
+                default_value: None,
+                span: t.span,
+            };
         }
         let name = t.text.trim_start_matches('$').to_string();
         let type_annotation = if self.at(Token::Colon) {
@@ -1115,17 +1253,60 @@ impl<'a> Parser<'a> {
     }
 
     fn block(&mut self) -> Vec<AstNode> {
+        // Nested blocks recurse through `statement`, so they need the same
+        // headroom check as expressions.
+        if !self.enter_recursion() {
+            self.skip_to_matching_brace();
+            return Vec::new();
+        }
+        let out = self.block_inner();
+        self.exit_recursion();
+        out
+    }
+
+    fn block_inner(&mut self) -> Vec<AstNode> {
         self.expect(Token::LBrace);
+        if self.error_cap_reached {
+            // Already at the error cap — drain to the matching brace so the
+            // caller does not try to parse this block's contents.
+            self.skip_to_matching_brace();
+            return Vec::new();
+        }
         let mut out = Vec::new();
         while !self.at(Token::RBrace) && !self.at_eof() {
+            if self.error_cap_reached {
+                break;
+            }
             if self.at(Token::Semi) {
                 self.consume();
                 continue;
             }
+            let errors_before = self.errors.len();
             out.push(self.statement());
+            // If the statement recorded errors, try to synchronise.
+            if self.errors.len() > errors_before {
+                self.sync_statement();
+            }
         }
         self.expect(Token::RBrace);
         out
+    }
+
+    /// Consumes tokens until the `{` that opened the current block is closed.
+    ///
+    /// Used when parsing is aborted mid-block: without this, the remainder of
+    /// the block would be parsed as if it were at the enclosing level, producing
+    /// a cascade of secondary errors.
+    fn skip_to_matching_brace(&mut self) {
+        let mut depth = 1usize;
+        while !self.at_eof() && depth > 0 {
+            match self.current().map(|t| &t.token) {
+                Some(Token::LBrace) => depth += 1,
+                Some(Token::RBrace) => depth -= 1,
+                _ => {}
+            }
+            self.consume();
+        }
     }
 
     fn expr_stmt(&mut self) -> AstNode {
@@ -1255,6 +1436,12 @@ impl<'a> Parser<'a> {
     }
 
     fn expr(&mut self) -> AstNode {
+        if !self.enter_recursion() {
+            // Recursion limit reached — consume one token to make progress.
+            let span = self.span();
+            self.consume();
+            return AstNode::Nil { span };
+        }
         let mut e = self.coalesce();
         // Only consume `|>` when not inside a pipeline stage's lambda body
         while self.at(Token::Pipeline) && self.pipeline_depth == 0 {
@@ -1274,6 +1461,7 @@ impl<'a> Parser<'a> {
                 else_branch: Some(vec![else_expr]),
             };
         }
+        self.exit_recursion();
         e
     }
 
@@ -1734,13 +1922,22 @@ impl<'a> Parser<'a> {
             // Pipe lambda params must use $ prefix: |$x| $x * 2
             let t = self.consume();
             if !matches!(&t.token, Token::Ident) {
-                panic!(
-                    "XCL {}:{}: pipe lambda parameter must use $ prefix, got '{}' (use ${} instead)",
-                    t.span.line, t.span.col, t.text, t.text
+                let msg = format!(
+                    "pipe lambda parameter must use $ prefix, got '{}' (use ${} instead)",
+                    t.text, t.text
                 );
+                self.error_with_help(
+                    "E0004",
+                    t.span.clone(),
+                    msg,
+                    format!("prefix the parameter with $: ${}", t.text),
+                );
+                // Still add the name so parsing continues
+                params.push(t.text.clone());
+            } else {
+                let name = t.text.trim_start_matches('$').to_string();
+                params.push(name);
             }
-            let name = t.text.trim_start_matches('$').to_string();
-            params.push(name);
             if self.at(Token::Comma) || self.at(Token::Semi) {
                 self.consume();
             }
@@ -1781,12 +1978,14 @@ impl<'a> Parser<'a> {
                     // grouped argument (`f (x)`), which the call loop below
                     // handles.
                     let span = self.span();
-                    panic!(
-                        "XCL {}:{}: `(...)` must be separated from the callee by a space — \
-                         calls use space-separated arguments (`f arg1 arg2`); \
-                         `f (expr)` passes one grouped expression",
-                        span.file, span.line
-                    );
+                    let msg = "`(...)` must be separated from the callee by a space — \
+                     calls use space-separated arguments (`f arg1 arg2`); \
+                     `f (expr)` passes one grouped expression"
+                        .to_string();
+                    self.error("E0005", span.clone(), msg);
+                    // Consume the `(` to advance past the error
+                    self.consume();
+                    break;
                 }
                 Some(Token::LBracket) => {
                     // Lookahead: if [ is followed by ] or by expr,], it's an index.
@@ -1813,8 +2012,11 @@ impl<'a> Parser<'a> {
         // Space-separated call after a bare dotted path or a `$`-value.
         // `prev_is_ident` covers plain/dotted names; `dollar_callee` covers
         // `$f 1` so the call is built here, with normal operator precedence.
-        let prev_is_ident =
-            self.pos > 0 && matches!(self.tokens[self.pos - 1].token, Token::IdentPlain);
+        let prev_is_ident = self
+            .tokens
+            .get(self.pos.saturating_sub(1))
+            .map(|t| t.token == Token::IdentPlain)
+            .unwrap_or(false);
         let dollar_callee = self.arg_depth == 0
             && !self.at(Token::LBrace)
             && matches!(
@@ -1956,12 +2158,18 @@ impl<'a> Parser<'a> {
         // call. With a space (`f (x)`) it is one grouped argument.
         if self.at(Token::LParen) && self.adjacent_to_previous() {
             let span = self.span();
-            panic!(
-                "XCL {}:{}: `(...)` must be separated from the callee by a space — \
-                 calls use space-separated arguments (`f arg1 arg2`); \
-                 `f (expr)` passes one grouped expression",
-                span.file, span.line
-            );
+            let msg = "`(...)` must be separated from the callee by a space — \
+             calls use space-separated arguments (`f arg1 arg2`); \
+             `f (expr)` passes one grouped expression"
+                .to_string();
+            self.error("E0005", span.clone(), msg);
+            // Consume the `(` to advance past the error
+            self.consume();
+            // Return a nil placeholder arg
+            return CallArg {
+                value: AstNode::Nil { span },
+                name: None,
+            };
         }
         if self.at(Token::IdentPlain) {
             let next = self.pos + 1;
@@ -2045,27 +2253,32 @@ impl<'a> Parser<'a> {
                     "$*" => (SpecialVarKind::ArgsJoined, 0),
                     "$self" => (SpecialVarKind::SelfValue, 0),
                     "$super" => (SpecialVarKind::SuperValue, 0),
-                    text => {
-                        let index = text[1..].parse::<u32>().unwrap_or_else(|_| {
-                            panic!(
-                                "XCL {}:{}: invalid positional argument `{}`",
-                                t.span.file, t.span.line, text
-                            )
-                        });
-                        if index == 0 {
-                            (SpecialVarKind::ScriptName, 0)
-                        } else {
-                            (SpecialVarKind::Positional, index)
+                    text => match text[1..].parse::<u32>() {
+                        Ok(index) => {
+                            if index == 0 {
+                                (SpecialVarKind::ScriptName, 0)
+                            } else {
+                                (SpecialVarKind::Positional, index)
+                            }
                         }
-                    }
+                        Err(_) => {
+                            let msg = format!("invalid positional argument `{}`", text);
+                            self.error("E0007", t.span.clone(), msg);
+                            (SpecialVarKind::ScriptName, 0)
+                        }
+                    },
                 };
                 AstNode::SpecialVar { span, kind, index }
             }
 
-            Token::UnsupportedSpecialVar => panic!(
-                "XCL {}:{}: shell special variable `{}` is not supported in XCL",
-                t.span.file, t.span.line, t.text
-            ),
+            Token::UnsupportedSpecialVar => {
+                let msg = format!(
+                    "shell special variable `{}` is not supported in XCL",
+                    t.text
+                );
+                self.error("E0006", t.span.clone(), msg);
+                AstNode::Nil { span }
+            }
 
             Token::IdentPlain => {
                 let name = t.text.clone();
@@ -2081,11 +2294,16 @@ impl<'a> Parser<'a> {
                     // argument and is handled by the call loop below.
                     if self.adjacent_to_previous() {
                         let span = self.span();
-                        panic!(
-                            "XCL {}:{}: `{}(...)` is not call syntax — calls use space-separated \
+                        let msg = format!(
+                            "`{}(...)` is not call syntax — calls use space-separated \
                              arguments (`{} arg1 arg2`); parentheses are for definitions",
-                            span.file, span.line, name, name
+                            name, name
                         );
+                        self.error("E0005", span.clone(), msg);
+                        // Consume the `(` to advance past the error
+                        self.consume();
+                        // Return a plain ident so parsing can continue
+                        return AstNode::Ident { span, name };
                     }
                 }
                 // Space-separated domain-style call: `domain func arg`
@@ -2262,16 +2480,17 @@ impl<'a> Parser<'a> {
 
             Token::RArrow => {
                 // Bare -> in expression context — likely a lambda without params
-                panic!(
-                    "XCL {}:{}: unexpected '->' in expression. Did you mean '(x) -> expr' for a lambda?",
-                    t.span.file, t.span.line
-                )
+                let msg = "unexpected '->' in expression. Did you mean '(x) -> expr' for a lambda?"
+                    .to_string();
+                self.error("E0008", t.span.clone(), msg);
+                AstNode::Nil { span }
             }
 
-            _ => panic!(
-                "XCL {}:{}: unexpected token {:?} ({})",
-                t.span.file, t.span.line, t.token, t.text
-            ),
+            _ => {
+                let msg = format!("unexpected token {:?} ({})", t.token, t.text);
+                self.error("E0002", t.span.clone(), msg);
+                AstNode::Nil { span }
+            }
         }
     }
 
@@ -2520,5 +2739,32 @@ impl<'a> Parser<'a> {
 /// assert_eq!(ast.len(), 1);
 /// ```
 pub fn parse(tokens: &[TokenWithText], source: &str) -> Vec<AstNode> {
-    Parser::new(tokens, source).program()
+    let out = parse_recover(tokens, source);
+    if let Some(first) = out.errors.first() {
+        panic!("{}", first.render());
+    }
+    out.ast
+}
+
+/// Parses a stream of lexer tokens into an AST, recovering from errors.
+///
+/// Unlike [`parse`], this function never panics on a syntax error. Instead it
+/// collects every error it encounters (up to a cap of 10) and returns whatever
+/// AST nodes it was able to build.
+///
+/// # Arguments
+///
+/// * `tokens` - The token stream produced by [`lexer::lex`](crate::lexer::lex).
+/// * `source` - The original source code string.
+///
+/// # Returns
+///
+/// A [`ParseOutput`] containing the partially-built AST and any errors.
+pub fn parse_recover(tokens: &[TokenWithText], source: &str) -> ParseOutput {
+    let mut p = Parser::new(tokens, source);
+    let ast = p.program();
+    ParseOutput {
+        ast,
+        errors: p.errors,
+    }
 }

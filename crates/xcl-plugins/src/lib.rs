@@ -59,6 +59,19 @@ pub fn evaluate(source: &str, vm: &mut VM) -> Value {
     xcl_vm::evaluate(source, vm)
 }
 
+/// Evaluates `source`, returning every syntax error instead of the first.
+///
+/// The metadata header is installed exactly as [`evaluate`] does, so a host can
+/// swap the two calls without changing behaviour beyond error reporting.
+pub fn evaluate_recover(
+    name: &str,
+    source: &str,
+    vm: &mut VM,
+) -> Result<Value, Vec<xcl_vm::ParseError>> {
+    util::install_metadata(source);
+    xcl_vm::evaluate_recover(name, source, vm)
+}
+
 /// Evaluate XCL source code in a fresh VM.
 pub fn evaluate_new(source: &str) -> Value {
     let mut vm = new_vm();

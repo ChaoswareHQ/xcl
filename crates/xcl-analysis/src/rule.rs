@@ -62,10 +62,7 @@ impl Rule {
         out.push_str(&format!("\n## Why is this bad\n\n{}\n", self.rationale));
         out.push_str(&format!("\n## Explanation\n\n{}\n", self.explanation));
         if !self.known_problems.is_empty() {
-            out.push_str(&format!(
-                "\n## Known problems\n\n{}\n",
-                self.known_problems
-            ));
+            out.push_str(&format!("\n## Known problems\n\n{}\n", self.known_problems));
         }
         if !self.see_also.is_empty() {
             out.push_str("\n## See also\n\n");
@@ -253,6 +250,68 @@ pub static RULES: &[Rule] = &[
     },
 ];
 
+/// Returns `true` when `target` names a rule code, a rule name, a group, or
+/// the special `warnings` target.
+///
+/// This is the validator for `-A`/`-W`/`-D`/`-F`; a target this rejects would
+/// silently match nothing.
+pub fn is_known_target(target: &str) -> bool {
+    normalize_target(target).is_some()
+}
+
+/// Canonicalizes a configuration target from user input.
+///
+/// Accepts a rule code in any case (`W0001`, `w0001`), a rule name in
+/// snake_case or kebab-case (`unused_binding`, `unused-binding`), any group name
+/// including secondary groups such as `pedantic`, and the special `warnings`
+/// target. Returns `None` when nothing matches.
+///
+/// ```
+/// use xcl_analysis::rule::normalize_target;
+///
+/// assert_eq!(normalize_target("w0001").as_deref(), Some("W0001"));
+/// assert_eq!(normalize_target("unused-binding").as_deref(), Some("unused_binding"));
+/// assert_eq!(normalize_target("Style").as_deref(), Some("style"));
+/// assert!(normalize_target("nonsense").is_none());
+/// ```
+pub fn normalize_target(target: &str) -> Option<String> {
+    let target = target.trim();
+    if target.is_empty() {
+        return None;
+    }
+    if target.eq_ignore_ascii_case("warnings") {
+        return Some("warnings".to_string());
+    }
+
+    // Codes and names may be written with either separator and in any case.
+    let underscored = target.replace('-', "_");
+    if let Some(rule) = RULES.iter().find(|r| r.code.eq_ignore_ascii_case(target)) {
+        return Some(rule.code.to_string());
+    }
+    if let Some(rule) = RULES
+        .iter()
+        .find(|r| r.name.eq_ignore_ascii_case(&underscored))
+    {
+        return Some(rule.name.to_string());
+    }
+    if let Some(group) = Group::from_name(&underscored.to_ascii_lowercase()) {
+        return Some(group.name().to_string());
+    }
+    if let Some(rule) = RULES.iter().find(|r| {
+        r.groups
+            .iter()
+            .any(|g| g.eq_ignore_ascii_case(&underscored))
+    }) {
+        // Secondary groups are only usable if a rule actually lists them.
+        return rule
+            .groups
+            .iter()
+            .find(|g| g.eq_ignore_ascii_case(&underscored))
+            .map(|g| (*g).to_string());
+    }
+    None
+}
+
 /// Looks up a rule by code.
 pub fn rule(code: &str) -> Option<&'static Rule> {
     RULES.iter().find(|r| r.code == code)
@@ -379,7 +438,11 @@ mod tests {
         for rule in RULES {
             assert!(!rule.summary.is_empty(), "{} has no summary", rule.code);
             assert!(!rule.rationale.is_empty(), "{} has no rationale", rule.code);
-            assert!(!rule.explanation.is_empty(), "{} has no explanation", rule.code);
+            assert!(
+                !rule.explanation.is_empty(),
+                "{} has no explanation",
+                rule.code
+            );
             assert!(
                 !rule.bad_example.is_empty(),
                 "{} has no bad example",
@@ -441,7 +504,10 @@ mod tests {
             let s = rule.summary;
             // Starts with a lowercase ASCII letter
             assert!(
-                s.chars().next().map(|c| c.is_ascii_lowercase()).unwrap_or(false),
+                s.chars()
+                    .next()
+                    .map(|c| c.is_ascii_lowercase())
+                    .unwrap_or(false),
                 "{} summary does not start with lowercase: {:?}",
                 rule.code,
                 s
@@ -454,16 +520,8 @@ mod tests {
                 s
             );
             // Contains no #[, #![, and no "illegal"
-            assert!(
-                !s.contains("#["),
-                "{} summary contains #[",
-                rule.code
-            );
-            assert!(
-                !s.contains("#!["),
-                "{} summary contains #![",
-                rule.code
-            );
+            assert!(!s.contains("#["), "{} summary contains #[", rule.code);
+            assert!(!s.contains("#!["), "{} summary contains #![", rule.code);
             assert!(
                 !s.contains("illegal"),
                 "{} summary contains 'illegal'",

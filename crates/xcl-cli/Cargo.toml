@@ -15,12 +15,17 @@ path = "src/main.rs"
 
 [dependencies]
 mimalloc.workspace = true
+# The linter: `xcl --lint`, `--explain`, `--list-lints`, `-A/-W/-D/-F`.
+# Optional so a size-constrained build can drop it (`--no-default-features`).
+xcl-analysis = { workspace = true, optional = true }
 xcl-debug = { workspace = true, optional = true }
 xcl-plugins.workspace = true
 xcl-vm.workspace = true
 
 [features]
-default = []
+# On by default: an offline tool that cannot lint is missing its main job.
+default = ["lint"]
+lint = ["dep:xcl-analysis"]
 # Enable the Cranelift JIT in the VM (`cargo build -p xcl-cli --features jit`).
 jit = ["xcl-vm/jit"]
 # Enable bytecode disassembly (`xcl -d`). Off by default so the shipping binary

@@ -11,5 +11,5 @@ pub mod span;
 
 pub use ast::{AstNode, BinaryOperator};
 pub use lexer::lex;
-pub use parser::parse;
+pub use parser::{parse, parse_recover, ParseError, ParseOutput, PARSE_ERROR_CODES};
 pub use span::Span;

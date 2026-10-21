@@ -229,6 +229,10 @@ pub(crate) use hashbrown::{HashMap, HashSet};
 #[cfg(feature = "std")]
 pub(crate) use std::collections::{HashMap, HashSet};
 
+// `Vec` is in the prelude under `std` only; `evaluate_recover` names it directly.
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 /// Bytecode compiler and instruction set for the XCL VM.
 pub mod bytecode;
 /// Bytecode optimization passes: dead store elimination, constant propagation, LICM.
@@ -243,10 +247,11 @@ pub use compiler::AstNode;
 pub use compiler::lexer;
 pub use compiler::parser;
 pub use compiler::span::Span;
+pub use compiler::{PARSE_ERROR_CODES, ParseError, ParseOutput, parse_recover};
 pub use runtime::{
-    BuiltinImpl, Cap, CapSet, ColdModule, DomainCtx, DomainSlot, FuncValue, GlobalOverrideGuard, HandleKind,
-    ImplDescriptor, ImplMethod, IntoValue, NamedParam, NativeArg, NativeEntry, NativeKind,
-    OpcodeEntry, OpcodeFn, OpcodeResult, PrimKind, Primitive, RawPtr, SUBTYPE_ERROR,
+    BuiltinImpl, Cap, CapSet, ColdModule, DomainCtx, DomainSlot, FuncValue, GlobalOverrideGuard,
+    HandleKind, ImplDescriptor, ImplMethod, IntoValue, NamedParam, NativeArg, NativeEntry,
+    NativeKind, OpcodeEntry, OpcodeFn, OpcodeResult, PrimKind, Primitive, RawPtr, SUBTYPE_ERROR,
     SUBTYPE_HANDLE, SUBTYPE_NONE, SUBTYPE_RANGE, SUBTYPE_RESULT, SUBTYPE_USER_BASE,
     TraitDescriptor, TraitMethod, TypeDescriptor, TypeField, TypeKind, TypeVariant,
     VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK, VM, Value, XclType, capability_of_name, extract_arg,
@@ -284,4 +289,43 @@ pub fn evaluate(source: &str, vm: &mut VM) -> Value {
     let ast = compiler::parser::parse(&tokens, source);
     let bytecode = bytecode::compile(&ast);
     vm.run(&bytecode)
+}
+
+/// Evaluates `source` as if it came from `name`, reporting **every** syntax
+/// error instead of panicking on the first one.
+///
+/// `name` is used in diagnostics, so pass the file path when there is one
+/// (`"<eval>"` and `"<stdin>"` for the other cases).
+///
+/// This is the entry point for hosts that want to show all problems at once,
+/// like the CLI. [`evaluate`] keeps the old single-error behaviour for callers
+/// that rely on the panic.
+///
+/// # Errors
+///
+/// Returns every [`ParseError`] the parser recovered from, in source order. The
+/// program is not executed when any error is present.
+///
+/// # Examples
+///
+/// ```
+/// use xcl_vm::{evaluate_recover, VM};
+///
+/// let mut vm = VM::new();
+/// let errors = evaluate_recover("script.xcl", ")", &mut vm).unwrap_err();
+/// assert!(!errors.is_empty());
+/// assert_eq!(errors[0].span.file, "script.xcl");
+/// ```
+pub fn evaluate_recover(
+    name: &str,
+    source: &str,
+    vm: &mut VM,
+) -> Result<Value, Vec<compiler::parser::ParseError>> {
+    let tokens = compiler::lexer::lex(source, name);
+    let out = compiler::parser::parse_recover(&tokens, source);
+    if !out.errors.is_empty() {
+        return Err(out.errors);
+    }
+    let bytecode = bytecode::compile(&out.ast);
+    Ok(vm.run(&bytecode))
 }

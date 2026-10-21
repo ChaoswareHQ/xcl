@@ -92,6 +92,9 @@ impl<'a> SourceMap<'a> {
     }
 
     /// The text of `line` (1-based), without its newline.
+    ///
+    /// A trailing `\r` is dropped too, so a file saved with CRLF endings renders
+    /// the same as one saved with LF.
     pub fn line(&self, line: u32) -> Option<&'a str> {
         if line == 0 {
             return None;
@@ -103,7 +106,8 @@ impl<'a> SourceMap<'a> {
             .get(idx + 1)
             .map(|next| next.saturating_sub(1))
             .unwrap_or(self.source.len());
-        Some(self.source.get(start..end).unwrap_or(""))
+        let text = self.source.get(start..end).unwrap_or("");
+        Some(text.strip_suffix('\r').unwrap_or(text))
     }
 
     /// Byte offset of (`line`, `col`), both 1-based.
