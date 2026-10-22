@@ -20,4 +20,4 @@ pub use value::{
     TraitDescriptor, TraitMethod, TypeDescriptor, TypeField, TypeKind, TypeVariant,
     VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK, Value, XclType, extract_arg,
 };
-pub use vm::{DomainSlot, VM};
+pub use vm::{DomainAlias, DomainSlot, PluginDescriptor, VM};

@@ -53,6 +53,14 @@ pub static STD_OPCODE_REGISTRY: [xcl_vm::OpcodeEntry] = [..];
 #[distributed_slice]
 pub static OPCODE_REGISTRY: [xcl_vm::OpcodeEntry] = [..];
 
+/// Compile-time distributed registry of plugins.
+///
+/// A plugin lists the domains it publishes; the VM uses the table to answer
+/// "which plugin owns this domain?" and to resolve qualified paths such as
+/// `std.util.print`.
+#[distributed_slice]
+pub static PLUGIN_REGISTRY: [xcl_vm::PluginDescriptor] = [..];
+
 /// Compile-time distributed registry of cold plugin modules.
 ///
 /// A cold module is reached through `OP_EXT` (`a` = module id, `c` = local
@@ -110,6 +118,7 @@ fn validate_opcode_space(std: &[OpcodeEntry], plugins: &[OpcodeEntry]) {
 /// Order is part of the contract: std registers first, so its opcodes and
 /// natives exist before any third-party plugin is loaded.
 pub fn register_all(vm: &mut VM) {
+    vm.register_plugins(&PLUGIN_REGISTRY);
     validate_opcode_space(&STD_OPCODE_REGISTRY, &OPCODE_REGISTRY);
     vm.register_opcodes(&STD_OPCODE_REGISTRY);
     vm.register_opcodes(&OPCODE_REGISTRY);

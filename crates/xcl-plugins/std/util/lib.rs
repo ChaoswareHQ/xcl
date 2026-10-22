@@ -36,13 +36,43 @@ pub use metadata::Metadata;
 pub(crate) use metadata::install as install_metadata;
 pub use registry::{
     COLD_MODULE_REGISTRY, IMPL_REGISTRY, NATIVE_REGISTRY, OPCODE_REGISTRY, OpcodeEntry, OpcodeFn,
-    STD_OPCODE_REGISTRY, TRAIT_REGISTRY, TYPE_REGISTRY, register_all, registered_opcode_name,
+    PLUGIN_REGISTRY, STD_OPCODE_REGISTRY, TRAIT_REGISTRY, TYPE_REGISTRY, register_all,
+    registered_opcode_name,
 };
 pub use result::Result;
 pub use rule::Rule;
 pub use xcl_vm;
 
 use xcl_vm::{VM, Value};
+
+/// The plugin this library is: `std`, publishing its domains under `std.*`.
+///
+/// The flat key stays `util` (from the marker type), so `util.print` and the
+/// bare `print` are unchanged; `std.util.print` resolves through the alias.
+#[::linkme::distributed_slice(PLUGIN_REGISTRY)]
+#[allow(non_upper_case_globals)]
+static STD: xcl_vm::PluginDescriptor = xcl_vm::PluginDescriptor {
+    name: "std",
+    summary: "The XCL standard library: print, input, defer, panic, metadata, Result, policy.",
+    domains: &[
+        xcl_vm::DomainAlias {
+            path: "std.util",
+            domain: "util",
+        },
+        xcl_vm::DomainAlias {
+            path: "std.metadata",
+            domain: "metadata",
+        },
+        xcl_vm::DomainAlias {
+            path: "std.result",
+            domain: "result",
+        },
+        xcl_vm::DomainAlias {
+            path: "std.rule",
+            domain: "rule",
+        },
+    ],
+};
 
 /// Marker type for the `util` domain.
 ///
@@ -137,5 +167,51 @@ mod caps_macro_tests {
             .find(|e| e.method == "effectful_fn")
             .expect("effectful_fn is registered");
         assert!(plain_entry.caps.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod plugin_tests {
+    use super::{evaluate_new, new_vm};
+
+    #[test]
+    fn the_vm_knows_the_std_plugin() {
+        let vm = new_vm();
+        assert!(vm.plugins().iter().any(|p| p.name == "std"));
+        assert_eq!(vm.plugin_of("util"), Some("std"));
+        assert_eq!(vm.plugin_of("std.util"), Some("std"));
+        assert_eq!(vm.plugin_of("math"), None);
+    }
+
+    #[test]
+    fn the_plugin_owns_every_std_domain() {
+        let vm = new_vm();
+        for domain in ["util", "metadata", "result", "rule"] {
+            assert_eq!(vm.plugin_of(domain), Some("std"), "{domain}");
+            assert_eq!(vm.plugin_of(&format!("std.{domain}")), Some("std"));
+        }
+    }
+
+    #[test]
+    fn qualified_path_reaches_the_same_method() {
+        let flat = evaluate_new("util.is_ok (util.ok 1)");
+        let qualified = evaluate_new("std.util.is_ok (std.util.ok 2)");
+        assert!(flat.as_bool(), "flat domain must work");
+        assert!(qualified.as_bool(), "`std.util.*` must alias to `util.*`");
+
+        // A dotted method under a qualified module path: `std.util` resolves to
+        // `util`, leaving `metadata.all` as the method.
+        let header = evaluate_new("# name: demo
+std.util.metadata.all");
+        assert!(header.as_map().is_some(), "metadata.all returns the header map");
+    }
+
+    #[test]
+    fn a_sibling_domain_qualifies_too() {
+        let named = evaluate_new("# name: demo
+std.metadata.has \"name\"");
+        assert!(named.as_bool(), "`std.metadata.*` must alias to `metadata.*`");
+        let result = evaluate_new("std.result.is_ok (util.ok 3)");
+        assert!(result.as_bool());
     }
 }

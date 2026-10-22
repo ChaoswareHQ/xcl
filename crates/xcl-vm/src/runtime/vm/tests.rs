@@ -886,3 +886,61 @@ fn growing_the_register_file_rebases_active_frame_pointers() {
     );
     assert_eq!(vm.frames[first].locals[0].as_i48(), 7);
 }
+
+fn plugin_seven(_args: &[Value]) -> Value {
+    Value::from_i48(7)
+}
+
+static TEST_PLUGIN_DOMAINS: [DomainAlias; 1] = [DomainAlias {
+    path: "std.util",
+    domain: "util",
+}];
+
+static TEST_PLUGINS: [PluginDescriptor; 1] = [PluginDescriptor {
+    name: "std",
+    summary: "test plugin",
+    domains: &TEST_PLUGIN_DOMAINS,
+}];
+
+static TEST_NATIVES: [crate::runtime::value::NativeEntry; 1] =
+    [crate::runtime::value::NativeEntry {
+        domain: Some("util"),
+        impl_type: None,
+        override_method: None,
+        method: "seven",
+        kind: crate::runtime::value::NativeKind::Pure,
+        ptr: crate::runtime::value::RawPtr(plugin_seven as *const ()),
+        args: None,
+        ret: None,
+        named: &[],
+        summary: None,
+        arg_desc: &[],
+        auto_import: false,
+        caps: crate::runtime::primitives::CapSet::EMPTY,
+    }];
+
+#[test]
+fn vm_reports_which_plugin_owns_a_domain() {
+    let mut vm = VM::new();
+    vm.register_plugins(&TEST_PLUGINS);
+    assert_eq!(vm.plugin_of("util"), Some("std"));
+    assert_eq!(vm.plugin_of("std.util"), Some("std"));
+    assert_eq!(vm.plugin_of("math"), None);
+    assert!(vm.plugins().iter().any(|p| p.name == "std"));
+}
+
+#[test]
+fn a_plugin_path_reaches_the_registered_domain() {
+    let mut vm = VM::new();
+    vm.register_plugins(&TEST_PLUGINS);
+    vm.register_natives(&TEST_NATIVES);
+    assert!(
+        vm.resolve_domain_method("util", "seven").is_some(),
+        "flat key must keep working"
+    );
+    assert!(
+        vm.resolve_domain_method("std.util", "seven").is_some(),
+        "qualified path must alias to the flat key"
+    );
+    assert!(vm.resolve_domain_method("std.math", "seven").is_none());
+}

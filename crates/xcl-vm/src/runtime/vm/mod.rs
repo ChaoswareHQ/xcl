@@ -365,6 +365,36 @@ type JitPlan<'a> = Option<&'a mut JitUnit>;
 #[cfg(not(feature = "jit"))]
 type JitPlan<'a> = Option<&'a mut ()>;
 
+/// A domain path owned by a plugin.
+///
+/// Domains register under a flat key (`"util"`) because that is what
+/// `NativeEntry::domain` carries. A plugin may publish the same domain under a
+/// qualified path (`"std.util"`) so callers can write either spelling; the VM
+/// translates the path to the key before dispatch.
+#[derive(Clone, Copy, Debug)]
+pub struct DomainAlias {
+    /// Fully-qualified path, e.g. `"std.util"`.
+    pub path: &'static str,
+    /// Registered domain key the natives were declared under, e.g. `"util"`.
+    pub domain: &'static str,
+}
+
+/// A plugin as the VM knows it.
+///
+/// Registration is static (`linkme`), so a plugin never appears by accident: it
+/// lists its own descriptor and the domains it owns. The VM keeps the table so a
+/// host can answer "which plugin provides this domain?" without importing the
+/// plugin crate, and so qualified paths (`std.util.print`) resolve.
+#[derive(Debug)]
+pub struct PluginDescriptor {
+    /// Plugin name, e.g. `"std"`.
+    pub name: &'static str,
+    /// One-line description, used by docs and tooling.
+    pub summary: &'static str,
+    /// Domain paths this plugin publishes.
+    pub domains: &'static [DomainAlias],
+}
+
 /// A dispatch table slot containing all methods registered for a specific domain namespace.
 #[derive(Clone)]
 pub struct DomainSlot {
@@ -401,6 +431,10 @@ pub struct VM {
     pub domain_index: HashMap<Box<str>, u32>,
     /// Table of registered domain method slots.
     pub domain_table: Vec<DomainSlot>,
+    /// Registered plugins, in registration order.
+    plugin_table: Vec<&'static PluginDescriptor>,
+    /// `"std.util"` → `"util"`, built from every registered plugin's domains.
+    domain_alias: HashMap<&'static str, &'static str>,
     /// Registry mapping type names to static type descriptors.
     pub type_index: HashMap<Box<str>, &'static TypeDescriptor>,
     /// Registry mapping trait names to static trait descriptors.
@@ -539,6 +573,8 @@ impl VM {
             global_table: Vec::new(),
             domain_index: Default::default(),
             domain_table: Vec::new(),
+            plugin_table: Vec::new(),
+            domain_alias: Default::default(),
             type_index: Default::default(),
             trait_index: Default::default(),
             impl_index: Vec::new(),
@@ -637,6 +673,34 @@ impl VM {
             }
             self.native_entries.push(entry);
         }
+    }
+
+    /// Registers plugin descriptors from a static slice.
+    ///
+    /// A plugin descriptor says which domains the plugin owns and under which
+    /// path they are published (`std.util` → `util`). `register_natives` builds
+    /// the dispatch slots from the flat keys, so either call order works.
+    pub fn register_plugins(&mut self, entries: &'static [PluginDescriptor]) {
+        for plugin in entries {
+            for alias in plugin.domains {
+                self.domain_alias.insert(alias.path, alias.domain);
+            }
+            self.plugin_table.push(plugin);
+        }
+    }
+
+    /// Registered plugins, in registration order.
+    pub fn plugins(&self) -> &[&'static PluginDescriptor] {
+        &self.plugin_table
+    }
+
+    /// Plugin that published `domain`, accepting its flat key or its path.
+    pub fn plugin_of(&self, domain: &str) -> Option<&'static str> {
+        let key = self.domain_alias.get(domain).copied().unwrap_or(domain);
+        self.plugin_table
+            .iter()
+            .find(|plugin| plugin.domains.iter().any(|d| d.domain == key))
+            .map(|plugin| plugin.name)
     }
 
     /// Registers type descriptors from a static slice.
@@ -777,6 +841,9 @@ impl VM {
     /// * `domain` - Domain name (e.g. `"fs"`).
     /// * `method` - Method name (e.g. `"read_file"`).
     pub fn resolve_domain_method(&self, domain: &str, method: &str) -> Option<&BuiltinImpl> {
+        // A plugin may publish its domain under a qualified path (`std.util`);
+        // translate it to the flat key the natives were registered under.
+        let domain = self.domain_alias.get(domain).copied().unwrap_or(domain);
         let &didx = self.domain_index.get(domain)?;
         let slot = self.domain_table.get(didx as usize)?;
         let &midx = slot.index.get(method)?;
@@ -1036,7 +1103,7 @@ fn opcode_name(op: u8) -> String {
 #[cfg(feature = "jit")]
 mod jit;
 #[cfg(feature = "jit")]
-use self::jit::{prepare_jit, prepare_jit_functions, JitUnit};
+use self::jit::{JitUnit, prepare_jit, prepare_jit_functions};
 #[cfg(test)]
 mod tests;
 

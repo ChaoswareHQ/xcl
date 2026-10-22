@@ -252,7 +252,8 @@ pub use compiler::parser;
 pub use compiler::span::Span;
 pub use compiler::{PARSE_ERROR_CODES, ParseError, ParseOutput, parse_recover};
 pub use runtime::{
-    BuiltinImpl, Cap, CapSet, ColdModule, DomainCtx, DomainSlot, FuncValue, GlobalOverrideGuard,
+    BuiltinImpl, Cap, CapSet, ColdModule, DomainAlias, DomainCtx, DomainSlot, FuncValue,
+    GlobalOverrideGuard, PluginDescriptor,
     HandleKind, ImplDescriptor, ImplMethod, IntoValue, NamedParam, NativeArg, NativeEntry,
     NativeKind, OpcodeEntry, OpcodeFn, OpcodeResult, PrimKind, Primitive, RawPtr, SUBTYPE_ERROR,
     SUBTYPE_HANDLE, SUBTYPE_NONE, SUBTYPE_RANGE, SUBTYPE_RESULT, SUBTYPE_USER_BASE,

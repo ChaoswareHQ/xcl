@@ -493,6 +493,18 @@ xcl-plugins/                 container
 
 `metadata` and `rule` are aliases onto `util` methods, not separate plugins.
 
+`std` is the plugin that owns `util`, so a call may also be written with the
+qualified path — all three spellings are the same function:
+
+```xcl
+print "hi"              # auto-import
+util.print "hi"         # flat domain
+std.util.print "hi"     # plugin-qualified path
+```
+
+The VM records the mapping (`VM::plugins()`, `VM::plugin_of("util")`), so a host
+can ask which plugin provides a domain without importing the plugin crate.
+
 ### Output and Colours
 
 `print` and friends are variadic and accept two named style arguments, `fg_color` and `bg_color`:

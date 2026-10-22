@@ -3004,18 +3004,25 @@ mod core_ops {
                         }
                     }
                 }
-                // 2. Check domain methods (e.g. "io.read") — only for two-part names
-                if name.split('.').count() == 2 {
-                    if let Some(dot_pos) = name.find('.') {
-                        let domain = &name[..dot_pos];
-                        let method = &name[dot_pos + 1..];
-                        if let Some(impl_) = vm.resolve_domain_method(domain, method) {
-                            let impl_copy = *impl_;
-                            let result = impl_copy.call(vm, &args);
-                            vm.push(result);
-                            return OpcodeResult::Next;
-                        }
+                // 2. Check domain methods. A name has at most one natural split
+                // (`domain.method`), but two shapes sit on top of it:
+                // a plugin may publish a nested path (`std.util.print`), and a
+                // domain may carry a dotted method (`util.metadata.get`). Try
+                // every split point, longest domain first; the lookup is a hash
+                // test per candidate, and this is the cold resolution path.
+                let mut end = name.len();
+                while let Some(pos) = name[..end].rfind('.') {
+                    let (domain, method) = (&name[..pos], &name[pos + 1..]);
+                    if !domain.is_empty()
+                        && !method.is_empty()
+                        && let Some(impl_) = vm.resolve_domain_method(domain, method)
+                    {
+                        let impl_copy = *impl_;
+                        let result = impl_copy.call(vm, &args);
+                        vm.push(result);
+                        return OpcodeResult::Next;
                     }
+                    end = pos;
                 }
                 // 2b. Domain expansion
                 if vm.domain_index.contains_key(name) {
