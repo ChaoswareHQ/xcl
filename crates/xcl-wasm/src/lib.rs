@@ -624,6 +624,7 @@ pub fn plugin_demo() -> String {
         local_names: Arc::from(Vec::<Box<str>>::new()),
         global_names: Arc::from(Vec::<Box<str>>::new()),
         user_functions: Arc::from(Vec::<(Box<str>, Arc<FuncValue>)>::new()),
+        function_by_name: Arc::from(Vec::<u32>::new()),
         closures: Arc::from(Vec::<FuncValue>::new()),
     };
 

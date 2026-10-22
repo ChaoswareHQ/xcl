@@ -93,6 +93,14 @@ pub struct Bytecode {
     /// `Arc` so cloning a `Bytecode` (done once per `run`) is a refcount bump
     /// instead of a deep copy of every function's name and parameters.
     pub user_functions: Arc<[(Box<str>, Arc<crate::runtime::value::FuncValue>)]>,
+    /// Callee lookup: `function_by_name[string_index]` is `ordinal + 1` when
+    /// that interned string names a user function, `0` otherwise.
+    ///
+    /// Call instructions already carry the string-table index in operand `b`, so
+    /// a named call can find its function with one array load instead of a
+    /// `global_index` hash and without inserting function names into that map on
+    /// every `run`.
+    pub function_by_name: Arc<[u32]>,
     /// Compiled nested closures and lambda bodies.
     pub closures: Arc<[crate::runtime::value::FuncValue]>,
 }

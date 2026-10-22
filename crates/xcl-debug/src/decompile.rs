@@ -22,6 +22,7 @@
 //!     local_names: Arc::new([]),
 //!     global_names: Arc::new([]),
 //!     user_functions: Arc::new([]),
+//!     function_by_name: Arc::new([]),
 //!     closures: Arc::new([]),
 //! };
 //! let output = xcl_debug::decompile::decompile(&bc);

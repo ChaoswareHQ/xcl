@@ -50,6 +50,7 @@ mod tests {
             local_names: Arc::new([]),
             global_names: Arc::new([]),
             user_functions: Vec::new().into(),
+            function_by_name: Arc::new([]),
             closures: Vec::new().into(),
         };
         let result = vm.run(&bc);

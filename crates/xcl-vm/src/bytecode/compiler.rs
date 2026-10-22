@@ -805,6 +805,16 @@ impl Compiler {
             .map(|s| Value::from_str_boxed(s.to_string()))
             .collect();
 
+        // Callee lookup for `OP_CALL_NAME`: one array load instead of a hash.
+        // Function names are interned by their call sites, so a function that is
+        // never called simply stays absent.
+        let mut function_by_name: Vec<u32> = core::iter::repeat_n(0u32, strings.len()).collect();
+        for (ordinal, (name, _)) in self.functions.iter().enumerate() {
+            if let Some(&idx) = self.string_index.get(name) {
+                function_by_name[idx as usize] = ordinal as u32 + 1;
+            }
+        }
+
         Bytecode {
             instructions: code.into(),
             wide_operands: core::mem::take(&mut self.wide).into(),
@@ -813,6 +823,7 @@ impl Compiler {
             local_names: core::mem::take(&mut self.locals).into(),
             global_names: core::mem::take(&mut self.globals).into(),
             user_functions: core::mem::take(&mut self.functions).into(),
+            function_by_name: function_by_name.into(),
             closures: core::mem::take(&mut self.closures).into(),
         }
     }
@@ -2444,7 +2455,7 @@ fn collect_inlineable(ast: &[AstNode]) -> BTreeMap<String, InlineFn> {
                         collect_idents(expr, &mut idents);
                         let all_ok = idents.iter().all(|id| {
                             param_names.contains(id)
-                                || is_known_global(id)
+                                || is_language_name(id)
                                 || single_expr_fns.contains(id)
                         });
                         if all_ok {
@@ -2528,7 +2539,7 @@ fn collect_inlineable(ast: &[AstNode]) -> BTreeMap<String, InlineFn> {
                 let all_ok = all_idents.iter().all(|id| {
                     param_names.contains(id)
                         || body_locals.contains(id)
-                        || is_known_global(id)
+                        || is_language_name(id)
                         || single_expr_fns.contains(id)
                 });
                 if !all_ok {
@@ -2562,10 +2573,18 @@ fn collect_inlineable(ast: &[AstNode]) -> BTreeMap<String, InlineFn> {
     map
 }
 
-/// Check if an identifier is a known global (type names, enum variants, etc.)
-fn is_known_global(name: &str) -> bool {
+/// Whether an identifier is a **language-level** name: a type keyword, a
+/// runtime type name, or a variant name.
+///
+/// The VM has no builtin functions; `print`, `len`, `sqrt` and the rest belong
+/// to `xcl-plugins`, so they must not appear here. This list is only used by the
+/// inliner to decide whether a free identifier in a pure function body is a
+/// known name, so anything that is not part of the language is a local that
+/// starts as `none`.
+fn is_language_name(name: &str) -> bool {
     matches!(
         name,
+        // Sized integer/float aliases and the runtime type names.
         "i8" | "i16"
             | "i32"
             | "i64"
@@ -2579,57 +2598,27 @@ fn is_known_global(name: &str) -> bool {
             | "usize"
             | "f32"
             | "f64"
+            | "int"
+            | "float"
             | "bool"
             | "str"
             | "string"
-            | "char"
+            | "any"
             | "none"
-            | "None"
-            | "Some"
+            | "function"
+            | "func"
+            | "array"
+            | "map"
+            | "dict"
+            | "range"
+            | "result"
+            | "error"
+            | "handle"
+            // Type-expression names and sum-type variants.
+            | "Result"
             | "Ok"
             | "Err"
-            | "Result"
-            | "Option"
-            | "Array"
-            | "Map"
-            | "Dict"
-            | "Range"
-            | "Vec"
-            | "print"
-            | "println"
-            | "input"
-            | "len"
-            | "enumerate"
-            | "zip"
-            | "filter"
-            | "map"
-            | "reduce"
-            | "fold"
-            | "sort"
-            | "reverse"
-            | "to_string"
-            | "to_int"
-            | "to_float"
-            | "trim"
-            | "split"
-            | "join"
-            | "contains"
-            | "starts_with"
-            | "ends_with"
-            | "replace"
-            | "abs"
-            | "min"
-            | "max"
-            | "sqrt"
-            | "pow"
-            | "sin"
-            | "cos"
-            | "tan"
-            | "log"
-            | "exp"
-            | "round"
-            | "floor"
-            | "ceil"
+            // Literals handled as identifiers by the AST.
             | "true"
             | "false"
     )

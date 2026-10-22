@@ -1134,6 +1134,28 @@ mod core_ops {
                 return vm.enter_call_args_at(f, arg_start, n);
             }
         }
+
+        // Named user function: one array load through `function_by_name`.
+        // `global_index` is checked first (and is normally empty for user
+        // functions) so a domain-expansion override keeps priority.
+        let ord = {
+            // SAFETY: frame at `top` is active during dispatch.
+            let code = vm.frames[top].code();
+            code.function_by_name.get(name_idx).copied().unwrap_or(0)
+        };
+        if ord != 0
+            && let Some(name) = callee.as_str()
+            && !vm.global_index.contains_key(name)
+        {
+            let func_slot = (vm.function_base + ord - 1) as usize;
+            if let Some(func_val) = vm.globals.get(func_slot).copied()
+                && let Some(f) = func_val.as_func()
+            {
+                vm.cache_callee(slot, callee, func_val);
+                return vm.enter_call_args_at(f, arg_start, n);
+            }
+        }
+
         call_name_slow(vm, n, arg_start, callee, slot)
     }
 
@@ -1166,6 +1188,25 @@ mod core_ops {
         let slot = ((callee.0 >> 4) as usize) & crate::runtime::vm::CALL_CACHE_MASK;
         if callee.0 == vm.call_cache[slot].0.0 {
             if let Some(f) = vm.call_cache[slot].1.as_func() {
+                return vm.enter_tail_call(f, &args);
+            }
+        }
+
+        // Named user function: one array load through `function_by_name`.
+        let ord = {
+            // SAFETY: frame at `top` is active during dispatch.
+            let code = vm.frames[top].code();
+            code.function_by_name.get(name_idx).copied().unwrap_or(0)
+        };
+        if ord != 0
+            && let Some(name) = callee.as_str()
+            && !vm.global_index.contains_key(name)
+        {
+            let func_slot = (vm.function_base + ord - 1) as usize;
+            if let Some(func_val) = vm.globals.get(func_slot).copied()
+                && let Some(f) = func_val.as_func()
+            {
+                vm.cache_callee(slot, callee, func_val);
                 return vm.enter_tail_call(f, &args);
             }
         }
@@ -1518,16 +1559,22 @@ mod core_ops {
     fn op_call_method(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
         let field_idx = instr.a() as usize;
         let nargs = instr.b() as usize;
+        // The interned key Value owns a `'static` string, so this needs no
+        // `Arc` clone of the string table and no borrow of the frame.
         // SAFETY: frame at `top` is active during dispatch.
-        let string_table = vm.frames[top].code().string_table.clone();
-        let method_name = &string_table[field_idx];
+        let method_value = vm.frames[top].code().string_values[field_idx];
+        let method_name = method_value.as_str().unwrap_or("");
 
-        let mut args = Vec::with_capacity(nargs);
-        for _ in 0..nargs {
-            args.push(vm.pop());
+        // One inline buffer holds receiver + args; method calls with up to seven
+        // arguments never touch the heap.
+        let mut all_args: smallvec::SmallVec<[Value; 8]> =
+            smallvec::SmallVec::with_capacity(nargs + 1);
+        all_args.resize(nargs + 1, Value::nil());
+        for i in (1..=nargs).rev() {
+            all_args[i] = vm.pop();
         }
-        args.reverse();
-        let receiver = vm.pop();
+        all_args[0] = vm.pop();
+        let receiver = all_args[0];
 
         let domain_name = if let Some(subtype) = receiver.map_subtype() {
             match subtype {
@@ -1543,9 +1590,6 @@ mod core_ops {
         if let Some(domain) = domain_name {
             if let Some(impl_) = vm.resolve_domain_method(domain, method_name) {
                 let impl_copy = *impl_;
-                let mut all_args = Vec::with_capacity(nargs + 1);
-                all_args.push(receiver);
-                all_args.extend(args);
                 let result = impl_copy.call(vm, &all_args);
                 vm.push(result);
                 return OpcodeResult::Next;
@@ -1569,9 +1613,6 @@ mod core_ops {
                             if let Some(impl_) = vm.resolve_domain_method(&parent_name, method_name)
                             {
                                 let impl_copy = *impl_;
-                                let mut all_args = Vec::with_capacity(nargs + 1);
-                                all_args.push(receiver);
-                                all_args.extend(args);
                                 let result = impl_copy.call(vm, &all_args);
                                 vm.push(result);
                                 return OpcodeResult::Next;
@@ -1586,7 +1627,7 @@ mod core_ops {
         // Map property lookup: if receiver is a map and no args, return the field value
         if nargs == 0
             && let Some(map) = receiver.as_map()
-            && let Some(v) = map.get(method_name.as_ref())
+            && let Some(v) = map.get(method_name)
         {
             vm.push(*v);
             return OpcodeResult::Next;
@@ -1594,9 +1635,6 @@ mod core_ops {
 
         if let Some(impl_) = vm.resolve_universal_method(method_name) {
             let impl_copy = *impl_;
-            let mut all_args = Vec::with_capacity(nargs + 1);
-            all_args.push(receiver);
-            all_args.extend(args);
             let result = impl_copy.call(vm, &all_args);
             vm.push(result);
             return OpcodeResult::Next;

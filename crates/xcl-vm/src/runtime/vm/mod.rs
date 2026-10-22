@@ -204,9 +204,10 @@ pub(crate) struct Frame {
     /// Iteration buffer for `for x in array`.
     ///
     /// `Vec` rather than `SmallVec` on purpose: three inline `SmallVec`s made
-    /// `Frame` ~240 bytes, and every call reinitializes all three. At 24 bytes
-    /// each the frame shrinks to ~136 bytes, which matters because frames are
-    /// allocated per call depth and touched on every call/return.
+    /// `Frame` ~240 bytes, and every call reinitializes all three. Iterating the
+    /// live heap array instead of a snapshot was measured ~38% slower on
+    /// `array_for_sum_100x100` (one extra pointer chase per element beats one
+    /// small copy on entry), so the copy stays.
     iter: Vec<Value>,
     iter_idx: u32,
     /// True when `iter` is a numeric range rather than an array; the bounds live
@@ -618,10 +619,6 @@ pub struct VM {
     frame_depth: usize,
     /// Previously installed bytecode (for idempotent function installation).
     installed_code: Option<Arc<[Instr]>>,
-    /// Stable slot indices assigned to user functions of the current bytecode.
-    function_slots: Vec<u32>,
-    /// Function names installed in `global_index` (for cleanup on bytecode switch).
-    function_names: Vec<Box<str>>,
     /// Index in `globals` where the current bytecode's function values start.
     function_base: u32,
 }
@@ -687,8 +684,6 @@ impl VM {
             jit_call_cache: [None; CALL_CACHE_SLOTS],
             frame_depth: 0,
             installed_code: None,
-            function_slots: Vec::new(),
-            function_names: Vec::new(),
             function_base: 0,
         }
     }
@@ -1289,10 +1284,10 @@ impl VM {
 
         // Install (or refresh) the bytecode's top-level functions.
         //
-        // Slots are stable across runs: `global_index` maps a name to
-        // `global_table.len() + globals_index`, which is exactly what `OP_CALL`
-        // subtracts the table length from. Function values live in the arena,
-        // so they must be rebuilt after the arena reset above.
+        // Function values live in the arena, so they must be rebuilt after the
+        // arena reset above. They are not inserted into `global_index`: a named
+        // call resolves through `Bytecode::function_by_name`, which is one array
+        // load, and the slots are the contiguous range starting at `function_base`.
         let current_code = bc.instructions.clone();
         let is_same_bytecode = self
             .installed_code
@@ -1301,11 +1296,7 @@ impl VM {
             .unwrap_or(false);
 
         if !is_same_bytecode {
-            // Drop the previous bytecode's function names and values.
-            for name in self.function_names.drain(..) {
-                self.global_index.remove(&name);
-            }
-            self.function_slots.clear();
+            // Drop the previous bytecode's function values.
             self.globals.truncate(self.function_base as usize);
         }
 
@@ -1315,26 +1306,21 @@ impl VM {
         if self.globals.len() < compiler_globals {
             self.globals.resize(compiler_globals, Value::nil());
         }
-        let function_base = self.globals.len() as u32;
 
         if !is_same_bytecode {
-            let table_len = self.global_table.len() as u32;
-            for (i, (name, func)) in bc.user_functions.iter().enumerate() {
-                let slot = function_base + i as u32;
-                self.function_slots.push(slot);
-                self.function_names.push(name.as_ref().into());
+            let function_base = self.globals.len() as u32;
+            self.globals.reserve(bc.user_functions.len());
+            for (_name, func) in bc.user_functions.iter() {
                 self.globals
                     .push(Value::from_func_shared(Arc::clone(func), &self.arena));
-                self.global_index
-                    .insert(name.as_ref().into(), table_len + slot);
             }
             self.function_base = function_base;
             self.installed_code = Some(current_code);
         } else {
             // Same bytecode — rewrite each slot with a fresh Value (arena was reset).
+            let base = self.function_base as usize;
             for (i, (_name, func)) in bc.user_functions.iter().enumerate() {
-                let slot = self.function_slots[i] as usize;
-                self.globals[slot] = Value::from_func_shared(Arc::clone(func), &self.arena);
+                self.globals[base + i] = Value::from_func_shared(Arc::clone(func), &self.arena);
             }
         }
 
