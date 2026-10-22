@@ -137,9 +137,8 @@ $label = "WEEKEND" if $day > 5 else "Workday"
 **Pipeline** — the left value becomes the first argument of the named stage:
 
 ```xcl
-$root = 16 |> math.sqrt
-$text = 9 |> math.sqrt |> math.floor
 $sum = 10 |> add 5      # `add` is defined in the Functions section
+$upper = "hi" |> util.print
 ```
 
 **Range, membership, tests, casts:**
@@ -442,48 +441,57 @@ $int_value = $raw as i32
 
 ### Domains
 
-The standard library is organized into **domains** (namespaces):
+The standard library is organized into **domains** (namespaces). `xcl-plugins`
+currently ships one domain, `util`; the others (`math`, `io`, `fs`, `net`,
+`encoding`) are not part of this release.
 
 ```xcl
-fs.read "config.json"
-math.sqrt 16
-json.parse "{\"ok\": true}"
-https.get "https://example.com"
+print "hello"                 # util.print
+$name = input "name: "        # util.input
+println (util.fg_color "BrightCyan" "cyan")
 ```
 
 ### Auto-Import
 
-Methods marked `auto_import` are also available as bare identifiers. This applies to `util` (the print/input family) and `fs`:
+Methods marked `auto_import` are also available as bare identifiers. Today that
+is the `util` print/input family:
 
 ```xcl
 print "Hello"                 # util.print
 println "Hello"               # util.println
 $line = input "name: "        # util.input
-$text = read "config.txt"     # fs.read
-write "out.txt" $text         # fs.write
-if exists "config.json" { ... }   # fs.exists
 ```
 
-Because `fs` and `util` share names, the bare forms `read` and `write` resolve to the **filesystem** versions. Use `util.read` to read all of stdin and `util.write` to write raw text to stdout.
-
-Other domains must be qualified: `math.sqrt`, `json.parse`, `https.get`.
+Any other domain method must be qualified: `util.fg_color`, `util.metadata`.
 
 ## Standard Library
 
-All of this lives in `xcl-plugins`; `xcl-vm` itself contains only primitives and the language axioms (`$self`, `$super`, special variables).
+All of this lives in `xcl-plugins`, under `std/`. `xcl-vm` itself contains only
+primitives and the language axioms (`$self`, `$super`, special variables).
+
+```text
+xcl-plugins/                 container
+└── std/                     container
+    └── util/                the library (crate root: lib.rs)
+        ├── lib.rs           `Util` marker, new_vm/evaluate, module list
+        ├── registry.rs      distributed registration (linkme)
+        ├── errors.rs        error-kind vocabulary
+        ├── print.rs         print/println/eprint/eprintln, colours
+        ├── input.rs         input/readline/read
+        ├── defer.rs         the `defer` target
+        ├── panic.rs         Rust-style panic
+        ├── metadata.rs      `# name: value` header
+        ├── result.rs        `Ok`/`Err` helpers
+        └── rule.rs          print/input policy gate
+```
 
 | Domain | Purpose | Auto-import |
 |---|---|---|
 | `util` | Fast console I/O, input, colours, `defer`, `panic`, `Result`, policy aliases | `print`, `println`, `eprint`, `eprintln`, `error`, `input`, `readline`, `prompt`, `defer`, `panic`, `read`, `write`, `flush`, `fg_color`, `bg_color` |
-| `fs` | Filesystem: `read`, `write`, `append`, `exists`, `is_file`, `is_dir`, `list`, `mkdir`, `remove`, `remove_dir`, `copy`, `move_`, `cwd`, `chdir`, `temp_dir`, `join`, `extension`, `basename`, `dirname`, `absolute`, `read_bytes`, `write_bytes` | yes |
-| `math` | `sqrt`, `sin`, `cos`, `tan`, `exp`, `log`, `abs`, `floor`, `ceil`, `round`, `tanh`, `log2`, `log10`, `cbrt` | no |
-| `json` | `parse`, `stringify`, `pretty` | no |
-| `https` | `get`, `post`, `put`, `delete`, `patch`, `head`, `request`, `parse_url`, `build_url` | no |
-| `io` | Namespaced console I/O aliases (`print`, `readline`, `read`, `write`, `flush`, `prompt`, `error`) | no |
 | `metadata` | `get`, `all`, `has` | no |
 | `rule` | `allow`, `deny`, `deny_all`, `reset`, `is_allowed`, `message`, `list` | no |
 
-Cargo features in `xcl-plugins` control which domains compile: `io`, `fs`, `math`, `net` (the `https` domain), and `encoding` (the `json` domain). All are enabled by default.
+`metadata` and `rule` are aliases onto `util` methods, not separate plugins.
 
 ### Output and Colours
 
@@ -520,9 +528,9 @@ $all  = util.read             # everything until EOF
 ### Defer, Panic
 
 ```xcl
-copy_with_cleanup() {
-    defer { fs.remove "temp.txt" }
-    fs.write "temp.txt" "data"
+report() {
+    defer { println "done" }
+    println "working"
     return true
 }
 
@@ -673,7 +681,7 @@ impl MyDomain {
 }
 ```
 
-Variadics receive `&[Value]` and named arguments arrive as one trailing map, so native functions split them with `xcl_plugins::split_named_args(args, &["fg_color", "bg_color"])`.
+Variadics receive `&[Value]` and named arguments arrive as one trailing map, so native functions split them with `split_named_args(args, &["fg_color", "bg_color"])` (crate-internal in `print.rs`).
 
 Registration uses `linkme` distributed slices, so it costs nothing at runtime.
 

@@ -21,8 +21,8 @@
 //!
 //! Error kinds are organized by domain families:
 //!
-//! * [`universal`](crate::errors::universal) - Cross-cutting error kinds applicable to any domain (e.g., `not_found`, `timed_out`).
-//! * [`filesystem`](crate::errors::filesystem) - Error kinds specific to filesystem and file I/O operations (e.g., `not_a_directory`, `quota_exceeded`).
+//! * [`universal`] - Cross-cutting error kinds applicable to any domain (e.g., `not_found`, `timed_out`).
+//! * [`filesystem`] - Error kinds specific to filesystem and file I/O operations (e.g., `not_a_directory`, `quota_exceeded`).
 //! * `network`, `data_format`, `database`, `process` - Reserved for future domain extensions.
 //!
 //! # Examples

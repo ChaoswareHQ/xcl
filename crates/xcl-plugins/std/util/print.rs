@@ -62,7 +62,7 @@ fn split_style_args(args: &[Value]) -> (&[Value], hashbrown::HashMap<&str, Value
     if args.len() == 1 && args[0].as_map().is_some() {
         return (args, hashbrown::HashMap::new());
     }
-    crate::split_named_args(args, STYLE_PARAMS)
+    split_named_args(args, STYLE_PARAMS)
 }
 
 fn style_prefix(named: &hashbrown::HashMap<&str, Value>) -> Option<String> {
@@ -152,6 +152,28 @@ pub fn eprint(args: &[Value]) -> Value {
 #[xcl_fn(name = "util.error", auto_import)]
 pub fn error(args: &[Value]) -> Value {
     print_all("error", args, true, true)
+}
+
+
+/// Splits native arguments into positional values and a trailing named map.
+///
+/// A call's named arguments arrive as a trailing map; if its last entry is not
+/// one of the known names it is an ordinary positional argument.
+pub(crate) fn split_named_args<'a>(
+    args: &'a [Value],
+    known: &[&str],
+) -> (&'a [Value], hashbrown::HashMap<&'a str, Value>) {
+    let Some(last) = args.last() else {
+        return (args, hashbrown::HashMap::new());
+    };
+    let Some(map) = last.as_map() else {
+        return (args, hashbrown::HashMap::new());
+    };
+    if !map.keys().any(|k| known.contains(&k)) {
+        return (args, hashbrown::HashMap::new());
+    }
+    let named = map.iter().map(|(k, v)| (k, *v)).collect();
+    (&args[..args.len() - 1], named)
 }
 
 #[xcl_impl(auto_import)]

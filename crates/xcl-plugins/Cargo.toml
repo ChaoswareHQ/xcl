@@ -9,13 +9,11 @@ repository.workspace = true
 readme.workspace = true
 homepage.workspace = true
 
+[lib]
+path = "std/util/lib.rs"
+
 [features]
-default = ["io", "fs", "net", "encoding", "math"]
-io = []
-fs = []
-net = ["dep:ureq"]
-encoding = ["dep:serde_json"]
-math = []
+default = []
 opcode-stats = []
 
 [dependencies]
@@ -24,8 +22,6 @@ xcl-vm.workspace = true
 linkme.workspace = true
 hashbrown.workspace = true
 itoa.workspace = true
-ureq = { workspace = true, default-features = false, features = ["_tls", "json"], optional = true }
-serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion.workspace = true
