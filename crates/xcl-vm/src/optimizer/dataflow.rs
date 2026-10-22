@@ -5,18 +5,13 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-
 // `alloc` re-exports needed by `no_std` builds (std prelude provides them).
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use alloc::{
-    vec::Vec,
-};
+use alloc::vec::Vec;
 
 use crate::bytecode::Instr;
-use crate::runtime::vm::ops::consts::{
-    OP_HALT, OP_RETURN,
-};
+use crate::runtime::vm::ops::consts::{OP_HALT, OP_RETURN};
 use crate::runtime::vm::ops::meta;
 
 #[cfg(not(feature = "std"))]
@@ -25,7 +20,7 @@ use alloc::collections::BTreeSet;
 use std::collections::BTreeSet;
 
 /// Expand a slot mask into slot indices for the given instruction.
-fn slot_indices(mask: u8, instr: Instr) -> Vec<u32> {
+pub(super) fn slot_indices(mask: u8, instr: Instr) -> Vec<u32> {
     let mut slots = Vec::new();
     if mask & 1 != 0 {
         slots.push(instr.a());

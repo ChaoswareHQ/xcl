@@ -197,6 +197,115 @@ mod plugin_tests {
         );
     }
 
+    /// The hot encoding must be a drop-in replacement for the named one: same
+    /// instruction count, same result, one word different.
+    #[test]
+    fn the_hot_encoding_differs_by_exactly_one_word() {
+        let mut vm = new_vm();
+        let src = "$r = util.ok 1\n$s = 0\nif result.is_ok $r { $s = 1 }\n$s";
+        let tokens = xcl_vm::lexer::lex(src, "<test>");
+        let ast = xcl_vm::parser::parse(&tokens, src);
+
+        let hot = xcl_vm::bytecode::compile_hot(&ast, vm.hot_table());
+        let named = xcl_vm::bytecode::compile(&ast);
+
+        assert_eq!(
+            hot.instructions.len(),
+            named.instructions.len(),
+            "the hot form must not add or remove instructions"
+        );
+        let differing: Vec<(u64, u64)> = hot
+            .instructions
+            .iter()
+            .zip(named.instructions.iter())
+            .filter(|(a, b)| a.0 != b.0)
+            .map(|(a, b)| (a.0, b.0))
+            .collect();
+        assert_eq!(differing.len(), 1, "only the call site should change");
+        let (hot_word, named_word) = differing[0];
+        assert_eq!(hot_word as u8, xcl_vm::bytecode::OP_CALL_HOT);
+        assert_eq!(named_word as u8, xcl_vm::bytecode::OP_CALL_NAME);
+
+        assert_eq!(vm.run(&hot).as_i48(), 1);
+        assert_eq!(vm.run(&named).as_i48(), 1);
+    }
+
+    /// Where the loop header sits, for the hoisting tests below.
+    fn loop_start(bc: &xcl_vm::Bytecode) -> usize {
+        bc.instructions
+            .iter()
+            .position(|i| {
+                i.op() == xcl_vm::bytecode::OP_WHILE_LT_INT
+                    || i.op() == xcl_vm::bytecode::OP_WHILE_LT_INT_WIDE
+            })
+            .expect("the program has a loop")
+    }
+
+    fn first_hot_call(bc: &xcl_vm::Bytecode) -> usize {
+        bc.instructions
+            .iter()
+            .position(|i| i.op() == xcl_vm::bytecode::OP_CALL_HOT)
+            .expect("the program makes a hot call")
+    }
+
+    #[test]
+    fn an_invariant_hot_call_runs_once_before_the_loop() {
+        let mut vm = new_vm();
+        let src = "$r = util.ok 1
+$i = 0
+$s = 0
+while $i < 4 {
+  if result.is_ok $r { $s = $s + 1 }
+  $i = $i + 1
+}
+$s";
+        let tokens = xcl_vm::lexer::lex(src, "<test>");
+        let ast = xcl_vm::parser::parse(&tokens, src);
+        let bc = xcl_vm::bytecode::compile_hot(&ast, vm.hot_table());
+        assert!(
+            first_hot_call(&bc) < loop_start(&bc),
+            "a pure call whose arguments never change must be hoisted"
+        );
+        assert_eq!(vm.run(&bc).as_i48(), 4);
+    }
+
+    #[test]
+    fn a_hot_call_with_a_changing_argument_stays_in_the_loop() {
+        let mut vm = new_vm();
+        let src = "$i = 0
+$s = 0
+while $i < 4 {
+  if result.is_ok (util.ok $i) { $s = $s + 1 }
+  $i = $i + 1
+}
+$s";
+        let tokens = xcl_vm::lexer::lex(src, "<test>");
+        let ast = xcl_vm::parser::parse(&tokens, src);
+        let bc = xcl_vm::bytecode::compile_hot(&ast, vm.hot_table());
+        assert!(
+            first_hot_call(&bc) > loop_start(&bc),
+            "an argument the loop writes makes the call variant"
+        );
+        assert_eq!(vm.run(&bc).as_i48(), 4);
+    }
+
+    #[test]
+    fn a_side_effecting_hot_call_is_never_hoisted() {
+        // `print` is hot but not pure, so it has to run every iteration.
+        let mut vm = new_vm();
+        let src = "$i = 0
+while $i < 2 {
+  print \"\"
+  $i = $i + 1
+}
+$i";
+        let tokens = xcl_vm::lexer::lex(src, "<test>");
+        let ast = xcl_vm::parser::parse(&tokens, src);
+        let bc = xcl_vm::bytecode::compile_hot(&ast, vm.hot_table());
+        assert!(first_hot_call(&bc) > loop_start(&bc));
+        assert_eq!(vm.run(&bc).as_i48(), 2);
+    }
+
     #[test]
     fn hot_and_named_calls_reach_the_same_function() {
         // One VM, one AST, two compilations: the hot encoding and the name

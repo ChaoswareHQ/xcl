@@ -6,8 +6,9 @@
 //! when:
 //!
 //! * its header is `OP_WHILE_LT_INT` or `OP_WHILE_LT_INT_WIDE`;
-//! * the body is a single basic block (the only branch is the back-edge
-//!   `OP_JUMP`);
+//! * the body is a single basic block ending in the back edge: either
+//!   `OP_JUMP` to the header, or the rotated latch `OP_INC_LT_INT` /
+//!   `OP_INC_LT_INT_WIDE` (`xcl-vm`'s loop rotation emits the latter);
 //! * every operation is integer-only (no floats, strings, arrays, maps or
 //!   calls);
 //! * the loop is entered with integer values in every local it reads before
@@ -80,6 +81,8 @@ const OP_ADD_LOCAL_LOCAL: u8 = 61;
 const OP_SUB_LOCAL_LOCAL: u8 = 62;
 const OP_LOAD_LOCAL_STORE_LOCAL: u8 = 65;
 const OP_WHILE_LT_INT_WIDE: u8 = 69;
+const OP_INC_LT_INT: u8 = 49;
+const OP_INC_LT_INT_WIDE: u8 = 50;
 const OP_INC_LOCAL: u8 = 80;
 const OP_DEC_LOCAL: u8 = 81;
 const OP_MUL_LOCAL_LOCAL: u8 = 82;
@@ -280,6 +283,8 @@ fn supported_body_op(op: u8) -> bool {
             | OP_LOAD_LOCAL_STORE_LOCAL
             | OP_INC_LOCAL
             | OP_DEC_LOCAL
+            | OP_INC_LT_INT
+            | OP_INC_LT_INT_WIDE
             | OP_ADD_INT_LOCAL
             | OP_SUB_INT_LOCAL
             | OP_MUL_INT_LOCAL
@@ -363,6 +368,16 @@ fn loop_at(code: &[u64], wide: &[i64], h: usize) -> Option<LoopSpec> {
     let mut j = h + 1;
     while j < code.len() {
         let o = op_of(code[j]);
+        if o == OP_INC_LT_INT || o == OP_INC_LT_INT_WIDE {
+            // Rotated latch: `counter += 1`, compare, jump back to the body.
+            // The compiled loop re-tests at the header, so the increment is the
+            // only part that matters - and it is part of the body.
+            if c_of(code[j]) as u32 == slot && a_of(code[j]) as usize == h + 1 {
+                compilable = true;
+                j += 1;
+            }
+            break;
+        }
         if o == OP_JUMP {
             if a_of(code[j]) as usize == h {
                 compilable = true;
@@ -773,6 +788,7 @@ fn access_sets(i: u64, _written: &BTreeSet<usize>) -> (Vec<usize>, Vec<usize>) {
         OP_GET_FIELD_LOCAL_STORE => (vec![c], vec![a]),
         OP_ADD_FIELD_LOCAL_STORE => (vec![a, c], vec![a]),
         OP_INC_LOCAL | OP_DEC_LOCAL => (vec![a], vec![a]),
+        OP_INC_LT_INT | OP_INC_LT_INT_WIDE => (vec![c], vec![c]),
         OP_LOAD_CONST_LOCAL => (Vec::new(), vec![a]),
         _ => (Vec::new(), Vec::new()),
     }
@@ -943,6 +959,16 @@ fn emit(
             } else {
                 ret1(b);
             }
+        }
+        OP_INC_LT_INT | OP_INC_LT_INT_WIDE => {
+            // The latch of a rotated loop. Its compare and back jump are the
+            // loop's own structure here; only the increment has to be emitted.
+            let slot = c_of(i) as usize;
+            let x = b.use_var(var(slot));
+            let one = b.ins().iconst(types::I64, 1);
+            let sum = b.ins().iadd(x, one);
+            let v = trunc48(b, sum);
+            b.def_var(var(slot), v);
         }
         OP_INC_LOCAL | OP_DEC_LOCAL => {
             let x = b.use_var(var(a));

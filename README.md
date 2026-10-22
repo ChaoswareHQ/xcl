@@ -205,6 +205,10 @@ while $x > 0 {
 }
 ```
 
+`break` leaves and `continue` restarts the innermost `for` or `while` loop. Both are
+statements, so they work inside an `if` branch, and neither escapes a function or
+lambda boundary.
+
 `defer { ... }` registers a closure that runs when the current frame returns, in LIFO order, including on an early `return`:
 
 ```xcl
@@ -660,6 +664,7 @@ The code space is `0..=126` for core instructions, `127` for `OP_EXT` (a 32-bit 
 | `xcl-doc` | Documentation generator that reads macro metadata and produces an HTML site |
 | `xcl-analysis` | Linter: rustc-style diagnostics, rule catalogue, `--lint` JSON contract |
 | `xcl-wasm` | Browser build for the playground: lint, disassemble, run, opcode map (`wasm32-unknown-unknown`) |
+| `xcl-benchmark` | Benchmark corpus and cross-language harnesses: `crosslang/run.py`, `crosslang/usage.py`, the Luau/LuaJIT runners, and `scripts/score.py` |
 
 ## Writing Native Functions
 
@@ -812,8 +817,8 @@ Cross-language comparison against Luau, LuaJIT, and CPython:
 cargo build --release -p xcl-cli --features jit
 cp target/release/xcl.exe target/release/xcl-jit.exe
 cargo build --release -p xcl-cli
-CROSSLANG_REPS=9 python scripts/crosslang/run.py
-python scripts/crosslang/usage.py
+CROSSLANG_REPS=9 python crates/xcl-benchmark/crosslang/run.py
+python crates/xcl-benchmark/crosslang/usage.py
 ```
 
 On the reference machine the interpreter beats Luau on all seven cross-language workloads, and the JIT is within roughly 1.2x of LuaJIT while using less memory than CPython.

@@ -10,6 +10,53 @@ use super::*;
 
 impl Compiler<'_> {
     pub(super) fn node(&mut self, node: &AstNode) {
+        // Constant tracking for the counted-loop fold. A literal assignment is
+        // recorded; anything that can change a local without naming it as a
+        // literal invalidates the whole set.
+        match node {
+            AstNode::Assign { name, value, .. } => match value.as_ref() {
+                AstNode::Int { value, .. } => {
+                    self.const_locals.insert(name.as_str().into(), *value);
+                }
+                _ => {
+                    self.const_locals.remove(name.as_str());
+                }
+            },
+            AstNode::If { .. }
+            | AstNode::Call { .. }
+            | AstNode::DomainCall { .. }
+            | AstNode::Pipeline { .. }
+            | AstNode::FunctionDef { .. }
+            | AstNode::ImplDef { .. }
+            | AstNode::TypeDef { .. }
+            | AstNode::Return { .. }
+            | AstNode::Break { .. }
+            | AstNode::Continue { .. } => self.const_locals.clear(),
+            _ => {}
+        }
+        self.node_inner(node);
+        // Control flow may have taken a branch that skipped an assignment, so
+        // nothing survives it. `while`/`for` record their own folded results.
+        if matches!(
+            node,
+            AstNode::If { .. }
+                | AstNode::While { .. }
+                | AstNode::For { .. }
+                | AstNode::Call { .. }
+                | AstNode::DomainCall { .. }
+                | AstNode::Pipeline { .. }
+                | AstNode::FunctionDef { .. }
+                | AstNode::ImplDef { .. }
+                | AstNode::TypeDef { .. }
+                | AstNode::Return { .. }
+                | AstNode::Break { .. }
+                | AstNode::Continue { .. }
+        ) {
+            self.const_locals.clear();
+        }
+    }
+
+    fn node_inner(&mut self, node: &AstNode) {
         match node {
             AstNode::Assign { name, value, .. } => {
                 let slot = self.local(name);
@@ -233,7 +280,8 @@ impl Compiler<'_> {
                 }
                 self.emit(Instr::none(OP_RETURN));
             }
-            AstNode::Break { .. } | AstNode::Continue { .. } => {}
+            AstNode::Break { .. } => self.emit_break(),
+            AstNode::Continue { .. } => self.emit_continue(),
 
             AstNode::If {
                 condition,
@@ -321,6 +369,7 @@ impl Compiler<'_> {
                 body,
                 ..
             } => {
+                let entry = core::mem::take(&mut self.const_locals);
                 if let AstNode::Range { start, end, .. } = iterable.as_ref() {
                     // Check if start and end are integer constants â€” if so, use OP_FOR_NUMBER_LOOP
                     let start_val = match start.as_ref().map(|n| n.as_ref()) {
@@ -335,6 +384,9 @@ impl Compiler<'_> {
                     };
 
                     if let (Some(start_i), Some(end_i)) = (start_val, end_val) {
+                        if self.fold_for_sum(&entry, variable, start_i, end_i, body) {
+                            return;
+                        }
                         // Use single-opcode FOR_NUMBER_LOOP (like Luau's FORNLOOP)
                         // Runtime expects: a = (var_slot << 16) | start_wide_idx, b = end_wide_idx
                         let var = self.local(variable);
@@ -353,6 +405,9 @@ impl Compiler<'_> {
                                 end_wide as u16,
                                 exit_wide as u8,
                             ));
+                            // `continue` re-enters the header, which advances the
+                            // counter and re-tests it.
+                            self.begin_loop(loop_start);
                             for s in body {
                                 self.node(s);
                             }
@@ -360,6 +415,7 @@ impl Compiler<'_> {
                             self.emit(Instr::a1(OP_JUMP, loop_start));
                             let exit_ip = self.ip();
                             self.wide[exit_wide as usize] = exit_ip as i64;
+                            self.end_loop(exit_ip);
                         } else {
                             // Overflow: fall through to FOR_RANGE_START/NEXT path below
                         }
@@ -381,12 +437,14 @@ impl Compiler<'_> {
                         self.emit(Instr::a1(OP_FOR_RANGE_NEXT, 0));
                         let var = self.local(variable);
                         self.emit(Instr::a1(OP_STORE_LOCAL, var));
+                        self.begin_loop(start_ip);
                         for s in body {
                             self.node(s);
                         }
                         self.emit(Instr::a1(OP_JUMP, start_ip));
                         let end = self.ip();
                         self.patch_jump(next, end);
+                        self.end_loop(end);
                     }
                 } else {
                     self.node(iterable);
@@ -396,18 +454,24 @@ impl Compiler<'_> {
                     self.emit(Instr::a1(OP_FOR_ITER_NEXT, 0));
                     let var = self.local(variable);
                     self.emit(Instr::a1(OP_STORE_LOCAL, var));
+                    self.begin_loop(start_ip);
                     for s in body {
                         self.node(s);
                     }
                     self.emit(Instr::a1(OP_JUMP, start_ip));
                     let end = self.ip();
                     self.patch_jump(next, end);
+                    self.end_loop(end);
                 }
             }
 
             AstNode::While {
                 condition, body, ..
             } => {
+                // The body runs repeatedly, so only values known before the loop
+                // describe the first iteration. The fold consumes them; nothing
+                // is known inside the body.
+                let entry = core::mem::take(&mut self.const_locals);
                 // Try to fuse: while $i < N { ... } â†’ OP_WHILE_LT_INT
                 // Or: while $a < $b { ... } â†’ OP_WHILE_LT_LOCAL
                 match condition.as_ref() {
@@ -424,6 +488,9 @@ impl Compiler<'_> {
                             if let AstNode::Int { value: limit, .. } = right.as_ref()
                                 && (0..=i64::from(u16::MAX)).contains(limit)
                             {
+                                if self.fold_while_sum(&entry, left_name, *limit, body) {
+                                    return;
+                                }
                                 let slot = self.local(left_name);
                                 let exit_wide = self.wide(0);
                                 let loop_start = self.ip();
@@ -433,16 +500,21 @@ impl Compiler<'_> {
                                     *limit as u16,
                                     exit_wide as u8,
                                 ));
+                                self.begin_loop(loop_start);
                                 for s in body {
                                     self.node(s);
                                 }
                                 self.emit(Instr::a1(OP_JUMP, loop_start));
                                 let exit_ip = self.ip();
                                 self.wide[exit_wide as usize] = exit_ip as i64;
+                                self.end_loop(exit_ip);
                                 return;
                             } else if let AstNode::Int { value: limit, .. } = right.as_ref() {
                                 // Limits above `u16::MAX` still fuse: the limit
                                 // moves into `wide_operands` (operand `b`).
+                                if self.fold_while_sum(&entry, left_name, *limit, body) {
+                                    return;
+                                }
                                 let slot = self.local(left_name);
                                 let limit_wide = self.wide(*limit);
                                 let exit_wide = self.wide(0);
@@ -456,12 +528,14 @@ impl Compiler<'_> {
                                         limit_idx,
                                         exit_idx,
                                     ));
+                                    self.begin_loop(loop_start);
                                     for s in body {
                                         self.node(s);
                                     }
                                     self.emit(Instr::a1(OP_JUMP, loop_start));
                                     let exit_ip = self.ip();
                                     self.wide[exit_wide as usize] = exit_ip as i64;
+                                    self.end_loop(exit_ip);
                                     return;
                                 }
                             } else if let AstNode::Ident {
@@ -478,12 +552,14 @@ impl Compiler<'_> {
                                     right_slot as u16,
                                     exit_wide as u8,
                                 ));
+                                self.begin_loop(loop_start);
                                 for s in body {
                                     self.node(s);
                                 }
                                 self.emit(Instr::a1(OP_JUMP, loop_start));
                                 let exit_ip = self.ip();
                                 self.wide[exit_wide as usize] = exit_ip as i64;
+                                self.end_loop(exit_ip);
                                 return;
                             }
                         }
@@ -496,12 +572,14 @@ impl Compiler<'_> {
                 self.node(condition);
                 let j = self.ip();
                 self.emit(Instr::a1(OP_JUMP_IF_FALSE, 0));
+                self.begin_loop(start);
                 for s in body {
                     self.node(s);
                 }
                 self.emit(Instr::a1(OP_JUMP, start));
                 let end = self.ip();
                 self.patch_jump(j, end);
+                self.end_loop(end);
             }
 
             AstNode::FunctionDef {

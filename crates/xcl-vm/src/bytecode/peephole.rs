@@ -3,13 +3,10 @@
 //! Runs after compilation to catch patterns that AST-level fusion misses.
 //! Uses fixed-point iteration so cascading patterns (e.g., identity ? NOP ? eliminate) are caught.
 
-
 // `alloc` re-exports needed by `no_std` builds (std prelude provides them).
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use alloc::{
-    vec::Vec,
-};
+use alloc::vec::Vec;
 
 use super::instr::Instr;
 use super::opcodes::*;
@@ -27,7 +24,7 @@ fn is_wide_exit_jump(op: u8) -> bool {
 
 /// Drain instructions in `range` and adjust all jump targets after `range.start()`.
 #[inline]
-fn drain_and_patch(
+pub(crate) fn drain_and_patch(
     code: &mut Vec<Instr>,
     wide: &mut [i64],
     range: core::ops::RangeInclusive<usize>,
@@ -55,7 +52,7 @@ fn drain_and_patch(
 }
 
 /// Collect all instruction indices that are jump targets.
-fn collect_jump_targets(code: &[Instr], wide: &[i64]) -> crate::HashSet<usize> {
+pub(crate) fn collect_jump_targets(code: &[Instr], wide: &[i64]) -> crate::HashSet<usize> {
     let mut targets = crate::HashSet::new();
     for instr in code {
         let op = instr.op();
@@ -75,12 +72,7 @@ fn collect_jump_targets(code: &[Instr], wide: &[i64]) -> crate::HashSet<usize> {
 }
 
 /// LOAD_LOCAL a; PUSH_INT 1; ADD/SUB; STORE_LOCAL a -> INC_LOCAL/DEC_LOCAL a
-fn try_fuse_inc_dec(
-    code: &mut Vec<Instr>,
-    wide: &mut [i64],
-    i: usize,
-    instr: Instr,
-) -> bool {
+fn try_fuse_inc_dec(code: &mut Vec<Instr>, wide: &mut [i64], i: usize, instr: Instr) -> bool {
     if instr.op() != OP_LOAD_LOCAL || code.len() < i + 4 {
         return false;
     }
@@ -128,10 +120,7 @@ fn try_fuse_const_store(
     ) {
         return false;
     }
-    if code.len() < i + 2
-        || jump_targets.contains(&i)
-        || jump_targets.contains(&(i + 1))
-    {
+    if code.len() < i + 2 || jump_targets.contains(&i) || jump_targets.contains(&(i + 1)) {
         return false;
     }
     if i > 0 && code[i - 1].op() == OP_JUMP {
@@ -150,12 +139,15 @@ fn try_fuse_const_store(
             }
             (v as u16, 0)
         }
-        OP_PUSH_FLOAT | OP_PUSH_STR | OP_PUSH_INT_WIDE => (instr.a() as u16, match op {
-            OP_PUSH_FLOAT => 1,
-            OP_PUSH_STR => 2,
-            OP_PUSH_INT_WIDE => 6,
-            _ => 0,
-        }),
+        OP_PUSH_FLOAT | OP_PUSH_STR | OP_PUSH_INT_WIDE => (
+            instr.a() as u16,
+            match op {
+                OP_PUSH_FLOAT => 1,
+                OP_PUSH_STR => 2,
+                OP_PUSH_INT_WIDE => 6,
+                _ => 0,
+            },
+        ),
         OP_PUSH_NIL => (0, 3),
         OP_PUSH_TRUE => (0, 4),
         OP_PUSH_FALSE => (0, 5),
@@ -176,12 +168,7 @@ fn try_fuse_const_store(
 /// 5. 2^n * -> shift
 /// 6. 2^n / -> shift
 /// 7. 2^n % -> bitwise AND
-fn try_fuse_push_int_op(
-    code: &mut Vec<Instr>,
-    wide: &mut [i64],
-    i: usize,
-    instr: Instr,
-) -> bool {
+fn try_fuse_push_int_op(code: &mut Vec<Instr>, wide: &mut [i64], i: usize, instr: Instr) -> bool {
     if instr.op() != OP_PUSH_INT || code.len() < i + 2 {
         return false;
     }
@@ -482,16 +469,11 @@ fn peephole_at(
         }
     }
 
-    // Pattern 24: Redundant jump elimination — JUMP a; JUMP b → JUMP b
-    // Two consecutive jumps: the first is unreachable after the second, keep only the second
-    if op == OP_JUMP && code.len() >= i + 2 {
-        let next = code[i + 1];
-        if next.op() == OP_JUMP {
-            code[i] = next;
-            drain_and_patch(code, wide, i + 1..=i + 1);
-            return true;
-        }
-    }
+    // Two consecutive jumps are NOT mergeable: the first is reached by
+    // fall-through and the second may be another branch's target. A `break` at
+    // the end of a loop body produces exactly this shape (`JUMP exit; JUMP
+    // header`), and collapsing them into the back jump turns the break into an
+    // infinite loop. Pattern 24 used to do that; it is gone.
 
     // Pattern 25: JUMP_IF_FALSE a; JUMP b where target=a → JUMP b
     // If JUMP_IF_FALSE falls through to an unconditional JUMP, and the false target is the same
@@ -638,5 +620,61 @@ fn peephole_at(
         }
     }
 
+    false
+}
+
+/// `LOAD_LOCAL a; JUMP_IF_FALSE t` → `JUMP_IF_FALSE_LOCAL t, a`.
+///
+/// That pair is the shape of every `if $flag` and `while $flag`, and it is what
+/// loop-invariant hoisting leaves behind when it moves a condition into a
+/// local. Fusing it removes one dispatch per check.
+///
+/// Runs after the optimizer's loop passes rather than in the main peephole
+/// sweep, because hoisting is what creates most of the occurrences.
+pub(crate) fn fuse_local_branch(code: &mut Vec<Instr>, wide: &mut [i64]) -> bool {
+    let targets = collect_jump_targets(code, wide);
+    for i in 0..code.len().saturating_sub(1) {
+        // The load keeps its index, so a branch into it still lands on the fused
+        // instruction; a branch into the jump would skip the condition load.
+        if targets.contains(&(i + 1)) {
+            continue;
+        }
+        let load = code[i];
+        if load.op() != OP_LOAD_LOCAL || code[i + 1].op() != OP_JUMP_IF_FALSE {
+            continue;
+        }
+        let Ok(slot) = u16::try_from(load.a()) else {
+            continue;
+        };
+        code[i] = Instr::make(OP_JUMP_IF_FALSE_LOCAL, code[i + 1].a(), slot, 0);
+        drain_and_patch(code, wide, i + 1..=i + 1);
+        return true;
+    }
+    false
+}
+
+/// `JUMP_IF_FALSE_LOCAL t, c; INC_LOCAL x` with `t == i + 2` → `INC_IF_LOCAL t, c, x`.
+///
+/// That is `if $flag { $count = $count + 1 }`, the counting idiom. The branch
+/// still skips the increment when the flag is falsy; only the dispatch between
+/// them disappears.
+pub(crate) fn fuse_conditional_increment(code: &mut Vec<Instr>, wide: &mut [i64]) -> bool {
+    for i in 0..code.len().saturating_sub(1) {
+        let branch = code[i];
+        if branch.op() != OP_JUMP_IF_FALSE_LOCAL || code[i + 1].op() != OP_INC_LOCAL {
+            continue;
+        }
+        // The branch must skip exactly the increment: any other target is a
+        // different shape (a multi-statement then-block).
+        if branch.a() as usize != i + 2 {
+            continue;
+        }
+        let Ok(slot) = u8::try_from(code[i + 1].a()) else {
+            continue;
+        };
+        code[i] = Instr::make(OP_INC_IF_LOCAL, branch.a(), branch.b(), slot);
+        drain_and_patch(code, wide, i + 1..=i + 1);
+        return true;
+    }
     false
 }

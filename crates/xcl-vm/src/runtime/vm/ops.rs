@@ -2388,6 +2388,7 @@ mod core_ops {
     }
 
     mod fused_int {
+        use super::helpers::*;
         use super::*;
 
         /// Increment local by 1. Operand `a` = slot.
@@ -2398,20 +2399,7 @@ mod core_ops {
             _top: usize,
             instr: Instr,
         ) -> OpcodeResult {
-            use crate::runtime::value::TAG_INT;
-            let l = &locals;
-            let idx = instr.a() as usize;
-            let v = unsafe { *l.get_unchecked(idx) };
-            if v.tag() == TAG_INT {
-                let r = v.as_i48().checked_add(1).unwrap_or(v.as_i48());
-                unsafe {
-                    *l.get_unchecked_mut(idx) = Value::from_i48(r);
-                }
-            } else {
-                unsafe {
-                    *l.get_unchecked_mut(idx) = v.add(Value::from_i48(1), &vm.arena);
-                }
-            }
+            inc_one(&locals, instr.a() as usize, &vm.arena);
             OpcodeResult::Next
         }
 
@@ -2599,7 +2587,98 @@ mod core_ops {
     }
 
     mod fused_branch {
+        use super::helpers::*;
         use super::*;
+
+        /// Increments local `c` when local `b` is truthy, else jumps to `a`.
+        ///
+        /// `if $flag { $count = $count + 1 }` is the counting idiom; fusing the
+        /// branch and the increment removes a dispatch from every check and
+        /// keeps `INC_LOCAL`'s integer fast path.
+        #[opcode(code = 54, arity = 0, stack = "0 -> 0", branch = "abs", reads = "bc", writes = "c")]
+        fn op_inc_if_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let cond = unsafe { *locals.get_unchecked(instr.b() as usize) };
+            if !cond.is_truthy() {
+                return OpcodeResult::Jump(instr.a());
+            }
+            inc_one(&locals, instr.c() as usize, &vm.arena);
+            OpcodeResult::Next
+        }
+
+        /// Jumps to `a` when local `b` is falsy.
+        ///
+        /// Fuses `LOAD_LOCAL x; JUMP_IF_FALSE`, which is what every `if $flag`
+        /// and `while $flag` compiles to. The condition stays a local, so the
+        /// branch costs one dispatch instead of two.
+        #[opcode(code = 51, arity = 0, stack = "0 -> 0", branch = "abs", reads = "b")]
+        fn op_jump_if_false_local(
+            _vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let v = unsafe { *locals.get_unchecked(instr.b() as usize) };
+            if v.is_truthy() {
+                OpcodeResult::Next
+            } else {
+                OpcodeResult::Jump(instr.a())
+            }
+        }
+
+        /// Latch of a rotated counted loop: increment, test, jump back.
+        ///
+        /// The compiler's loop rotation turns
+        /// `while $i < N { body; $i = $i + 1 }` into an entry test plus this
+        /// instruction, so after the first iteration the body no longer pays a
+        /// separate test or an unconditional back jump.
+        ///
+        /// Operand `a` = body start (the jump target while the counter stays
+        /// below the limit), `b` = limit, `c` = the counter's local slot.
+        #[opcode(
+            code = 49,
+            arity = 0,
+            stack = "0 -> 0",
+            branch = "abs",
+            reads = "c",
+            writes = "c"
+        )]
+        fn op_inc_lt_int(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let limit = instr.b() as i32 as i64;
+            inc_below(&locals, instr.c() as usize, limit, instr.a(), &vm.arena)
+        }
+
+        /// [`OP_INC_LT_INT`](op_inc_lt_int) with the limit in the wide-operand
+        /// table, for counters above `i16::MAX`.
+        ///
+        /// Operand `b` = wide index of the limit.
+        #[opcode(
+            code = 50,
+            arity = 0,
+            stack = "0 -> 0",
+            branch = "abs",
+            reads = "c",
+            writes = "c"
+        )]
+        fn op_inc_lt_int_wide(
+            vm: &mut VM,
+            locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            // SAFETY: frame at `top` is active during dispatch.
+            let limit = vm.frames[top].code().wide_operands[instr.b() as usize];
+            inc_below(&locals, instr.c() as usize, limit, instr.a(), &vm.arena)
+        }
 
         /// If local[a] < b: fall through, else jump to the wide-operand target.
         ///
@@ -2884,6 +2963,47 @@ mod core_ops {
     /// Shared helpers for the opcode groups below.
     mod helpers {
         use super::*;
+
+        /// Adds one to local `slot`, keeping the integer fast path, and returns
+        /// the new value.
+        pub(super) fn inc_one(locals: &LocalSlice, slot: usize, arena: &bumpalo::Bump) -> Value {
+            use crate::runtime::value::TAG_INT;
+            let v = unsafe { *locals.get_unchecked(slot) };
+            let next = if v.tag() == TAG_INT {
+                Value::from_i48(v.as_i48().checked_add(1).unwrap_or(v.as_i48()))
+            } else {
+                v.add(Value::from_i48(1), arena)
+            };
+            unsafe {
+                *locals.get_unchecked_mut(slot) = next;
+            }
+            next
+        }
+
+        /// Increments `slot` and jumps to `target` while it stays below `limit`.
+        ///
+        /// Shared by the two `INC_LT` forms so the increment semantics (checked
+        /// add for integers, `add` for every other value) are written once.
+        pub(super) fn inc_below(
+            locals: &LocalSlice,
+            slot: usize,
+            limit: i64,
+            target: u32,
+            arena: &bumpalo::Bump,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let next = inc_one(locals, slot, arena);
+            let below = if next.tag() == TAG_INT {
+                next.as_i48() < limit
+            } else {
+                next.as_int() < limit
+            };
+            if below {
+                OpcodeResult::Jump(target)
+            } else {
+                OpcodeResult::Next
+            }
+        }
 
         /// Does any registered record with this name fit the value's shape?
         ///

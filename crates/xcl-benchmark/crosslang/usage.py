@@ -24,7 +24,7 @@ ratios between languages are unaffected by the calibration.
     cargo build --release -p xcl-cli --features jit
     cp target/release/xcl.exe target/release/xcl-jit.exe
     cargo build --release -p xcl-cli
-    python scripts/crosslang/usage.py
+    python crates/xcl-benchmark/crosslang/usage.py
 
 `CROSSLANG_REPS` controls the measured repetitions (default 5; one extra run
 per language/workload is used as warm-up), exactly like `run.py`.
@@ -41,7 +41,9 @@ import time
 from ctypes import wintypes
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+# Repository root: crosslang -> xcl-benchmark -> crates -> <repo>.
+ROOT = Path(__file__).resolve().parents[3]
+RUNNERS = Path(__file__).resolve().parents[1] / "runners"
 HERE = Path(__file__).resolve().parent
 REPS = int(os.environ.get("CROSSLANG_REPS", "5"))
 TIMEOUT = 600
@@ -53,8 +55,8 @@ def exe(path: Path) -> Path:
 
 XCL = exe(ROOT / "target/release/xcl")
 XCL_JIT = exe(ROOT / "target/release/xcl-jit")
-LUAU = exe(ROOT / "tools/luau-runner/target/release/luau-runner")
-LUAJIT = exe(ROOT / "tools/luajit-runner/target/release/luajit-runner")
+LUAU = exe(RUNNERS / "luau-runner/target/release/luau-runner")
+LUAJIT = exe(RUNNERS / "luajit-runner/target/release/luajit-runner")
 
 LANGS = [("xcl", [str(XCL)], "xcl", ".xcl")]
 if XCL_JIT.exists():
@@ -73,6 +75,7 @@ WORKLOADS = [
     "hanoi",
     "map_read",
     "array_sum",
+    "native_call",
 ]
 
 # ── Windows process counters ──────────────────────────────────────────────

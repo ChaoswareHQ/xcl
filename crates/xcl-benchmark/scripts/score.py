@@ -2,13 +2,13 @@
 """Print the XCL-vs-Luau scoreboard from criterion's saved baselines.
 
 Usage:
-    python scripts/score.py [baseline]
+    python crates/xcl-benchmark/scripts/score.py [baseline]
 
 `baseline` defaults to criterion's "new" baseline. Run the suites first, e.g.
 
     cargo bench -p xcl-vm --bench vm_core --bench vm_data \
         --bench vm_algorithms --bench vm_games -- --save-baseline full-after
-    python scripts/score.py full-after
+    python crates/xcl-benchmark/scripts/score.py full-after
 """
 
 import glob
@@ -17,7 +17,8 @@ import os
 import sys
 
 BASELINE = sys.argv[1] if len(sys.argv) > 1 else "new"
-ROOT = "target/criterion"
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.join(HERE, "..", "..", "..", "target", "criterion")
 
 
 def mean_ns(path):

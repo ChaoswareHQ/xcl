@@ -30,6 +30,8 @@ pub struct HotNative {
     pub method: &'static str,
     /// The registered implementation.
     pub call: BuiltinImpl,
+    /// Capabilities declared by the registering macro.
+    pub caps: crate::runtime::primitives::CapSet,
 }
 
 impl HotNative {
@@ -51,6 +53,8 @@ impl HotNative {
 #[derive(Default, Clone)]
 pub struct HotTable {
     slots: HashMap<Box<str>, u16>,
+    /// Capabilities per slot, indexed like `VM::hot_natives`.
+    caps: Vec<crate::runtime::primitives::CapSet>,
 }
 
 impl HotTable {
@@ -58,6 +62,18 @@ impl HotTable {
     #[inline]
     pub fn slot(&self, name: &str) -> Option<u16> {
         self.slots.get(name).copied()
+    }
+
+    /// Whether the native in `slot` is declared pure and deterministic.
+    ///
+    /// That is the licence for the optimizer to evaluate it once instead of
+    /// once per loop iteration: the result must not depend on VM state and
+    /// must not be observable. `print` never qualifies; `result.is_ok` does.
+    pub fn is_pure(&self, slot: u16) -> bool {
+        use crate::runtime::primitives::Cap;
+        self.caps
+            .get(slot as usize)
+            .is_some_and(|caps| caps.has(Cap::Pure) && caps.has(Cap::Deterministic))
     }
 
     /// Number of bound spellings.
@@ -162,10 +178,12 @@ impl VM {
             for name in names {
                 table.bind(name, slot);
             }
+            table.caps.push(entry.caps);
             natives.push(HotNative {
                 domain: entry.domain,
                 method: entry.method,
                 call,
+                caps: entry.caps,
             });
         }
         self.hot_table = table;

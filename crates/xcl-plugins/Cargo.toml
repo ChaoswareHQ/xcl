@@ -34,3 +34,7 @@ harness = false
 [[bench]]
 name = "luau_comparison"
 harness = false
+
+[[bench]]
+name = "native_call"
+harness = false

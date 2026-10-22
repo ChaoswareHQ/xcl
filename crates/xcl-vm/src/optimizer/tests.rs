@@ -10,7 +10,8 @@ use crate::runtime::vm::ops::consts::{
     OP_DEC_LOCAL, OP_DIV_FLOAT_LOCAL, OP_DIV_LOCAL_LOCAL, OP_DIV_LOCAL_LOCAL_STORE,
     OP_DIV_LOCAL_STORE, OP_FOR_NUMBER_LOOP, OP_GET_FIELD_LOCAL_STORE,
     OP_GET_INDEX_LOCAL_LOCAL_STORE, OP_HALT, OP_IF_EQ_INT, OP_IF_LT_INT, OP_INC_LOCAL,
-    OP_INC_LOCAL_INT, OP_JUMP, OP_JUMP_IF_FALSE, OP_LOAD_CONST_LOCAL, OP_LOAD_GLOBAL,
+    OP_INC_LOCAL_INT, OP_INC_LT_INT, OP_INC_LT_INT_WIDE, OP_JUMP, OP_JUMP_IF_FALSE,
+    OP_JUMP_IF_FALSE_LOCAL, OP_INC_IF_LOCAL, OP_LOAD_CONST_LOCAL, OP_LOAD_GLOBAL,
     OP_LOAD_LOCAL, OP_LOAD_LOCAL_LOAD_LOCAL, OP_LOAD_LOCAL_PUSH_INT, OP_LOAD_LOCAL_STORE_LOCAL,
     OP_LT_LOCAL_LOCAL, OP_MOD_EQ_INT, OP_MOD_LOCAL_LOCAL_STORE, OP_MUL_FLOAT_LOCAL,
     OP_MUL_INT_LOCAL, OP_MUL_LOCAL_LOCAL, OP_MUL_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_STORE,
@@ -340,6 +341,11 @@ fn legacy_dataflow_use(op: u8, instr: Instr) -> Vec<u32> {
         | OP_SUB_FLOAT_LOCAL | OP_MUL_FLOAT_LOCAL | OP_DIV_FLOAT_LOCAL | OP_INC_LOCAL
         | OP_DEC_LOCAL | OP_INC_LOCAL_INT => vec![instr.a()],
         OP_ADD_INT_STORE_LOCAL => vec![instr.b() as u32],
+        // INC_LT_*: the counter lives in `c`
+        OP_INC_LT_INT | OP_INC_LT_INT_WIDE => vec![instr.c() as u32],
+        // JUMP_IF_FALSE_LOCAL: reads the condition in `b`
+        OP_JUMP_IF_FALSE_LOCAL => vec![instr.b() as u32],
+        OP_INC_IF_LOCAL => vec![instr.b() as u32, instr.c() as u32],
         // LOAD_LOCAL_STORE_LOCAL: reads slot a (src), writes slot b (dest)
         OP_LOAD_LOCAL_STORE_LOCAL => vec![instr.a()],
         OP_FOR_NUMBER_LOOP => vec![instr.a() >> 16],
@@ -369,6 +375,8 @@ fn legacy_dataflow_def(op: u8, instr: Instr) -> Vec<u32> {
         OP_ARRAY_PUSH_LOCAL => vec![instr.a()],
         OP_ADD_INT_STORE_LOCAL => vec![instr.a()],
         OP_FOR_NUMBER_LOOP => vec![instr.a() >> 16],
+        OP_INC_LT_INT | OP_INC_LT_INT_WIDE => vec![instr.c() as u32],
+        OP_INC_IF_LOCAL => vec![instr.c() as u32],
         _ => Vec::new(),
     }
 }
@@ -499,6 +507,8 @@ fn legacy_cse_defined_slots(op: u8, instr: Instr) -> Vec<u32> {
         // ADD_INT_STORE_LOCAL: writes slot a (dest)
         OP_ADD_INT_STORE_LOCAL => vec![instr.a()],
         OP_FOR_NUMBER_LOOP => vec![instr.a() >> 16],
+        OP_INC_LT_INT | OP_INC_LT_INT_WIDE => vec![instr.c() as u32],
+        OP_INC_IF_LOCAL => vec![instr.c() as u32],
         _ => Vec::new(),
     }
 }
@@ -565,6 +575,11 @@ fn legacy_dead_store_reads(op: u8, instr: Instr) -> Vec<u32> {
         OP_ADD_INT_STORE_LOCAL => vec![instr.b() as u32],
         // MOD_EQ_INT: reads slot a
         OP_MOD_EQ_INT => vec![instr.a()],
+        OP_INC_IF_LOCAL => vec![instr.b() as u32, instr.c() as u32],
+        // INC_LT_*: the counter lives in `c`
+        OP_INC_LT_INT | OP_INC_LT_INT_WIDE => vec![instr.c() as u32],
+        // JUMP_IF_FALSE_LOCAL: reads the condition in `b`
+        OP_JUMP_IF_FALSE_LOCAL => vec![instr.b() as u32],
         _ => Vec::new(),
     }
 }
@@ -591,3 +606,4 @@ fn slot_metadata_matches_legacy_dead_store() {
     // OP_FOR_NUMBER_LOOP special case
     assert_eq!(meta::reads(OP_FOR_NUMBER_LOOP), 0);
 }
+

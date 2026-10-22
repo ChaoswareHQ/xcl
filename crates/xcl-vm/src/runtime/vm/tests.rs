@@ -678,7 +678,9 @@ fn vm_is_send() {
 #[test]
 fn jit_compiles_integer_loops_and_matches_an_oracle() {
     // Counting loop: the JIT must produce the same value as the oracle.
-    let src = "$i = 0\n$s = 0\nwhile $i < 1000 {\n    $s = $s + $i\n    $i = $i + 1\n}\n$s";
+    // `$s` starts from the argument count so the counted loop is not folded
+    // away before the JIT sees it.
+    let src = "$s = $#\n$i = 0\nwhile $i < 1000 {\n    $s = $s + $i\n    $i = $i + 1\n}\n$s";
     let tokens = lex(src, "<test>");
     let ast = parse(&tokens, src);
     let bc = compile(&ast);
@@ -719,7 +721,7 @@ fn jit_compiles_integer_loops_and_matches_an_oracle() {
 #[cfg(feature = "jit")]
 #[test]
 fn jit_compiles_every_loop_in_a_unit() {
-    let src = "$a = 0\n$i = 0\nwhile $i < 100 {\n    $a = $a + $i\n    $i = $i + 1\n}\n$b = 0\n$j = 0\nwhile $j < 100 {\n    $b = $b + 1\n    $j = $j + 1\n}\n$a + $b";
+    let src = "$a = $#\n$i = 0\nwhile $i < 100 {\n    $a = $a + $i\n    $i = $i + 1\n}\n$b = $#\n$j = 0\nwhile $j < 100 {\n    $b = $b + 1\n    $j = $j + 1\n}\n$a + $b";
     let tokens = lex(src, "<test>");
     let ast = parse(&tokens, src);
     let bc = compile(&ast);
@@ -1071,4 +1073,261 @@ fn an_ambiguous_hot_name_is_not_bound() {
     vm.register_natives(&DUPLICATES);
     let bc = compile_hot_for("dup", &vm);
     assert_eq!(vm.run(&bc).as_i48(), 7);
+}
+
+// ── Loop rotation and hot-call hoisting ──
+
+/// Compiles and runs `src`, returning both the result and the bytecode.
+fn eval_with_code(src: &str) -> (Value, crate::Bytecode) {
+    let tokens = lex(src, "<test>");
+    let ast = parse(&tokens, src);
+    let bc = compile(&ast);
+    let mut vm = VM::new();
+    let result = vm.run(&bc);
+    core::mem::forget(vm);
+    (result, bc)
+}
+
+fn rotates(bc: &crate::Bytecode) -> bool {
+    bc.instructions.iter().any(|i| {
+        i.op() == crate::bytecode::OP_INC_LT_INT || i.op() == crate::bytecode::OP_INC_LT_INT_WIDE
+    })
+}
+
+#[test]
+fn a_counted_loop_is_rotated_and_still_counts() {
+    // `$s` starts from the argument count so the loop cannot be folded away;
+    // rotation and folding are independent passes.
+    let src = "$s = $#
+$i = 0
+while $i < 10 {
+  $s = $s + 2
+  $i = $i + 1
+}
+$s";
+    let (result, bc) = eval_with_code(src);
+    assert!(rotates(&bc), "the canonical counted loop must rotate");
+    assert_eq!(result.as_i48(), 20);
+}
+
+#[test]
+fn a_counted_sum_loop_is_folded_away() {
+    let src = "$i = 0
+$s = 0
+while $i < 10000 {
+  $s = $s + $i
+  $i = $i + 1
+}
+$s * 10 + $i";
+    let (result, bc) = eval_with_code(src);
+    assert!(
+        bc.instructions
+            .iter()
+            .all(|i| i.op() != OP_WHILE_LT_INT && i.op() != OP_WHILE_LT_INT_WIDE),
+        "a proven counted loop must not survive"
+    );
+    assert_eq!(result.as_i48(), 49_995_000 * 10 + 10_000);
+}
+
+#[test]
+fn a_range_sum_is_folded_away() {
+    let src = "$s = 0
+for $i in 0..10000 {
+  $s = $s + $i
+}
+$s + $i";
+    let (result, bc) = eval_with_code(src);
+    assert!(bc.instructions.iter().all(|i| i.op() != OP_FOR_NUMBER_LOOP));
+    assert_eq!(result.as_i48(), 49_995_000 + 10_000);
+}
+
+#[test]
+fn several_accumulators_and_constant_terms_fold() {
+    let src = "$i = 0
+$a = 0
+$b = 0
+while $i < 5 {
+  $a = $a + $i
+  $b = $b + 3
+  $a = $a + 1
+  $i = $i + 1
+}
+$a * 100 + $b";
+    let (result, _bc) = eval_with_code(src);
+    // a = sum(0..4) + 5 = 10 + 5 = 15, b = 3 * 5 = 15
+    assert_eq!(result.as_i48(), 1515);
+}
+
+#[test]
+fn a_multiplicative_body_is_not_folded() {
+    let src = "$i = 0
+$s = 1
+while $i < 5 {
+  $s = $s * 2
+  $i = $i + 1
+}
+$s";
+    let (result, _bc) = eval_with_code(src);
+    assert_eq!(result.as_i48(), 32);
+}
+
+#[test]
+fn a_fold_that_would_overflow_the_48_bit_range_is_skipped() {
+    // The accumulator starts near `i48::MAX`, so the total does not fit and the
+    // loop must survive; the counter still reaches its bound.
+    let src = "$s = 140737488355000
+$i = 0
+while $i < 100 {
+  $s = $s + $i
+  $i = $i + 1
+}
+$i";
+    let (result, bc) = eval_with_code(src);
+    assert!(
+        bc.instructions
+            .iter()
+            .any(|i| i.op() == OP_WHILE_LT_INT),
+        "the loop must stay when its total does not fit"
+    );
+    assert_eq!(result.as_i48(), 100);
+}
+
+#[test]
+fn a_fold_keeps_the_counter_and_accumulator_values() {
+    let src = "$i = 3
+$s = 0
+while $i < 8 {
+  $s = $s + $i
+  $i = $i + 1
+}
+$s * 100 + $i";
+    let (result, _bc) = eval_with_code(src);
+    assert_eq!(result.as_i48(), (3 + 4 + 5 + 6 + 7) * 100 + 8);
+}
+
+#[test]
+fn a_loop_with_a_local_limit_is_not_rotated() {
+    // Rotation needs the compile-time limit of `WHILE_LT_INT`; a limit
+    // that lives in a local compiles to `WHILE_LT_LOCAL` and keeps its shape.
+    let src = "$n = 4
+$i = 0
+$s = 0
+while $i < $n {
+  $s = $s + 2
+  $i = $i + 1
+}
+$s";
+    let (result, bc) = eval_with_code(src);
+    assert!(!rotates(&bc));
+    assert_eq!(result.as_i48(), 8);
+}
+
+#[test]
+fn nested_counted_loops_both_rotate() {
+    let src = "$i = 0
+$s = 0
+while $i < 4 {
+  $j = 0
+  while $j < 3 {
+    $s = $s + 1
+    $j = $j + 1
+  }
+  $i = $i + 1
+}
+$s";
+    let (result, bc) = eval_with_code(src);
+    assert!(rotates(&bc), "the inner counted loop must rotate");
+    assert_eq!(result.as_i48(), 12);
+}
+
+#[test]
+fn a_counter_written_in_the_body_blocks_rotation() {
+    let src = "$i = 0\n$s = 0\nwhile $i < 5 {\n  $s = $s + 1\n  if $s == 3 { $i = $i + 2 }\n  $i = $i + 1\n}\n$s";
+    let (result, bc) = eval_with_code(src);
+    assert!(!rotates(&bc), "a body that writes the counter must stay as written");
+    assert_eq!(result.as_i48(), 3);
+}
+
+#[test]
+fn a_descending_loop_keeps_its_shape() {
+    let src = "$i = 4
+$s = 0
+while $i > 0 {
+  $s = $s + $i
+  $i = $i - 1
+}
+$s";
+    let (result, bc) = eval_with_code(src);
+    assert!(!rotates(&bc), "rotation covers ascending `$i < N` loops only");
+    assert_eq!(result.as_i48(), 10);
+}
+
+#[test]
+fn a_zero_trip_rotated_loop_runs_zero_times() {
+    let src = "$i = 5\n$s = 0\nwhile $i < 5 {\n  $s = $s + 1\n  $i = $i + 1\n}\n$s";
+    let (result, bc) = eval_with_code(src);
+    assert!(rotates(&bc));
+    assert_eq!(result.as_i48(), 0);
+}
+
+// ── break / continue ──
+
+#[test]
+fn break_leaves_a_fused_while() {
+    let src = "$i = 0\n$s = 0\nwhile $i < 100 {\n  $s = $s + 1\n  if $s == 7 { break }\n  $i = $i + 1\n}\n$s";
+    let (result, _bc) = eval_with_code(src);
+    assert_eq!(result.as_i48(), 7);
+}
+
+#[test]
+fn break_leaves_a_generic_while() {
+    // A condition that is not a comparison keeps the generic loop shape.
+    let src = "$s = 0\n$go = true\nwhile $go {\n  $s = $s + 1\n  if $s == 3 { break }\n}\n$s";
+    let (result, _bc) = eval_with_code(src);
+    assert_eq!(result.as_i48(), 3);
+}
+
+#[test]
+fn continue_skips_the_rest_of_the_body() {
+    let src = "$i = 0\n$s = 0\nwhile $i < 10 {\n  $i = $i + 1\n  if $i == 3 { continue }\n  $s = $s + 1\n}\n$i * 100 + $s";
+    let (result, _bc) = eval_with_code(src);
+    assert_eq!(result.as_i48(), 1009, "i == 10 and 9 counted iterations");
+}
+
+#[test]
+fn break_leaves_a_numeric_for() {
+    let src = "$s = 0\nfor $i in 0..10 {\n  if $i == 4 { break }\n  $s = $s + 1\n}\n$s";
+    let (result, _bc) = eval_with_code(src);
+    assert_eq!(result.as_i48(), 4);
+}
+
+#[test]
+fn continue_steps_a_numeric_for() {
+    let src = "$s = 0\nfor $i in 0..10 {\n  if $i % 2 == 0 { continue }\n  $s = $s + 1\n}\n$s";
+    let (result, _bc) = eval_with_code(src);
+    assert_eq!(result.as_i48(), 5, "1, 3, 5, 7, 9");
+}
+
+#[test]
+fn break_and_continue_belong_to_the_innermost_loop() {
+    let src = "$s = 0\nfor $i in 0..3 {\n  for $j in 0..10 {\n    if $j == 2 { break }\n    $s = $s + 1\n  }\n}\n$s";
+    let (result, _bc) = eval_with_code(src);
+    assert_eq!(result.as_i48(), 6, "two inner iterations per outer pass");
+}
+
+#[test]
+fn a_break_inside_a_lambda_does_not_leave_the_outer_loop() {
+    let src = "$s = 0\n$f = |$z| { break }\nwhile $s < 3 {\n  $s = $s + 1\n}\n$s";
+    let (result, _bc) = eval_with_code(src);
+    assert_eq!(result.as_i48(), 3);
+}
+
+#[test]
+fn a_continue_does_not_block_rotation() {
+    // `continue` jumps to the entry test, which rotation keeps, so the loop may
+    // still rotate; the skipped iteration must not advance the counter.
+    let src = "$i = 0\n$s = 0\n$k = 0\nwhile $i < 5 {\n  $k = $k + 1\n  if $k == 2 { continue }\n  $s = $s + 1\n  $i = $i + 1\n}\n$s";
+    let (result, bc) = eval_with_code(src);
+    assert!(rotates(&bc), "the latch is still the loop's last instruction");
+    assert_eq!(result.as_i48(), 5);
 }

@@ -3,17 +3,16 @@
 //! Identifies natural loops via back edges and hoists invariant instructions
 //! (like LOAD_GLOBAL) before loop entry.
 
-
 // `alloc` re-exports needed by `no_std` builds (std prelude provides them).
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use alloc::{
-    vec::Vec,
-};
+use alloc::{boxed::Box, format, vec::Vec};
 
 use crate::bytecode::Instr;
+use crate::bytecode::peephole::{collect_jump_targets, drain_and_patch};
 use crate::runtime::vm::ops::consts::{
-    OP_LOAD_GLOBAL, OP_NOP,
+    OP_CALL_HOT, OP_LOAD_GLOBAL, OP_LOAD_LOCAL, OP_NOP, OP_PUSH_FALSE, OP_PUSH_FLOAT, OP_PUSH_INT,
+    OP_PUSH_NIL, OP_PUSH_STR, OP_PUSH_TRUE, OP_STORE_LOCAL,
 };
 use crate::runtime::vm::ops::meta;
 
@@ -27,10 +26,31 @@ use alloc::collections::BTreeSet;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
-use super::dataflow::{build_basic_blocks, BasicBlock};
+use super::dataflow::{BasicBlock, build_basic_blocks, slot_indices};
+
+/// Upper bound on hoists per compilation unit.
+///
+/// Each hoist changes instruction indices, so the loop structure is recomputed
+/// afterwards. The bound keeps a loop-heavy program from turning the pass
+/// quadratic.
+const MAX_HOISTS: usize = 8;
+
+/// Is this instruction a single-push, invariant word?
+///
+/// These are the only argument producers the hoister accepts: a literal, or a
+/// read of a local the loop never writes.
+fn invariant_push(instr: Instr, written: &BTreeSet<u32>) -> bool {
+    match instr.op() {
+        OP_LOAD_LOCAL => !written.contains(&instr.a()),
+        OP_PUSH_NIL | OP_PUSH_TRUE | OP_PUSH_FALSE | OP_PUSH_INT | OP_PUSH_FLOAT | OP_PUSH_STR => {
+            true
+        }
+        _ => false,
+    }
+}
 
 /// Returns a list of loops, where each loop is a list of instruction indices in the loop body.
-fn detect_loops(code: &[Instr], blocks: &[BasicBlock]) -> Vec<Vec<usize>> {
+pub(super) fn detect_loops(code: &[Instr], blocks: &[BasicBlock]) -> Vec<Vec<usize>> {
     let len = code.len();
     if len == 0 {
         return Vec::new();
@@ -50,8 +70,14 @@ fn detect_loops(code: &[Instr], blocks: &[BasicBlock]) -> Vec<Vec<usize>> {
         }
     }
 
-    // Compute dominators using iterative algorithm
-    let mut dom: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); num_blocks];
+    // Compute dominators using iterative algorithm.
+    //
+    // Non-entry blocks start at the full block set and shrink to the fixpoint:
+    // each round intersects with `{b} ∪ ⋃ dom[p]`, so starting from the empty
+    // set would pin every block at `{}` and hide every loop.
+    let universe: BTreeSet<usize> = (0..num_blocks).collect();
+    let mut dom: Vec<BTreeSet<usize>> = vec![universe; num_blocks];
+    dom[0].clear();
     dom[0].insert(0); // Entry block dominates itself
 
     loop {
@@ -152,9 +178,7 @@ pub fn loop_invariant_code_motion(code: &mut Vec<Instr>, wide: &mut [i64]) {
 
     // Map instruction index to block index for quick lookup
     let instr_to_block: Vec<Option<usize>> = (0..code.len())
-        .map(|i| {
-            blocks.iter().position(|b| i >= b.start && i <= b.end)
-        })
+        .map(|i| blocks.iter().position(|b| i >= b.start && i <= b.end))
         .collect();
 
     for loop_instrs in &loops {
@@ -281,4 +305,147 @@ fn patch_jump_targets_insert(code: &mut [Instr], wide: &mut [i64], pos: usize, c
             _ => {}
         }
     }
+}
+
+/// Hoists pure native calls out of loops.
+///
+/// A hot call whose slot the VM declared `PURE | DETERMINISTIC` and whose
+/// arguments are loop-invariant produces the same value on every iteration.
+/// Moving it to the pre-header turns N calls into one; the body reads the
+/// saved result from a fresh local.
+///
+/// The pass is deliberately narrow:
+/// * only `OP_CALL_HOT` qualifies, so nothing that can run script code is
+///   reordered;
+/// * the argument words must be the `n` instructions immediately before the
+///   call, each a literal or a read of a local the loop never writes;
+/// * no branch may enter the argument window, and none may enter the loop
+///   header from outside, which keeps the jump patching valid.
+pub fn hoist_pure_calls(
+    code: &mut Vec<Instr>,
+    wide: &mut [i64],
+    locals: &mut Vec<Box<str>>,
+    is_pure: impl Fn(u16) -> bool,
+) {
+    // Most programs have no hot calls at all; skip the loop analysis entirely.
+    if !code.iter().any(|i| i.op() == OP_CALL_HOT && is_pure(i.b())) {
+        return;
+    }
+    for _ in 0..MAX_HOISTS {
+        if !hoist_first(code, wide, locals, &is_pure) {
+            break;
+        }
+    }
+}
+
+/// Performs one hoist, or reports that nothing qualified.
+fn hoist_first(
+    code: &mut Vec<Instr>,
+    wide: &mut [i64],
+    locals: &mut Vec<Box<str>>,
+    is_pure: &impl Fn(u16) -> bool,
+) -> bool {
+    let blocks = build_basic_blocks(code, wide);
+    let loops = detect_loops(code, &blocks);
+    let targets = collect_jump_targets(code, wide);
+
+    for loop_instrs in &loops {
+        let in_loop: BTreeSet<usize> = loop_instrs.iter().copied().collect();
+        let Some(&header) = loop_instrs.iter().min() else {
+            continue;
+        };
+        if header == 0 {
+            continue;
+        }
+
+        // Locals written anywhere in the loop. `meta::writes` is declared per
+        // opcode by the opcode macro, so fused stores are covered too.
+        let mut written: BTreeSet<u32> = BTreeSet::new();
+        for &idx in &in_loop {
+            let instr = code[idx];
+            for slot in slot_indices(meta::writes(instr.op()), instr) {
+                written.insert(slot);
+            }
+        }
+
+        // A branch from outside into the header would skip the hoisted value.
+        // The compiler emits none today; bail rather than model it.
+        if branches_into(code, wide, header, |ip| !in_loop.contains(&ip)) {
+            continue;
+        }
+
+        let Some((call_idx, n)) = find_hoistable(code, &in_loop, &written, &targets, is_pure)
+        else {
+            continue;
+        };
+
+        // `[arguments..., call, store]` evaluated once before the loop.
+        let mut hoisted: Vec<Instr> = code[call_idx - n..call_idx].to_vec();
+        hoisted.push(code[call_idx]);
+        let slot = locals.len() as u32;
+        locals.push(format!("__hoist_{slot}").into());
+        hoisted.push(Instr::a1(OP_STORE_LOCAL, slot));
+        let count = hoisted.len();
+
+        code.splice(header..header, hoisted);
+        patch_jump_targets_insert(code, wide, header, count);
+
+        // The call now sits after the inserted words; the arguments are right
+        // before it and no longer needed.
+        let new_call = call_idx + count;
+        code[new_call] = Instr::a1(OP_LOAD_LOCAL, slot);
+        if n > 0 {
+            drain_and_patch(code, wide, (new_call - n)..=(new_call - 1));
+        }
+        return true;
+    }
+    false
+}
+
+/// First pure hot call in the loop whose argument words are all invariant.
+fn find_hoistable(
+    code: &[Instr],
+    in_loop: &BTreeSet<usize>,
+    written: &BTreeSet<u32>,
+    targets: &crate::HashSet<usize>,
+    is_pure: &impl Fn(u16) -> bool,
+) -> Option<(usize, usize)> {
+    for &idx in in_loop {
+        let instr = code[idx];
+        if instr.op() != OP_CALL_HOT || !is_pure(instr.b()) {
+            continue;
+        }
+        let n = instr.a() as usize;
+        if idx < n {
+            continue;
+        }
+        let start = idx - n;
+        // A branch into the window would enter the argument sequence midway; a
+        // block boundary is fine, a jump target is not.
+        let window_ok =
+            (start..idx).all(|j| !targets.contains(&j) && invariant_push(code[j], written));
+        if window_ok {
+            return Some((idx, n));
+        }
+    }
+    None
+}
+
+/// Does any instruction accepted by `filter` branch to `target`?
+fn branches_into(
+    code: &[Instr],
+    wide: &[i64],
+    target: usize,
+    filter: impl Fn(usize) -> bool,
+) -> bool {
+    code.iter().enumerate().any(|(ip, instr)| {
+        if !filter(ip) {
+            return false;
+        }
+        match meta::branch_kind(instr.op()) {
+            1 => instr.a() as usize == target,
+            2 => wide.get(instr.c() as usize).copied().unwrap_or(-1) == target as i64,
+            _ => false,
+        }
+    })
 }

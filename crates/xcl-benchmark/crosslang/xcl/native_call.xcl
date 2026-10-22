@@ -1,0 +1,13 @@
+# native_call: one builtin call per iteration.
+#
+# `result.is_ok` is a native declared `hot`, so this loop measures the
+# `OP_CALL_HOT` path against the other languages' builtin calls (`type`,
+# `isinstance`), not map/array work.
+$r = util.ok 1
+$i = 0
+$s = 0
+while $i < 2000000 {
+    if result.is_ok $r { $s = $s + 1 }
+    $i = $i + 1
+}
+print $s

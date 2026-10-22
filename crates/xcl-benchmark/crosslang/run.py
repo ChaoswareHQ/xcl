@@ -6,9 +6,9 @@ measured separately and reported, and the table shows both raw and
 start-up-adjusted times.
 
     cargo build --release -p xcl-cli
-    cargo build --release --manifest-path tools/luau-runner/Cargo.toml
-    cargo build --release --manifest-path tools/luajit-runner/Cargo.toml
-    python scripts/crosslang/run.py
+    cargo build --release --manifest-path crates/xcl-benchmark/runners/luau-runner/Cargo.toml
+    cargo build --release --manifest-path crates/xcl-benchmark/runners/luajit-runner/Cargo.toml
+    python crates/xcl-benchmark/crosslang/run.py
 
 Optional: benchmark the JIT build next to the interpreter. Build the JIT first,
 copy it aside, then rebuild the interpreter, so both binaries stay available:
@@ -16,7 +16,7 @@ copy it aside, then rebuild the interpreter, so both binaries stay available:
     cargo build --release -p xcl-cli --features jit
     cp target/release/xcl.exe target/release/xcl-jit.exe
     cargo build --release -p xcl-cli
-    CROSSLANG_REPS=7 python scripts/crosslang/run.py
+    CROSSLANG_REPS=7 python crates/xcl-benchmark/crosslang/run.py
 
 `CROSSLANG_REPS` controls the measured repetitions (default 5; one extra run is
 used as warm-up on every process).
@@ -35,7 +35,9 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+# Repository root: crosslang -> xcl-benchmark -> crates -> <repo>.
+ROOT = Path(__file__).resolve().parents[3]
+RUNNERS = Path(__file__).resolve().parents[1] / "runners"
 HERE = Path(__file__).resolve().parent
 REPS = int(os.environ.get("CROSSLANG_REPS", "5"))
 TIMEOUT = 300
@@ -47,8 +49,8 @@ def exe(path: Path) -> Path:
 
 XCL = exe(ROOT / "target/release/xcl")
 XCL_JIT = exe(ROOT / "target/release/xcl-jit")
-LUAU = exe(ROOT / "tools/luau-runner/target/release/luau-runner")
-LUAJIT = exe(ROOT / "tools/luajit-runner/target/release/luajit-runner")
+LUAU = exe(RUNNERS / "luau-runner/target/release/luau-runner")
+LUAJIT = exe(RUNNERS / "luajit-runner/target/release/luajit-runner")
 
 LANGS = [("xcl", [str(XCL)], "xcl", ".xcl")]
 # Optional second XCL column: an interpreter and a `--features jit` build can
@@ -69,6 +71,7 @@ WORKLOADS = [
     "hanoi",
     "map_read",
     "array_sum",
+    "native_call",
 ]
 
 
@@ -121,6 +124,13 @@ def main():
             print(f"missing binary: {binary}", file=sys.stderr)
             return 1
 
+    selected = sys.argv[1:] or WORKLOADS
+    unknown = [w for w in selected if w not in WORKLOADS]
+    if unknown:
+        print(f"unknown workload(s): {', '.join(unknown)}", file=sys.stderr)
+        print(f"known: {', '.join(WORKLOADS)}", file=sys.stderr)
+        return 1
+
     print(f"xcl     : {XCL}")
     if XCL_JIT.exists():
         print(f"xcl-jit : {XCL_JIT}")
@@ -134,7 +144,7 @@ def main():
 
     results = {}
     checks = {}
-    for workload in WORKLOADS:
+    for workload in selected:
         row = {}
         checksums = {}
         for name, cmd, folder, ext in LANGS:
@@ -159,7 +169,7 @@ def main():
         header += " xcl/jit"
     print(header)
     print("-" * len(header))
-    for workload in WORKLOADS:
+    for workload in selected:
         row = results[workload]
         line = f"{workload:14s}" + "".join(f"{row[n] * 1000:10.2f}" for n in names)
 
@@ -177,7 +187,7 @@ def main():
 
     print()
     print("times are ms, minimum of", REPS, "runs, process start-up subtracted")
-    print("checksums:", {w: checks[w]["xcl"] for w in WORKLOADS})
+    print("checksums:", {w: checks[w]["xcl"] for w in selected})
     return 0
 
 

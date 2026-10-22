@@ -62,6 +62,7 @@ const PIPE_TEMP_BASE: u32 = 1 << 20;
 
 mod emit;
 mod expr;
+mod fold;
 mod fuse;
 mod inline;
 mod opcode_map;
@@ -127,6 +128,27 @@ struct Compiler<'h> {
     string_index: HashMap<Box<str>, u32>,
     local_index: HashMap<Box<str>, u32>,
     global_index: HashMap<Box<str>, u32>,
+    /// Loops currently being compiled, innermost last.
+    ///
+    /// `break` and `continue` compile to a jump whose target is only known when
+    /// the enclosing loop finishes, so the loop context collects the placeholder
+    /// addresses and patches them at the end.
+    loops: Vec<LoopCtx>,
+    /// Locals whose value is a known integer on every path.
+    ///
+    /// Only straight-line assignments of an integer literal are recorded, and
+    /// any control flow clears the set. It exists so a counted loop whose
+    /// bounds and accumulator are known can be folded away (`fold.rs`), so a
+    /// stale entry would be a miscompile rather than a missed optimization.
+    const_locals: HashMap<Box<str>, i64>,
+}
+
+/// Where `break` and `continue` go for one loop being compiled.
+struct LoopCtx {
+    /// `JUMP` instructions waiting for the loop's exit address.
+    breaks: Vec<u32>,
+    /// Instruction `continue` resumes at: the loop's test or iteration step.
+    continue_to: u32,
 }
 
 impl<'h> Compiler<'h> {
@@ -150,6 +172,8 @@ impl<'h> Compiler<'h> {
             string_index: HashMap::new(),
             local_index: HashMap::new(),
             global_index: HashMap::new(),
+            loops: Vec::new(),
+            const_locals: HashMap::new(),
         }
     }
 
@@ -213,6 +237,48 @@ impl<'h> Compiler<'h> {
     #[inline(always)]
     fn ip(&self) -> u32 {
         self.code.len() as u32
+    }
+
+    /// Starts collecting `break`/`continue` for a loop whose `continue` target
+    /// is already known.
+    fn begin_loop(&mut self, continue_to: u32) {
+        self.loops.push(LoopCtx {
+            breaks: Vec::new(),
+            continue_to,
+        });
+    }
+
+    /// Closes the innermost loop and points every `break` at its exit.
+    fn end_loop(&mut self, exit: u32) {
+        let Some(ctx) = self.loops.pop() else {
+            return;
+        };
+        for at in ctx.breaks {
+            self.patch_jump(at, exit);
+        }
+    }
+
+    /// `continue`: resume at the innermost loop's test (or iteration step).
+    ///
+    /// Outside a loop there is nothing to continue, so this emits nothing —
+    /// the same tolerance the parser shows for a stray `break`.
+    fn emit_continue(&mut self) {
+        if let Some(ctx) = self.loops.last() {
+            let to = ctx.continue_to;
+            self.emit(Instr::a1(OP_JUMP, to));
+        }
+    }
+
+    /// `break`: jump to the innermost loop's exit, patched by [`Self::end_loop`].
+    fn emit_break(&mut self) {
+        if self.loops.is_empty() {
+            return;
+        }
+        self.emit(Instr::a1(OP_JUMP, 0));
+        let at = self.ip() - 1;
+        if let Some(ctx) = self.loops.last_mut() {
+            ctx.breaks.push(at);
+        }
     }
 
     fn patch_jump(&mut self, at: u32, target: u32) {
@@ -321,7 +387,13 @@ impl<'h> Compiler<'h> {
             peephole_optimize_once(&mut code, &mut self.wide);
 
             // Run data flow analysis to eliminate dead stores
-            crate::optimizer::optimize(&mut code, &mut self.wide, self.pinned_slots);
+            crate::optimizer::optimize(
+                &mut code,
+                &mut self.wide,
+                self.pinned_slots,
+                &mut self.locals,
+                self.hot,
+            );
         }
 
         let strings = core::mem::take(&mut self.strings);
