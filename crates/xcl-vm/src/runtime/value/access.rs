@@ -148,6 +148,19 @@ impl Value {
         }
     }
 
+    /// Returns a mutable static reference to the underlying HeapMap if this value is a map.
+    ///
+    /// Mirrors [`Value::as_array_mut`]: maps live in the arena and are shared by
+    /// value, so mutation is in place rather than a copy-on-write rebuild.
+    #[inline(always)]
+    pub fn as_map_mut(self) -> Option<&'static mut HeapMap> {
+        if self.heap_kind() == Some(KIND_MAP) {
+            Some(unsafe { &mut *(self.as_ptr::<HeapMap>() as *mut HeapMap) })
+        } else {
+            None
+        }
+    }
+
     /// Returns a reference to the underlying HeapMap if this value is a map.
     #[inline(always)]
     pub fn as_map_mut_ref(self) -> Option<&'static HeapMap> {

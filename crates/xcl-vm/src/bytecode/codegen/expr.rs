@@ -274,6 +274,20 @@ impl Compiler<'_> {
                     }
                 }
                 if let Some(v) = value {
+                    // `return $self.f` in one dispatch.
+                    if let AstNode::FieldAccess { target, field, .. } = v.as_ref()
+                        && matches!(
+                            target.as_ref(),
+                            AstNode::SpecialVar {
+                                kind: SpecialVarKind::SelfValue,
+                                ..
+                            }
+                        )
+                    {
+                        let i = self.intern(field);
+                        self.emit(Instr::a1(OP_RETURN_SELF_FIELD, i));
+                        return;
+                    }
                     self.node(v);
                 } else {
                     self.emit(Instr::none(OP_PUSH_NIL));
@@ -744,10 +758,83 @@ impl Compiler<'_> {
                     }
                 }
 
+                // A method call on a value: the callee is `receiver.method`.
+                // The receiver is any expression (`$obj`, `$obj.inner`,
+                // `$arr[$i]`, `$self`), compiled first, then the arguments; the
+                // method name travels in the instruction and `op_call_method`
+                // prefers a field of that name, then a method of the value.
+                //
+                // A dotted path rooted at a name that is not a value
+                // (`math.sqrt`, `std.util.print`) is a domain call and keeps the
+                // named form below.
+                if let AstNode::FieldAccess { target, field, .. } = callee.as_ref() {
+                    let base_is_value = match collect_dotted_name(callee.as_ref()) {
+                        Some(name) => {
+                            let base = name.split('.').next().unwrap_or(&name);
+                            let bare = base.strip_prefix('$').unwrap_or(base);
+                            base.starts_with('$')
+                                || self.is_global(bare)
+                                || self.locals.iter().any(|n| n.as_ref() == bare)
+                                || self.root_read_slot(bare).is_some()
+                        }
+                        // A chain through an index or call (`$a[i].m`,
+                        // `$f().m`) is always a method call on that value.
+                        None => true,
+                    };
+                    if base_is_value {
+                        let field_idx = self.intern(field);
+                        // `$arr[$i].m c` in one dispatch: the receiver is an
+                        // element of a collection held in a local and the
+                        // argument is a small constant.
+                        if args.len() == 1
+                            && args[0].name.is_none()
+                            && let AstNode::Int { value, .. } = &args[0].value
+                            && let Ok(arg8) = i8::try_from(*value)
+                            && let AstNode::Index {
+                                target: collection,
+                                index,
+                                ..
+                            } = target.as_ref()
+                            && let (
+                                AstNode::Ident { name: cn, .. },
+                                AstNode::Ident { name: xn, .. },
+                            ) = (collection.as_ref(), index.as_ref())
+                            && !self.is_global(cn)
+                            && !self.is_global(xn)
+                            && let (Some(&c_slot), Some(&x_slot)) = (
+                                self.local_index.get(cn.as_str()),
+                                self.local_index.get(xn.as_str()),
+                            )
+                            && let (Ok(c8), Ok(x8)) = (u8::try_from(c_slot), u8::try_from(x_slot))
+                        {
+                            self.emit(Instr::make(
+                                OP_INDEX_CALL_METHOD_INT,
+                                field_idx,
+                                ((c8 as u16) << 8) | x8 as u16,
+                                arg8 as u8,
+                            ));
+                            return;
+                        }
+                        self.node(target);
+                        // A single integer argument travels inside the
+                        // instruction, so the push and the call are one dispatch.
+                        if args.len() == 1
+                            && args[0].name.is_none()
+                            && let AstNode::Int { value, .. } = &args[0].value
+                            && let Ok(c) = i16::try_from(*value)
+                        {
+                            self.emit(Instr::a2(OP_CALL_METHOD_INT, field_idx, c as u16));
+                            return;
+                        }
+                        let n = self.emit_call_args(args);
+                        self.emit(Instr::a2(OP_CALL_METHOD, field_idx, n as u16));
+                        return;
+                    }
+                }
+
                 // Build full dotted name from nested FieldAccess chains.
                 // e.g., net.tcp.connect -> "net.tcp.connect"
                 //       io.read -> "io.read"
-                //       $r.map_err -> "$r.map_err"
                 let full_name = collect_dotted_name(callee.as_ref());
                 if let Some(name) = full_name {
                     // Check if the base identifier is a local variable AND there's a dot (method call)
@@ -975,6 +1062,21 @@ impl Compiler<'_> {
             }
 
             AstNode::Index { target, index, .. } => {
+                // Both operands are already in locals: one dispatch instead of
+                // two loads plus the stack round trip.
+                if let (AstNode::Ident { name: tn, .. }, AstNode::Ident { name: in_, .. }) =
+                    (target.as_ref(), index.as_ref())
+                    && !self.is_global(tn)
+                    && !self.is_global(in_)
+                    && let (Some(&t), Some(&i)) = (
+                        self.local_index.get(tn.as_str()),
+                        self.local_index.get(in_.as_str()),
+                    )
+                    && let Ok(i16) = u16::try_from(i)
+                {
+                    self.emit(Instr::a2(OP_GET_INDEX_LOCAL_LOCAL, t, i16));
+                    return;
+                }
                 self.node(target);
                 self.node(index);
                 self.emit(Instr::none(OP_GET_INDEX));
@@ -997,10 +1099,95 @@ impl Compiler<'_> {
                     }
                     return;
                 }
+                // `$self.f` reads the frame's `arg0` without pushing it first.
+                if matches!(
+                    target.as_ref(),
+                    AstNode::SpecialVar {
+                        kind: SpecialVarKind::SelfValue,
+                        ..
+                    }
+                ) {
+                    let i = self.intern(field);
+                    self.emit(Instr::a1(OP_SELF_GET_FIELD, i));
+                    return;
+                }
                 self.node(target);
                 let i = self.intern(field);
                 self.emit(Instr::a1(OP_GET_FIELD, i));
             }
+
+            AstNode::SetField {
+                target,
+                field,
+                value,
+                op,
+                ..
+            } => {
+                let field_idx = self.intern(field);
+                if self.try_emit_field_update(target, field, field_idx, value, *op) {
+                    return;
+                }
+                match op {
+                    None => {
+                        self.node(target);
+                        self.node(value);
+                        self.emit(Instr::a1(OP_SET_FIELD, field_idx));
+                    }
+                    Some(op) => {
+                        // Read-modify-write with the target evaluated once: the
+                        // scratch slots hold the map and the combined value, so
+                        // the final stack is `target, value` like the plain form.
+                        let slot = self.set_temp();
+                        let out = self.set_temp();
+                        self.node(target);
+                        self.emit(Instr::a1(OP_STORE_LOCAL, slot));
+                        self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
+                        self.emit(Instr::a1(OP_GET_FIELD, field_idx));
+                        self.node(value);
+                        self.emit(Instr::none(binop_opcode(*op)));
+                        self.emit(Instr::a1(OP_STORE_LOCAL, out));
+                        self.emit(Instr::a1(OP_LOAD_LOCAL, slot));
+                        self.emit(Instr::a1(OP_LOAD_LOCAL, out));
+                        self.emit(Instr::a1(OP_SET_FIELD, field_idx));
+                    }
+                }
+            }
+
+            AstNode::SetIndex {
+                target,
+                index,
+                value,
+                op,
+                ..
+            } => match op {
+                None => {
+                    self.node(target);
+                    self.node(index);
+                    self.node(value);
+                    self.emit(Instr::none(OP_SET_INDEX));
+                }
+                Some(op) => {
+                    // Both the collection and the key are evaluated once and
+                    // kept in scratch slots across the read-modify-write.
+                    let t_slot = self.set_temp();
+                    let i_slot = self.set_temp();
+                    let out = self.set_temp();
+                    self.node(target);
+                    self.emit(Instr::a1(OP_STORE_LOCAL, t_slot));
+                    self.node(index);
+                    self.emit(Instr::a1(OP_STORE_LOCAL, i_slot));
+                    self.emit(Instr::a1(OP_LOAD_LOCAL, t_slot));
+                    self.emit(Instr::a1(OP_LOAD_LOCAL, i_slot));
+                    self.emit(Instr::none(OP_GET_INDEX));
+                    self.node(value);
+                    self.emit(Instr::none(binop_opcode(*op)));
+                    self.emit(Instr::a1(OP_STORE_LOCAL, out));
+                    self.emit(Instr::a1(OP_LOAD_LOCAL, t_slot));
+                    self.emit(Instr::a1(OP_LOAD_LOCAL, i_slot));
+                    self.emit(Instr::a1(OP_LOAD_LOCAL, out));
+                    self.emit(Instr::none(OP_SET_INDEX));
+                }
+            },
 
             AstNode::Range { start, end, .. } => {
                 if let Some(s) = start {
@@ -1195,5 +1382,164 @@ impl Compiler<'_> {
                 self.emit(Instr::make(OP_SPECIAL_VAR, *index, 0, kind_code));
             }
         }
+    }
+
+    /// Emits a fused read-modify-write for `recv.f = recv.f <op> rhs`.
+    ///
+    /// The shape comes either from a compound write (`recv.f += v`) or from the
+    /// explicit `recv.f = recv.f + v`; both read and write the same field of the
+    /// same receiver. One instruction keeps the receiver, which may be an
+    /// arbitrary expression, evaluated exactly once.
+    ///
+    /// Returns `false` when the shape does not match, leaving the caller to
+    /// emit the general form.
+    fn try_emit_field_update(
+        &mut self,
+        target: &AstNode,
+        field: &str,
+        field_idx: u32,
+        value: &AstNode,
+        compound: Option<BinaryOperator>,
+    ) -> bool {
+        use crate::runtime::opcode::field_op;
+
+        let (op, rhs) = match compound {
+            Some(op) => (op, value),
+            None => {
+                let AstNode::BinaryOp {
+                    left, op, right, ..
+                } = value
+                else {
+                    return false;
+                };
+                let AstNode::FieldAccess {
+                    target: inner,
+                    field: inner_field,
+                    ..
+                } = left.as_ref()
+                else {
+                    return false;
+                };
+                if inner_field != field || !same_receiver(inner, target) {
+                    return false;
+                }
+                (*op, right.as_ref())
+            }
+        };
+
+        let kind = match op {
+            BinaryOperator::Add => field_op::ADD,
+            BinaryOperator::Sub => field_op::SUB,
+            BinaryOperator::Mul => field_op::MUL,
+            _ => return false,
+        };
+
+        // `$self` is the frame's `arg0`, so it never has to reach the operand
+        // stack: the SELF forms read it directly and cost one dispatch each.
+        let self_receiver = matches!(
+            target,
+            AstNode::SpecialVar {
+                kind: SpecialVarKind::SelfValue,
+                ..
+            }
+        );
+
+        match rhs {
+            AstNode::Int { value: c, .. } if (0..=u16::MAX as i64).contains(c) => {
+                let opcode = if self_receiver {
+                    OP_SELF_FIELD_INT
+                } else {
+                    self.node(target);
+                    OP_FIELD_INT
+                };
+                self.emit(Instr::make(opcode, field_idx, *c as u16, kind));
+                true
+            }
+            AstNode::Ident { name, .. } => {
+                // Locals only: a top-level read compiles to `OP_LOAD_ROOT`, which
+                // the fused operand cannot express.
+                let Some(&slot) = self.local_index.get(name.as_str()) else {
+                    return false;
+                };
+                let Ok(slot16) = u16::try_from(slot) else {
+                    return false;
+                };
+                let opcode = if self_receiver {
+                    OP_SELF_FIELD_LOCAL
+                } else {
+                    self.node(target);
+                    OP_FIELD_LOCAL
+                };
+                self.emit(Instr::make(opcode, field_idx, slot16, kind));
+                true
+            }
+            AstNode::FieldAccess {
+                target: inner,
+                field: src,
+                ..
+            } if same_receiver(inner, target) => {
+                let src_idx = self.intern(src);
+                let Ok(src16) = u16::try_from(src_idx) else {
+                    return false;
+                };
+                let opcode = if self_receiver {
+                    OP_SELF_FIELD_FIELD
+                } else {
+                    self.node(target);
+                    OP_FIELD_FIELD
+                };
+                self.emit(Instr::make(opcode, field_idx, src16, kind));
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Compares two receiver expressions by shape, ignoring source spans.
+///
+/// Two occurrences of the same variable in one statement have different spans,
+/// so `PartialEq` on the whole node cannot be used to prove they name the same
+/// value.
+fn same_receiver(a: &AstNode, b: &AstNode) -> bool {
+    match (a, b) {
+        (AstNode::Ident { name: x, .. }, AstNode::Ident { name: y, .. }) => x == y,
+        (
+            AstNode::SpecialVar {
+                kind: kx,
+                index: ix,
+                ..
+            },
+            AstNode::SpecialVar {
+                kind: ky,
+                index: iy,
+                ..
+            },
+        ) => kx == ky && ix == iy,
+        (
+            AstNode::FieldAccess {
+                target: tx,
+                field: fx,
+                ..
+            },
+            AstNode::FieldAccess {
+                target: ty,
+                field: fy,
+                ..
+            },
+        ) => fx == fy && same_receiver(tx, ty),
+        (
+            AstNode::Index {
+                target: tx,
+                index: ix,
+                ..
+            },
+            AstNode::Index {
+                target: ty,
+                index: iy,
+                ..
+            },
+        ) => same_receiver(tx, ty) && same_receiver(ix, iy),
+        _ => false,
     }
 }

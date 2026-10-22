@@ -50,6 +50,12 @@ impl<'a> Parser<'a> {
             Some(Token::For) => self.for_expr(),
             Some(Token::While) => self.while_expr(),
             Some(Token::Ident) if self.lookahead_assign() => self.assign(),
+            // Member write: `$obj.field = v`, `$arr[i] = v`, and the compound
+            // forms. The operator is not directly after the name, so the plain
+            // assignment lookahead above cannot see it.
+            Some(Token::Ident) | Some(Token::SpecialVar) if self.lookahead_member_assign() => {
+                self.member_assign()
+            }
             Some(Token::IdentPlain) if self.lookahead_fn_def() => self.fn_def(),
             // Type definition: `Name = { ... }` or `Name = | Variant1 { ... } | Variant2 { ... }`
             Some(Token::IdentPlain) if self.lookahead_type_def() => self.type_def(),
@@ -57,6 +63,9 @@ impl<'a> Parser<'a> {
             Some(Token::IdentPlain) if self.lookahead_impl_def() => self.impl_def(),
             // `defer { ... }` — keyword-like syntax for deferred closures
             Some(Token::IdentPlain) if self.lookahead_defer() => self.defer_expr(),
+            // Member write on a plain identifier (`config.retries = 3`), after
+            // the definition lookaheads so `Name = { ... }` keeps its meaning.
+            Some(Token::IdentPlain) if self.lookahead_member_assign() => self.member_assign(),
             Some(Token::SpecialVar) | Some(Token::UnsupportedSpecialVar)
                 if self.lookahead_assign() =>
             {
@@ -408,6 +417,108 @@ impl<'a> Parser<'a> {
         )
     }
 
+    /// Returns the compound operator at the current token, if any.
+    #[inline]
+    pub(super) fn compound_operator(&self) -> Option<BinaryOperator> {
+        match self.current().map(|t| &t.token) {
+            Some(Token::AddAssign) => Some(BinaryOperator::Add),
+            Some(Token::SubAssign) => Some(BinaryOperator::Sub),
+            Some(Token::MulAssign) => Some(BinaryOperator::Mul),
+            Some(Token::DivAssign) => Some(BinaryOperator::Div),
+            Some(Token::BitOrAssign) => Some(BinaryOperator::BitOr),
+            Some(Token::BitXorAssign) => Some(BinaryOperator::BitXor),
+            Some(Token::PowAssign) => Some(BinaryOperator::Pow),
+            Some(Token::CoalesceAssign) => Some(BinaryOperator::Coalesce),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn is_assign_operator(&self) -> bool {
+        matches!(
+            self.current().map(|t| &t.token),
+            Some(Token::Assign)
+                | Some(Token::AddAssign)
+                | Some(Token::SubAssign)
+                | Some(Token::MulAssign)
+                | Some(Token::DivAssign)
+                | Some(Token::BitOrAssign)
+                | Some(Token::BitXorAssign)
+                | Some(Token::PowAssign)
+                | Some(Token::CoalesceAssign)
+        )
+    }
+
+    /// Lookahead for a write through a member chain: `$obj.field = v`,
+    /// `$arr[i] = v`, `$obj.a[i].b += v`.
+    ///
+    /// Scans only the target chain (`.` and balanced `[...]`) and then requires
+    /// an assignment operator. Anything else — a comparison, a call with
+    /// arguments, an operator — is left for the expression parser.
+    pub(super) fn lookahead_member_assign(&self) -> bool {
+        let mut i = self.pos;
+        match self.tokens.get(i).map(|t| &t.token) {
+            Some(Token::Ident) | Some(Token::IdentPlain) | Some(Token::SpecialVar) => i += 1,
+            _ => return false,
+        }
+
+        let mut saw_member = false;
+        loop {
+            match self.tokens.get(i).map(|t| &t.token) {
+                Some(Token::Dot) | Some(Token::OptionalDot) => {
+                    match self.tokens.get(i + 1).map(|t| &t.token) {
+                        // Field names lex as `IdentPlain`; `$`-prefixed ones are
+                        // accepted too so `$obj.$field` is a clear error later
+                        // rather than a confusing one here.
+                        Some(Token::IdentPlain) | Some(Token::Ident) => {}
+                        _ => return false,
+                    }
+                    saw_member = true;
+                    i += 2;
+                }
+                Some(Token::LBracket) => {
+                    let mut depth = 0usize;
+                    loop {
+                        match self.tokens.get(i).map(|t| &t.token) {
+                            Some(Token::LBracket) | Some(Token::LParen) | Some(Token::LBrace) => {
+                                depth += 1;
+                            }
+                            Some(Token::RBracket) | Some(Token::RParen) | Some(Token::RBrace) => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    i += 1;
+                                    break;
+                                }
+                            }
+                            // A top-level comma makes this an array literal used
+                            // as a call argument, not an index (`$a[1, 2]`).
+                            Some(Token::Comma) if depth == 1 => return false,
+                            Some(Token::Semi) | None => return false,
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    saw_member = true;
+                }
+                _ => break,
+            }
+        }
+
+        saw_member
+            && matches!(
+                self.tokens.get(i).map(|t| &t.token),
+                Some(Token::Assign)
+                    | Some(Token::AddAssign)
+                    | Some(Token::SubAssign)
+                    | Some(Token::MulAssign)
+                    | Some(Token::DivAssign)
+                    | Some(Token::BitOrAssign)
+                    | Some(Token::BitXorAssign)
+                    | Some(Token::PowAssign)
+                    | Some(Token::CoalesceAssign)
+            )
+    }
+
     #[inline]
     pub(super) fn lookahead_fn_def(&self) -> bool {
         // Must be: name( ... ) { or name( ... ) ->
@@ -449,16 +560,7 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let compound = match self.current().map(|t| &t.token) {
-            Some(Token::AddAssign) => Some(BinaryOperator::Add),
-            Some(Token::SubAssign) => Some(BinaryOperator::Sub),
-            Some(Token::MulAssign) => Some(BinaryOperator::Mul),
-            Some(Token::DivAssign) => Some(BinaryOperator::Div),
-            Some(Token::BitOrAssign) => Some(BinaryOperator::BitOr),
-            Some(Token::BitXorAssign) => Some(BinaryOperator::BitXor),
-            Some(Token::PowAssign) => Some(BinaryOperator::Pow),
-            _ => None,
-        };
+        let compound = self.compound_operator();
 
         if let Some(op) = compound {
             self.consume();
@@ -479,25 +581,6 @@ impl<'a> Parser<'a> {
             };
         }
 
-        if self.at(Token::CoalesceAssign) {
-            self.consume();
-            let value = Box::new(self.expr());
-            return AstNode::Assign {
-                span: span.clone(),
-                name: name.clone(),
-                value: Box::new(AstNode::BinaryOp {
-                    span: span.clone(),
-                    left: Box::new(AstNode::Ident {
-                        span: span.clone(),
-                        name,
-                    }),
-                    op: BinaryOperator::Coalesce,
-                    right: value,
-                }),
-                type_annotation: None,
-            };
-        }
-
         self.expect(Token::Assign);
         let start_pos = self.pos;
         let value = self.expr();
@@ -508,6 +591,65 @@ impl<'a> Parser<'a> {
             name,
             value,
             type_annotation,
+        }
+    }
+
+    /// Parses a write through a member chain: `$obj.field = v`, `$arr[i] = v`,
+    /// `$obj.a[i].b += v`.
+    ///
+    /// The target is parsed with the normal postfix chain, so nested writes and
+    /// computed indices keep their usual meaning. A compound operator becomes a
+    /// field on the node instead of a duplicated read expression: the compiler
+    /// can then evaluate the target exactly once.
+    pub(super) fn member_assign(&mut self) -> AstNode {
+        let span = self.span();
+        let target = self.postfix();
+        if !self.is_assign_operator() {
+            // The lookahead should have caught this; recovering here keeps a
+            // malformed target from consuming the following statement.
+            let msg = "expected an assignment operator after the target".to_string();
+            self.error("E0009", span, msg);
+            return target;
+        }
+        let op = self.compound_operator();
+        self.consume();
+
+        let start_pos = self.pos;
+        let value = self.expr();
+        let value = self.attach_call_args(value, start_pos);
+        let value = Box::new(self.bare_call_to_zero_arg(value));
+
+        match target {
+            AstNode::FieldAccess {
+                target: object,
+                field,
+                ..
+            } => AstNode::SetField {
+                span,
+                target: object,
+                field,
+                value,
+                op,
+            },
+            AstNode::Index {
+                target: object,
+                index,
+                ..
+            } => AstNode::SetIndex {
+                span,
+                target: object,
+                index,
+                value,
+                op,
+            },
+            other => {
+                let msg =
+                    "assignment target must be a `$variable`, a field, or an index".to_string();
+                self.error("E0009", span, msg);
+                // The value expression was already parsed (and is dropped here),
+                // so the following statement still starts on a clean token.
+                other
+            }
         }
     }
 

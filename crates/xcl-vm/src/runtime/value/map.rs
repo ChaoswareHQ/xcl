@@ -202,6 +202,171 @@ impl HeapMap {
         }
     }
 
+    /// Inserts or overwrites `key` with `value`.
+    ///
+    /// `key` must be a string value; returns `false` when it is not, so the
+    /// caller can report the failed write instead of silently dropping it.
+    ///
+    /// A small map that is already full is promoted to the hashed
+    /// representation. The hash caches stay in sync on every write, which keeps
+    /// `get_fast_value` on its index path instead of forcing it to fall back to
+    /// a string hash after the first assignment.
+    pub fn set_fast_value(&mut self, key: Value, value: Value) -> bool {
+        let Some(key_str) = key.as_str() else {
+            return false;
+        };
+        let hash = key
+            .str_hash()
+            .unwrap_or_else(|| crate::runtime::vm::fast_hash(key_str.as_bytes()));
+
+        match &mut self.repr {
+            MapRepr::Small(entries) => {
+                // Interned keys (field writes) match on the raw `Value` first,
+                // the same order `get_fast_value` uses: no hashing at all for
+                // the common case.
+                for (k, v, _) in entries.iter_mut() {
+                    if k.0 == key.0 {
+                        *v = value;
+                        return true;
+                    }
+                }
+                for (k, v, entry_hash) in entries.iter_mut() {
+                    if *entry_hash == hash && k.as_str() == Some(key_str) {
+                        *v = value;
+                        return true;
+                    }
+                }
+                if entries.len() < SMALL_MAP_MAX {
+                    entries.push((key, value, hash));
+                    return true;
+                }
+
+                // Full: promote to the hashed representation. The old entries
+                // move into the new map, so no field is lost.
+                let len = entries.len();
+                let mut data = XclMap::with_capacity(len + 1);
+                let mut key_hashes = Vec::with_capacity(len + 1);
+                let mut key_values = Vec::with_capacity(len + 1);
+                for (k, v, h) in entries.iter() {
+                    let s = k.as_str().unwrap_or("").to_string();
+                    data.insert(s.clone(), *v);
+                    key_hashes.push((*h, s));
+                    key_values.push(*v);
+                }
+                data.insert(key_str.to_string(), value);
+                key_hashes.push((hash, key_str.to_string()));
+                key_values.push(value);
+                self.repr = MapRepr::Large {
+                    data,
+                    key_hashes,
+                    key_values,
+                    index_dirty: false,
+                };
+                true
+            }
+            MapRepr::Large {
+                data,
+                key_hashes,
+                key_values,
+                index_dirty,
+            } => {
+                if *index_dirty {
+                    key_hashes.clear();
+                    key_values.clear();
+                    for (k, v) in data.iter() {
+                        key_hashes.push((crate::runtime::vm::fast_hash(k.as_bytes()), k.clone()));
+                        key_values.push(*v);
+                    }
+                    *index_dirty = false;
+                }
+                match data.insert(key_str.to_string(), value) {
+                    Some(_) => {
+                        match key_hashes
+                            .iter()
+                            .position(|(kh, k)| *kh == hash && k == key_str)
+                        {
+                            Some(i) => key_values[i] = value,
+                            // The index was incomplete (a map built outside this
+                            // path); adding the entry restores the invariant
+                            // instead of leaving a stale fast-path value.
+                            None => {
+                                key_hashes.push((hash, key_str.to_string()));
+                                key_values.push(value);
+                            }
+                        }
+                    }
+                    None => {
+                        key_hashes.push((hash, key_str.to_string()));
+                        key_values.push(value);
+                    }
+                }
+                true
+            }
+        }
+    }
+
+    /// Applies `f` to the value stored at `key`, inserting `f(nil)` when the key
+    /// is absent.
+    ///
+    /// The fused field updates read and write the same entry, so doing it in one
+    /// scan halves the work of a read-modify-write over `get_fast_value` plus
+    /// `set_fast_value`.
+    #[inline(always)]
+    pub fn update_fast_value<F>(&mut self, key: Value, f: F) -> bool
+    where
+        F: FnOnce(Value) -> Value,
+    {
+        match &mut self.repr {
+            MapRepr::Small(entries) => {
+                // Interned key identity first, exactly like `get_fast_value`.
+                for (k, v, _) in entries.iter_mut() {
+                    if k.0 == key.0 {
+                        *v = f(*v);
+                        return true;
+                    }
+                }
+                let Some(key_str) = key.as_str() else {
+                    return false;
+                };
+                let hash = key
+                    .str_hash()
+                    .unwrap_or_else(|| crate::runtime::vm::fast_hash(key_str.as_bytes()));
+                for (k, v, entry_hash) in entries.iter_mut() {
+                    if *entry_hash == hash && k.as_str() == Some(key_str) {
+                        *v = f(*v);
+                        return true;
+                    }
+                }
+            }
+            MapRepr::Large {
+                data,
+                key_hashes,
+                key_values,
+                ..
+            } => {
+                let Some(key_str) = key.as_str() else {
+                    return false;
+                };
+                let hash = key
+                    .str_hash()
+                    .unwrap_or_else(|| crate::runtime::vm::fast_hash(key_str.as_bytes()));
+                for (i, (kh, k)) in key_hashes.iter().enumerate() {
+                    if *kh == hash && k == key_str {
+                        if let Some(slot) = data.get_mut(key_str) {
+                            let new = f(*slot);
+                            *slot = new;
+                            key_values[i] = new;
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        // Absent: `set_fast_value` inserts or promotes, keeping the caches in
+        // sync with the new entry.
+        self.set_fast_value(key, f(Value::nil()))
+    }
+
     /// Returns `true` if the map contains the given key.
     #[inline(always)]
     pub fn contains_key(&self, key: &str) -> bool {

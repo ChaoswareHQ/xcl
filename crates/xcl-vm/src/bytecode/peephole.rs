@@ -254,6 +254,91 @@ pub(crate) fn peephole_optimize_once(code: &mut Vec<Instr>, wide: &mut [i64]) {
     }
 }
 
+/// Collapses runs of consecutive `$self` field updates into one dispatch.
+///
+/// Runs after every pass that reasons about local slots: a chain names its
+/// locals only in the side table, which those passes cannot see.
+///
+/// A run never crosses a jump target, so no branch can enter the middle of a
+/// chain.
+pub(crate) fn fuse_self_chains(
+    code: &mut Vec<Instr>,
+    wide: &mut [i64],
+    chains: &mut Vec<super::FieldChain>,
+    values: &[crate::runtime::value::Value],
+) {
+    let mut targets = collect_jump_targets(code, wide);
+    let mut i = 0;
+    while i < code.len() {
+        if self_step(code[i], values).is_none() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut steps: Vec<super::FieldStep> = Vec::new();
+        while i < code.len() && !targets.contains(&i) {
+            match self_step(code[i], values) {
+                Some(step) => {
+                    steps.push(step);
+                    i += 1;
+                }
+                None => break,
+            }
+        }
+        if steps.len() >= 2 {
+            let idx = chains.len() as u32;
+            chains.push(super::FieldChain {
+                steps: steps.into_boxed_slice(),
+            });
+            // A method that ends with `return $self.f` folds the return in too.
+            let ret_field = code
+                .get(i)
+                .copied()
+                .filter(|ins| ins.op() == OP_RETURN_SELF_FIELD && u16::try_from(ins.a()).is_ok());
+            code[start] = match ret_field {
+                Some(ins) => Instr::make(OP_SELF_UPDATE_CHAIN_RETURN, idx, ins.a() as u16, 0),
+                None => Instr::a1(OP_SELF_UPDATE_CHAIN, idx),
+            };
+            let end = if ret_field.is_some() { i + 1 } else { i };
+            if end > start + 1 {
+                drain_and_patch(code, wide, (start + 1)..=(end - 1));
+                targets = collect_jump_targets(code, wide);
+            }
+            i = start + 1;
+        }
+    }
+}
+
+/// Describes one `$self` field-update instruction as a chain step.
+fn self_step(ins: Instr, values: &[crate::runtime::value::Value]) -> Option<super::FieldStep> {
+    let key = *values.get(ins.a() as usize)?;
+    let none = crate::runtime::value::Value::nil();
+    match ins.op() {
+        OP_SELF_FIELD_INT => Some(super::FieldStep {
+            key,
+            rhs_key: none,
+            op: ins.c(),
+            kind: 0,
+            operand: (ins.b() as i16 as i32) as u32,
+        }),
+        OP_SELF_FIELD_LOCAL => Some(super::FieldStep {
+            key,
+            rhs_key: none,
+            op: ins.c(),
+            kind: 1,
+            operand: ins.b() as u32,
+        }),
+        OP_SELF_FIELD_FIELD => Some(super::FieldStep {
+            key,
+            rhs_key: *values.get(ins.b() as usize)?,
+            op: ins.c(),
+            kind: 2,
+            operand: 0,
+        }),
+        _ => None,
+    }
+}
+
 /// Try to match and fuse a pattern at instruction index `i`.
 /// Returns true if a fusion occurred (caller should not advance `i`).
 #[inline]

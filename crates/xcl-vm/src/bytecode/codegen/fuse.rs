@@ -145,6 +145,20 @@ impl Compiler<'_> {
             }
         }
 
+        // Case 4: `$dest = $dest op <expr>` where the right side cannot be
+        // emitted into a slot (a call, a lambda, ...). The destination is
+        // accumulated after the value is computed, which saves the load of the
+        // destination and the separate store.
+        if let AstNode::Ident { name, .. } = left.as_ref()
+            && !self.is_global(name)
+            && self.local(name) == dest_slot
+            && let Some(kind) = top_local_op(*op)
+        {
+            self.node(right);
+            self.emit(Instr::make(OP_LOCAL_OP_TOP, dest_slot, 0, kind));
+            return true;
+        }
+
         false
     }
 

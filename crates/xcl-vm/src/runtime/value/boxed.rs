@@ -4,8 +4,8 @@
 //! reset; `escape` rebuilds an arena value the same way before `run` returns it
 //! to the host.
 
-use super::*;
 use super::heap::new_heap_str;
+use super::*;
 
 impl Value {
     /// Allocates a string with static lifetime (leaked Box) suitable for constants.
@@ -20,6 +20,49 @@ impl Value {
             Box::leak(s.into_boxed_str()),
         )));
         Value(TAG_PTR | ((obj as *const HeapStr as u64) & PAYLOAD))
+    }
+
+    /// Returns one shared value per distinct string.
+    ///
+    /// Compile-time strings (constant tables, field names) must compare equal by
+    /// pointer for [`HeapMap::get_fast_value`](crate::runtime::value::HeapMap::get_fast_value)
+    /// and its update form to take their identity fast path. Each bytecode unit
+    /// interns its own table, so without this a field written in one function and
+    /// read in another never matches on identity and every access pays for a
+    /// hash and a string compare.
+    ///
+    /// Only compilers call this, so the lock is off the execution path. Without
+    /// `std` there is no shared table and each call allocates as before.
+    #[cfg(feature = "std")]
+    pub fn intern_str(s: &str) -> Self {
+        use std::sync::{OnceLock, RwLock};
+        static TABLE: OnceLock<RwLock<std::collections::HashMap<&'static str, Value>>> =
+            OnceLock::new();
+        let table = TABLE.get_or_init(|| RwLock::new(std::collections::HashMap::new()));
+
+        {
+            let reader = table.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(v) = reader.get(s).copied() {
+                return v;
+            }
+        }
+
+        let mut writer = table.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(v) = writer.get(s).copied() {
+            return v;
+        }
+        let v = Value::from_str_boxed(s.to_string());
+        // The bytes were leaked by `from_str_boxed`, so the slice is `'static`.
+        if let Some(key) = v.as_str() {
+            writer.insert(key, v);
+        }
+        v
+    }
+
+    /// Interns the string, or allocates a fresh boxed one when `std` is off.
+    #[cfg(not(feature = "std"))]
+    pub fn intern_str(s: &str) -> Self {
+        Value::from_str_boxed(s.to_string())
     }
 
     /// Allocates an array with static lifetime (leaked Box).

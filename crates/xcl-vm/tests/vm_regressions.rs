@@ -1671,3 +1671,56 @@ fn closure_captures_by_value() {
     let src = "$n = 100\n$f = |$x| $x + $n\n$n = 200\n$f 1";
     assert_eq!(eval_i64(src), 101);
 }
+
+// ── Member assignment and method dispatch on a value ──
+
+#[test]
+fn member_assignment_promotes_a_full_small_map() {
+    // Nine fields: the inline eight-entry representation has to become the
+    // hashed one without losing an entry or a cached fast-path value.
+    let src = "$m = { a:1, b:2, c:3, d:4, e:5, f:6, g:7, h:8 }\n\
+               $m.i = 9\n\
+               $m.a = 10\n\
+               $m.a + $m.h + $m.i";
+    assert_eq!(eval_i64(src), 27);
+}
+
+#[test]
+fn a_field_write_is_visible_through_every_handle() {
+    let src = "$m = { n: 1 }\n$alias = $m\n$m.n = 5\n$alias.n";
+    assert_eq!(eval_i64(src), 5, "maps are shared, not copied on write");
+}
+
+#[test]
+fn an_array_index_write_is_visible_through_every_handle() {
+    let src = "$a = [1]\n$alias = $a\n$a[0] = 9\n$alias[0]";
+    assert_eq!(eval_i64(src), 9);
+}
+
+#[test]
+fn a_method_call_on_a_value_receives_the_receiver_as_self() {
+    let src = "describe($v) {\n\
+                 return $self.kind + \":\" + $v.name\n\
+               }\n\
+               $e = { kind: \"enemy\", name: \"orc\" }\n\
+               $e.describe";
+    let v = eval(src);
+    assert_eq!(v.as_str(), Some("enemy:orc"));
+}
+
+#[test]
+fn a_method_call_works_through_an_array_index() {
+    let src = "bump($v, $n) {\n\
+                 $self.hp = $self.hp + $n\n\
+                 return $self.hp\n\
+               }\n\
+               $es = [{ hp: 1 }, { hp: 10 }]\n\
+               $es[1].bump 5";
+    assert_eq!(eval_i64(src), 15);
+}
+
+#[test]
+fn a_missing_method_still_yields_none() {
+    let src = "$e = { hp: 1 }\n$e.nope";
+    assert!(eval(src).is_nil());
+}

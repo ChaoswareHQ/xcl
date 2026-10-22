@@ -59,6 +59,8 @@ fn node_span(node: &AstNode) -> &Span {
         | AstNode::DictLit { span, .. }
         | AstNode::Index { span, .. }
         | AstNode::FieldAccess { span, .. }
+        | AstNode::SetField { span, .. }
+        | AstNode::SetIndex { span, .. }
         | AstNode::Range { span, .. }
         | AstNode::Block { span, .. }
         | AstNode::TypeDef { span, .. }
@@ -237,6 +239,8 @@ fn node_name(node: &AstNode) -> &'static str {
         AstNode::DictLit { .. } => "Dict",
         AstNode::Index { .. } => "Index",
         AstNode::FieldAccess { .. } => "Field",
+        AstNode::SetField { .. } => "SetField",
+        AstNode::SetIndex { .. } => "SetIndex",
         AstNode::Range { .. } => "Range",
         AstNode::Block { .. } => "Block",
         AstNode::TypeDef { .. } => "TypeDef",

@@ -627,6 +627,7 @@ pub fn plugin_demo() -> String {
         user_functions: Arc::from(Vec::<(Box<str>, Arc<FuncValue>)>::new()),
         function_by_name: Arc::from(Vec::<u32>::new()),
         closures: Arc::from(Vec::<FuncValue>::new()),
+        field_chains: Arc::from(Vec::<xcl_vm::bytecode::FieldChain>::new()),
     };
 
     let mut vm = VM::new();

@@ -8,16 +8,17 @@ use crate::runtime::vm::ops::consts::{
     OP_ADD, OP_ADD_FIELD_LOCAL_STORE, OP_ADD_FLOAT_LOCAL, OP_ADD_INT_LOCAL, OP_ADD_INT_STORE_LOCAL,
     OP_ADD_LOCAL_LOCAL, OP_ADD_LOCAL_LOCAL_STORE, OP_ADD_LOCAL_STORE, OP_ARRAY_PUSH_LOCAL,
     OP_DEC_LOCAL, OP_DIV_FLOAT_LOCAL, OP_DIV_LOCAL_LOCAL, OP_DIV_LOCAL_LOCAL_STORE,
-    OP_DIV_LOCAL_STORE, OP_FOR_NUMBER_LOOP, OP_GET_FIELD_LOCAL_STORE,
-    OP_GET_INDEX_LOCAL_LOCAL_STORE, OP_HALT, OP_IF_EQ_INT, OP_IF_LT_INT, OP_INC_LOCAL,
-    OP_INC_LOCAL_INT, OP_INC_LT_INT, OP_INC_LT_INT_WIDE, OP_JUMP, OP_JUMP_IF_FALSE,
-    OP_JUMP_IF_FALSE_LOCAL, OP_INC_IF_LOCAL, OP_LOAD_CONST_LOCAL, OP_LOAD_GLOBAL,
-    OP_LOAD_LOCAL, OP_LOAD_LOCAL_LOAD_LOCAL, OP_LOAD_LOCAL_PUSH_INT, OP_LOAD_LOCAL_STORE_LOCAL,
-    OP_LT_LOCAL_LOCAL, OP_MOD_EQ_INT, OP_MOD_LOCAL_LOCAL_STORE, OP_MUL_FLOAT_LOCAL,
-    OP_MUL_INT_LOCAL, OP_MUL_LOCAL_LOCAL, OP_MUL_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_STORE,
-    OP_PUSH_INT, OP_STORE_LOCAL, OP_SUB, OP_SUB_FLOAT_LOCAL, OP_SUB_INT_LOCAL, OP_SUB_LOCAL_LOCAL,
-    OP_SUB_LOCAL_LOCAL_STORE, OP_SUB_LOCAL_STORE, OP_WHILE_LT_INT, OP_WHILE_LT_INT_WIDE,
-    OP_WHILE_LT_LOCAL,
+    OP_DIV_LOCAL_STORE, OP_FIELD_LOCAL, OP_FOR_NUMBER_LOOP, OP_GET_FIELD_LOCAL_STORE,
+    OP_GET_INDEX_LOCAL_LOCAL_STORE, OP_HALT, OP_IF_EQ_INT, OP_IF_LT_INT, OP_INC_IF_LOCAL,
+    OP_INC_LOCAL, OP_INC_LOCAL_INT, OP_INC_LT_INT, OP_INC_LT_INT_WIDE, OP_JUMP, OP_JUMP_IF_FALSE,
+    OP_GET_INDEX_LOCAL_LOCAL, OP_JUMP_IF_FALSE_LOCAL, OP_LOAD_CONST_LOCAL, OP_LOAD_GLOBAL,
+    OP_LOAD_LOCAL, OP_LOCAL_OP_TOP,
+    OP_LOAD_LOCAL_LOAD_LOCAL, OP_LOAD_LOCAL_PUSH_INT, OP_LOAD_LOCAL_STORE_LOCAL, OP_LT_LOCAL_LOCAL,
+    OP_MOD_EQ_INT, OP_MOD_LOCAL_LOCAL_STORE, OP_MUL_FLOAT_LOCAL, OP_MUL_INT_LOCAL,
+    OP_MUL_LOCAL_LOCAL, OP_MUL_LOCAL_LOCAL_STORE, OP_MUL_LOCAL_STORE, OP_PUSH_INT, OP_STORE_LOCAL,
+    OP_SELF_FIELD_LOCAL, OP_SUB, OP_SUB_FLOAT_LOCAL, OP_SUB_INT_LOCAL, OP_SUB_LOCAL_LOCAL,
+    OP_SUB_LOCAL_LOCAL_STORE,
+    OP_SUB_LOCAL_STORE, OP_WHILE_LT_INT, OP_WHILE_LT_INT_WIDE, OP_WHILE_LT_LOCAL,
 };
 use crate::runtime::vm::ops::meta;
 
@@ -349,6 +350,14 @@ fn legacy_dataflow_use(op: u8, instr: Instr) -> Vec<u32> {
         // LOAD_LOCAL_STORE_LOCAL: reads slot a (src), writes slot b (dest)
         OP_LOAD_LOCAL_STORE_LOCAL => vec![instr.a()],
         OP_FOR_NUMBER_LOOP => vec![instr.a() >> 16],
+        // FIELD_LOCAL: reads the source local in `b`
+        OP_FIELD_LOCAL => vec![instr.b() as u32],
+        // GET_INDEX_LOCAL_LOCAL: reads the collection in `a` and the index in `b`
+        OP_GET_INDEX_LOCAL_LOCAL => vec![instr.a(), instr.b() as u32],
+        // LOCAL_OP_TOP: reads and writes slot `a`
+        OP_LOCAL_OP_TOP => vec![instr.a()],
+        // SELF_FIELD_LOCAL: reads the source local in `b`
+        OP_SELF_FIELD_LOCAL => vec![instr.b() as u32],
         _ => Vec::new(),
     }
 }
@@ -377,6 +386,7 @@ fn legacy_dataflow_def(op: u8, instr: Instr) -> Vec<u32> {
         OP_FOR_NUMBER_LOOP => vec![instr.a() >> 16],
         OP_INC_LT_INT | OP_INC_LT_INT_WIDE => vec![instr.c() as u32],
         OP_INC_IF_LOCAL => vec![instr.c() as u32],
+        OP_LOCAL_OP_TOP => vec![instr.a()],
         _ => Vec::new(),
     }
 }
@@ -509,6 +519,7 @@ fn legacy_cse_defined_slots(op: u8, instr: Instr) -> Vec<u32> {
         OP_FOR_NUMBER_LOOP => vec![instr.a() >> 16],
         OP_INC_LT_INT | OP_INC_LT_INT_WIDE => vec![instr.c() as u32],
         OP_INC_IF_LOCAL => vec![instr.c() as u32],
+        OP_LOCAL_OP_TOP => vec![instr.a()],
         _ => Vec::new(),
     }
 }
@@ -580,6 +591,14 @@ fn legacy_dead_store_reads(op: u8, instr: Instr) -> Vec<u32> {
         OP_INC_LT_INT | OP_INC_LT_INT_WIDE => vec![instr.c() as u32],
         // JUMP_IF_FALSE_LOCAL: reads the condition in `b`
         OP_JUMP_IF_FALSE_LOCAL => vec![instr.b() as u32],
+        // FIELD_LOCAL: reads the source local in `b`
+        OP_FIELD_LOCAL => vec![instr.b() as u32],
+        // GET_INDEX_LOCAL_LOCAL: reads the collection in `a` and the index in `b`
+        OP_GET_INDEX_LOCAL_LOCAL => vec![instr.a(), instr.b() as u32],
+        // LOCAL_OP_TOP: reads and writes slot `a`
+        OP_LOCAL_OP_TOP => vec![instr.a()],
+        // SELF_FIELD_LOCAL: reads the source local in `b`
+        OP_SELF_FIELD_LOCAL => vec![instr.b() as u32],
         _ => Vec::new(),
     }
 }
@@ -606,4 +625,3 @@ fn slot_metadata_matches_legacy_dead_store() {
     // OP_FOR_NUMBER_LOOP special case
     assert_eq!(meta::reads(OP_FOR_NUMBER_LOOP), 0);
 }
-

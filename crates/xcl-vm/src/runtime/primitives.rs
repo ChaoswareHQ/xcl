@@ -310,14 +310,14 @@ pub static PRIMITIVES: &[Primitive] = &[
         aliases: &[],
         kind: PrimKind::Array,
         subtype: None,
-        caps: caps(&[Cap::Display, Cap::Index, Cap::Iterable]),
+        caps: caps(&[Cap::Display, Cap::Index, Cap::IndexMut, Cap::Iterable]),
     },
     Primitive {
         name: "map",
         aliases: &["dict"],
         kind: PrimKind::Map,
         subtype: None,
-        caps: caps(&[Cap::Display, Cap::Index]),
+        caps: caps(&[Cap::Display, Cap::Index, Cap::IndexMut]),
     },
     Primitive {
         name: "function",

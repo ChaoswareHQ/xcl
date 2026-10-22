@@ -260,6 +260,36 @@ pub enum AstNode {
         /// Field name string.
         field: String,
     },
+    /// Field assignment: `obj.field = value` or `obj.field op= value`.
+    ///
+    /// Kept separate from [`AstNode::Assign`] so a name binding and a container
+    /// write stay distinguishable in the compiler, the inliner, and the linter.
+    SetField {
+        /// Source location of the assignment.
+        span: Span,
+        /// Expression producing the record or map being written.
+        target: Box<AstNode>,
+        /// Field name written.
+        field: String,
+        /// Value stored into the field.
+        value: Box<AstNode>,
+        /// `Some(op)` for a compound write (`+=`), which reads the old field and
+        /// combines it with `value` before storing.
+        op: Option<BinaryOperator>,
+    },
+    /// Index assignment: `collection[index] = value` or `collection[index] op= value`.
+    SetIndex {
+        /// Source location of the assignment.
+        span: Span,
+        /// Expression producing the array or map being written.
+        target: Box<AstNode>,
+        /// Key or offset expression.
+        index: Box<AstNode>,
+        /// Value stored at the index.
+        value: Box<AstNode>,
+        /// `Some(op)` for a compound write (`+=`).
+        op: Option<BinaryOperator>,
+    },
     /// Range expression: `1..10`, `..end`, `start..`.
     Range {
         /// Source location of the range.

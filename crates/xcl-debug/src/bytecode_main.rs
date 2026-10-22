@@ -214,6 +214,40 @@ fn cmd_disassemble(bc: &Bytecode, raw: bool) {
     println!("Closures: {}", bc.closures.len());
     println!();
 
+    print_code(bc, raw);
+
+    for (name, func) in bc.user_functions.iter() {
+        let Some(body) = func.bytecode.as_ref() else {
+            continue;
+        };
+        println!();
+        println!(
+            "--- function {} ({} instructions) ---",
+            name,
+            body.instructions.len()
+        );
+        println!();
+        print_code(body, raw);
+    }
+}
+
+/// Arithmetic code carried in the `c` operand of the fused field opcodes.
+fn field_op_name(c: u8) -> &'static str {
+    match c {
+        0 => "add",
+        1 => "sub",
+        2 => "mul",
+        _ => "?",
+    }
+}
+
+fn field_name(bc: &Bytecode, idx: u32) -> &str {
+    bc.string_table
+        .get(idx as usize)
+        .map_or("?", |s| s.as_ref())
+}
+
+fn print_code(bc: &Bytecode, raw: bool) {
     if !bc.local_names.is_empty() {
         println!("--- Local Variables ---");
         for (i, name) in bc.local_names.iter().enumerate() {
@@ -240,7 +274,68 @@ fn cmd_disassemble(bc: &Bytecode, raw: bool) {
 
         let operands = match op {
             // No operands
-            0 | 1 | 2 | 3 | 17 | 26 | 33 | 34 => String::new(),
+            0 | 1 | 2 | 3 | 17 | 26 | 33 | 34 | 56 => String::new(),
+
+            // Fused field read-modify-write: `a` names the destination field.
+            55 => format!(" pop().{} = pop()", field_name(bc, a)),
+            57 => format!(
+                " {}.{} {} {} (b={})",
+                "recv",
+                field_name(bc, a),
+                field_op_name(c),
+                b,
+                b
+            ),
+            58 => format!(
+                " recv.{} {} ${} (b={})",
+                field_name(bc, a),
+                field_op_name(c),
+                bc.local_names.get(b as usize).map_or("?", |s| s.as_ref()),
+                b
+            ),
+            59 => format!(
+                " recv.{} {} recv.{}",
+                field_name(bc, a),
+                field_op_name(c),
+                field_name(bc, b as u32)
+            ),
+
+            // Self-receiver forms: the receiver is `$self`.
+            71 => format!(" $self.{} {} {}", field_name(bc, a), field_op_name(c), b),
+            72 => format!(
+                " $self.{} {} ${}",
+                field_name(bc, a),
+                field_op_name(c),
+                bc.local_names.get(b as usize).map_or("?", |s| s.as_ref())
+            ),
+            73 => format!(
+                " $self.{} {} $self.{}",
+                field_name(bc, a),
+                field_op_name(c),
+                field_name(bc, b as u32)
+            ),
+            74 => format!(" $self.{}", field_name(bc, a)),
+            75 => format!(
+                " ${} {} top",
+                bc.local_names.get(a as usize).map_or("?", |s| s.as_ref()),
+                field_op_name(c)
+            ),
+            76 => format!(" {}.<method> {}", field_name(bc, a), b as i16),
+            77 => format!(
+                " ${}[${}]",
+                bc.local_names.get(a as usize).map_or("?", |s| s.as_ref()),
+                bc.local_names.get(b as usize).map_or("?", |s| s.as_ref())
+            ),
+            78 => format!(" return $self.{}", field_name(bc, a)),
+            79 => format!(" chain[{}]", a),
+            86 => format!(" chain[{}] then return $self.{}", a, field_name(bc, b as u32)),
+            87 => format!(
+                " ${}[${}].{} {}",
+                bc.local_names.get((b >> 8) as usize).map_or("?", |s| s.as_ref()),
+                bc.local_names.get((b & 0xff) as usize).map_or("?", |s| s.as_ref()),
+                field_name(bc, a),
+                c as i8
+            ),
 
             // Single operand a
             4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 28 | 29 | 30 | 35 | 36 | 37 | 38 | 46 | 52 | 53

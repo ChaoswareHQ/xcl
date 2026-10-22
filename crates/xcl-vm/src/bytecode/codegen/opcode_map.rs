@@ -58,6 +58,20 @@ pub(super) fn local_store_opcode(op: BinaryOperator) -> Option<u8> {
     }
 }
 
+/// Arithmetic code for `OP_LOCAL_OP_TOP` (`$dest = $dest op <stack value>`).
+///
+/// Shares the vocabulary of the fused field updates: 0 add, 1 sub, 2 mul.
+#[inline(always)]
+pub(super) fn top_local_op(op: BinaryOperator) -> Option<u8> {
+    use crate::runtime::opcode::field_op;
+    match op {
+        BinaryOperator::Add => Some(field_op::ADD),
+        BinaryOperator::Sub => Some(field_op::SUB),
+        BinaryOperator::Mul => Some(field_op::MUL),
+        _ => None,
+    }
+}
+
 /// Opcode for `$dest = $lhs op $rhs` (local-local-store form).
 #[inline(always)]
 pub(super) fn local_local_store_opcode(op: BinaryOperator) -> Option<u8> {

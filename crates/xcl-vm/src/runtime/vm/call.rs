@@ -27,7 +27,11 @@ impl VM {
         }
     }
 
-    pub(super) fn enter_call(&mut self, func: &crate::runtime::value::FuncValue, args: &[Value]) -> Action {
+    pub(super) fn enter_call(
+        &mut self,
+        func: &crate::runtime::value::FuncValue,
+        args: &[Value],
+    ) -> Action {
         let Some(bc) = &func.bytecode else {
             self.push(Value::nil());
             return Action::Next;
@@ -49,6 +53,7 @@ impl VM {
 
         // Prepare argv only when the body actually reads `$1..$#` / `$@` / `$*`.
         if func.uses_argv {
+            frame.argv.clear();
             frame.argv.extend_from_slice(args);
         }
 
@@ -90,9 +95,12 @@ impl VM {
             let frame = &mut self.frames[idx];
             frame.ip = 0;
             frame.stack_base = arg_start as u32;
+            // A zero-argument call has no receiver slot, so `arg_start` can be
+            // one past the end here.
             frame.arg0 = self.stack.get(arg_start).copied().unwrap_or(Value::nil());
 
             if func.uses_argv {
+                frame.argv.clear();
                 frame
                     .argv
                     .extend_from_slice(&self.stack[arg_start..arg_start + nargs]);
@@ -107,6 +115,7 @@ impl VM {
     /// is **not** (fused named calls embed it in the instruction).
     ///
     /// `arg_start` is the first argument; the result replaces it on return.
+    #[inline(always)]
     pub(super) fn enter_call_args_at(
         &mut self,
         func: &crate::runtime::value::FuncValue,
@@ -132,9 +141,12 @@ impl VM {
             let frame = &mut self.frames[idx];
             frame.ip = 0;
             frame.stack_base = arg_start as u32;
+            // A zero-argument call has no receiver slot, so `arg_start` can be
+            // one past the end here.
             frame.arg0 = self.stack.get(arg_start).copied().unwrap_or(Value::nil());
 
             if func.uses_argv {
+                frame.argv.clear();
                 frame
                     .argv
                     .extend_from_slice(&self.stack[arg_start..arg_start + nargs]);
@@ -204,6 +216,7 @@ impl VM {
         frame.argv.clear();
         frame.arg0 = args.first().copied().unwrap_or(Value::nil());
         if func.uses_argv {
+            frame.argv.clear();
             frame.argv.extend_from_slice(args);
         }
 
@@ -251,7 +264,9 @@ impl VM {
         self.install_captures(reg_base, n, func_ref);
         {
             let frame = &mut self.frames[idx];
+            frame.ip = 0;
             frame.stack_base = stack_base;
+            frame.argv.clear();
             frame.argv.extend_from_slice(args);
         }
 

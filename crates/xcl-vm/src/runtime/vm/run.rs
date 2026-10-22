@@ -141,12 +141,16 @@ impl VM {
                 }
                 top -= 1;
                 let caller = unsafe { self.frames.get_unchecked(top) };
-                let base = returning_base;
+                let base = returning_base as usize;
                 ip = caller.ip as usize;
                 (code_ptr, code_len) = frame_code_bounds(caller);
                 locals = caller.locals;
-                self.stack.truncate(base as usize);
-                self.stack.push(r);
+                // The call already truncated the operand stack to `base`, so the
+                // result is written straight into that slot.
+                unsafe {
+                    self.stack.as_mut_ptr().add(base).write(r);
+                    self.stack.set_len(base + 1);
+                }
                 continue;
             }
 

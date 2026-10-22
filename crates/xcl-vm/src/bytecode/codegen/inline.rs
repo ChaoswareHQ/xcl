@@ -5,10 +5,10 @@
 //! and records their parameter names and body, so a call site can substitute
 //! arguments and emit the body directly.
 
-#[cfg(feature = "std")]
-use std::collections::{BTreeMap, BTreeSet};
 #[cfg(not(feature = "std"))]
 use alloc::collections::{BTreeMap, BTreeSet};
+#[cfg(feature = "std")]
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::debug::is_language_name;
@@ -108,6 +108,20 @@ pub(super) fn scan_vars(node: &AstNode, reads: &mut Vec<String>, writes: &mut Ve
             scan_vars(index, reads, writes);
         }
         AstNode::FieldAccess { target, .. } => scan_vars(target, reads, writes),
+        AstNode::SetField { target, value, .. } => {
+            scan_vars(target, reads, writes);
+            scan_vars(value, reads, writes);
+        }
+        AstNode::SetIndex {
+            target,
+            index,
+            value,
+            ..
+        } => {
+            scan_vars(target, reads, writes);
+            scan_vars(index, reads, writes);
+            scan_vars(value, reads, writes);
+        }
         AstNode::Pipeline { input, stages, .. } => {
             scan_vars(input, reads, writes);
             for stage in stages {
@@ -196,6 +210,8 @@ fn is_pure_expr(node: &AstNode) -> bool {
         // Impure constructs
         AstNode::Call { .. }
         | AstNode::Assign { .. }
+        | AstNode::SetField { .. }
+        | AstNode::SetIndex { .. }
         | AstNode::While { .. }
         | AstNode::For { .. }
         | AstNode::If { .. }
@@ -260,6 +276,8 @@ fn is_pure_block_expr(node: &AstNode, inlineable_fns: &BTreeSet<String>) -> bool
         }
         // Impure constructs
         AstNode::Assign { .. }
+        | AstNode::SetField { .. }
+        | AstNode::SetIndex { .. }
         | AstNode::While { .. }
         | AstNode::For { .. }
         | AstNode::If { .. }
@@ -410,6 +428,32 @@ pub(super) fn substitute(node: &AstNode, subs: &[(String, AstNode)]) -> AstNode 
         } => AstNode::Index {
             target: Box::new(substitute(target, subs)),
             index: Box::new(substitute(index, subs)),
+            span: span.clone(),
+        },
+        AstNode::SetField {
+            target,
+            field,
+            value,
+            op,
+            span,
+        } => AstNode::SetField {
+            target: Box::new(substitute(target, subs)),
+            field: field.clone(),
+            value: Box::new(substitute(value, subs)),
+            op: *op,
+            span: span.clone(),
+        },
+        AstNode::SetIndex {
+            target,
+            index,
+            value,
+            op,
+            span,
+        } => AstNode::SetIndex {
+            target: Box::new(substitute(target, subs)),
+            index: Box::new(substitute(index, subs)),
+            value: Box::new(substitute(value, subs)),
+            op: *op,
             span: span.clone(),
         },
         AstNode::ArrayLit { elements, span } => AstNode::ArrayLit {

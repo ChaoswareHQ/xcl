@@ -128,6 +128,7 @@ pub static PARSE_ERROR_CODES: &[(&str, &str)] = &[
     ("E0006", "unsupported shell special variable"),
     ("E0007", "invalid positional argument"),
     ("E0008", "unexpected -> in expression"),
+    ("E0009", "invalid assignment target"),
 ];
 
 mod expr;

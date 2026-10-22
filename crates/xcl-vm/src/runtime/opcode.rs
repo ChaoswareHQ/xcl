@@ -86,6 +86,17 @@ pub fn opcode_name(op: u8) -> Option<&'static str> {
     crate::runtime::vm::ops::opcode_name_core(op)
 }
 
+/// Operand values for the `c` field of the fused field-update opcodes
+/// (`OP_FIELD_INT`, `OP_FIELD_LOCAL`, `OP_FIELD_FIELD`).
+pub mod field_op {
+    /// `old + rhs`.
+    pub const ADD: u8 = 0;
+    /// `old - rhs`.
+    pub const SUB: u8 = 1;
+    /// `old * rhs`.
+    pub const MUL: u8 = 2;
+}
+
 /// Operand values for the `c` field of `OP_SPECIAL_VAR`.
 pub mod special_var_kind {
     /// `$0` — script name.
@@ -174,9 +185,7 @@ pub mod layout {
 
     /// Core codes with no opcode today: reserved growth space for new
     /// superinstructions. Keep in sync when adding an opcode.
-    pub const CORE_GROWTH: &[u8] = &[
-        55, 56, 57, 58, 59, 71, 72, 73, 74, 75, 76, 77, 78, 79, 86, 87, 88, 89,
-    ];
+    pub const CORE_GROWTH: &[u8] = &[88, 89];
 
     /// Returns `true` when `op` belongs to the core range.
     #[inline(always)]

@@ -75,6 +75,7 @@ WORKLOADS = [
     "hanoi",
     "map_read",
     "array_sum",
+    "entity_oop",
     "native_call",
 ]
 

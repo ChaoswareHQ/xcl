@@ -1,0 +1,36 @@
+# entity_oop: 1000 records mutated over 64 ticks by a receiver method.
+# Every mutation is a field write, every tick is a value method call, and the
+# method reads its receiver through `$self`.
+
+spawn($i) {
+    return { x: $i, y: $i + 1, hp: 100, score: 0 }
+}
+
+tick($v, $d) {
+    $self.hp = $self.hp - 1
+    $self.x = $self.x + $d
+    $self.y = $self.y - $d
+    $self.score = $self.score + $self.x
+    return $self.score
+}
+
+$es = []
+$i = 0
+while $i < 1000 {
+    $es[$i] = spawn $i
+    $i = $i + 1
+}
+
+$sum = 0
+$t = 0
+while $t < 64 {
+    $j = 0
+    while $j < 1000 {
+        $sum = $sum + $es[$j].tick 1
+        $j = $j + 1
+    }
+    $t = $t + 1
+}
+
+$result = $sum % 1000003
+print $result

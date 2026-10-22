@@ -143,6 +143,7 @@ mod core_ops {
 
         /// Loads a local variable from slot index `a` onto the stack.
         #[opcode(code = 8, arity = 0, stack = "0 -> 1", reads = "a")]
+        #[inline(always)]
         fn op_load_local(
             vm: &mut VM,
             locals: LocalSlice,
@@ -1058,8 +1059,33 @@ mod core_ops {
         ) -> OpcodeResult {
             let idx = vm.pop();
             let target = vm.pop();
-            let result = if let Some(arr) = target.as_array() {
-                // Array indexing — never cached
+            vm.push(index_value(target, idx));
+            OpcodeResult::Next
+        }
+
+        /// `target[index]` with both operands already in locals.
+        ///
+        /// Operand `a` = collection slot, `b` = index slot. Saves the two loads
+        /// and the stack traffic of the generic form.
+        #[opcode(code = 77, arity = 0, stack = "0 -> 1", reads = "a,b")]
+        #[inline(always)]
+        fn op_get_index_local_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let target = unsafe { *locals.get_unchecked(instr.a() as usize) };
+            let idx = unsafe { *locals.get_unchecked(instr.b() as usize) };
+            vm.push(index_value(target, idx));
+            OpcodeResult::Next
+        }
+
+        /// Shared element read for the indexing opcodes: arrays normalise a
+        /// negative offset, and maps only accept string keys.
+        #[inline(always)]
+        pub(super) fn index_value(target: Value, idx: Value) -> Value {
+            if let Some(arr) = target.as_array() {
                 let i = idx.as_int();
                 let i = if i < 0 { arr.len() as i64 + i } else { i };
                 arr.get(i as usize).copied().unwrap_or(Value::nil())
@@ -1071,9 +1097,7 @@ mod core_ops {
                 }
             } else {
                 Value::nil()
-            };
-            vm.push(result);
-            OpcodeResult::Next
+            }
         }
 
         /// Pushes an element onto an array.
@@ -1096,7 +1120,8 @@ mod core_ops {
 
         // ── Iteration/coalesce ──
 
-        /// Gets a field from a map or resolves a universal method. Operand `a` = string table index.
+        /// Gets a field from a map, resolves a universal method, or dispatches a
+        /// method on the receiver's value. Operand `a` = string table index.
         #[opcode(code = 38, arity = 1, stack = "1 -> 1")]
         fn op_get_field(
             vm: &mut VM,
@@ -1127,8 +1152,392 @@ mod core_ops {
                 return OpcodeResult::Next;
             }
 
+            // Method dispatch on the receiver's value: `$e.score` with no
+            // `score` field calls the unit's `score` function with `$e` as
+            // `$self`. The name is already interned as this instruction's field,
+            // so `function_by_name` resolves it with one array load.
+            let ord = vm.frames[top]
+                .code()
+                .function_by_name
+                .get(field_idx)
+                .copied()
+                .unwrap_or(0);
+            if ord != 0
+                && let Some(func_val) = vm
+                    .globals
+                    .get((vm.function_base + ord - 1) as usize)
+                    .copied()
+                && let Some(f) = func_val.as_func()
+            {
+                return vm.enter_call_from_op(f, &[target]);
+            }
+
             vm.push(Value::nil());
             OpcodeResult::Next
+        }
+
+        /// Stores a field: `target.field = value`. Operand `a` = field string.
+        ///
+        /// Stack: `target, value -> 0`. A missing field is inserted; a full
+        /// small map is promoted by [`HeapMap::set_fast_value`].
+        #[opcode(code = 55, arity = 2, stack = "2 -> 0")]
+        fn op_set_field(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let value = vm.pop();
+            let target = vm.pop();
+            let field_idx = instr.a() as usize;
+            // SAFETY: frame at `top` is active during dispatch.
+            let key = vm.frames[top].code().string_values[field_idx];
+            if let Some(map) = target.as_map_mut() {
+                map.set_fast_value(key, value);
+            }
+            OpcodeResult::Next
+        }
+
+        /// Stores an element: `target[index] = value`.
+        ///
+        /// Stack: `target, index, value -> 0`. An index one past the array's end
+        /// appends, so `$a[$a.len] = v` builds an array in order; further
+        /// out-of-range writes are ignored rather than growing it with holes.
+        #[opcode(code = 56, arity = 3, stack = "3 -> 0")]
+        fn op_set_index(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            _instr: Instr,
+        ) -> OpcodeResult {
+            let value = vm.pop();
+            let idx = vm.pop();
+            let target = vm.pop();
+            if let Some(map) = target.as_map_mut() {
+                if idx.as_str().is_some() {
+                    map.set_fast_value(idx, value);
+                }
+            } else if let Some(arr) = target.as_array_mut() {
+                let i = idx.as_int();
+                let i = if i < 0 { arr.len() as i64 + i } else { i };
+                if i >= 0 {
+                    let i = i as usize;
+                    if i < arr.len() {
+                        arr[i] = value;
+                    } else if i == arr.len() {
+                        arr.push(value);
+                    }
+                }
+                target.bump_array_version();
+            }
+            OpcodeResult::Next
+        }
+
+        /// Applies `old op rhs` with the semantics of `OP_ADD` / `OP_SUB` /
+        /// `OP_MUL`, so a fused field update cannot diverge from the unfused
+        /// sequence it replaces.
+        #[inline(always)]
+        pub(super) fn combine(old: Value, rhs: Value, op: u8, arena: &bumpalo::Bump) -> Value {
+            use crate::runtime::opcode::field_op;
+            match op {
+                field_op::SUB => {
+                    if old.is_int() && rhs.is_int() {
+                        let a = old.as_i48();
+                        let b = rhs.as_i48();
+                        match a.checked_sub(b) {
+                            Some(d) => Value::from_i48(d),
+                            None => Value::from_f64(a as f64 - b as f64),
+                        }
+                    } else if old.is_float() && rhs.is_float() {
+                        Value::from_f64(old.as_f64() - rhs.as_f64())
+                    } else {
+                        old.sub_(rhs)
+                    }
+                }
+                field_op::MUL => {
+                    if old.is_int() && rhs.is_int() {
+                        let a = old.as_i48();
+                        let b = rhs.as_i48();
+                        match a.checked_mul(b) {
+                            Some(p) => Value::from_i48(p),
+                            None => Value::from_f64(a as f64 * b as f64),
+                        }
+                    } else if old.is_float() && rhs.is_float() {
+                        Value::from_f64(old.as_f64() * rhs.as_f64())
+                    } else {
+                        old.mul(rhs, arena)
+                    }
+                }
+                _ => {
+                    if old.is_int() && rhs.is_int() {
+                        let a = old.as_i48();
+                        let b = rhs.as_i48();
+                        match a.checked_add(b) {
+                            Some(s) => Value::from_i48(s),
+                            None => Value::from_f64(a as f64 + b as f64),
+                        }
+                    } else if old.is_float() && rhs.is_float() {
+                        Value::from_f64(old.as_f64() + rhs.as_f64())
+                    } else {
+                        old.add(rhs, arena)
+                    }
+                }
+            }
+        }
+
+        /// `recv.f = recv.f <op> c`. Operand `a` = field, `b` = the constant,
+        /// `c` = [`crate::runtime::opcode::field_op`]. Stack: `recv -> 0`.
+        #[opcode(code = 57, arity = 1, stack = "1 -> 0")]
+        #[inline(always)]
+        fn op_field_int(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let recv = vm.pop();
+            // SAFETY: frame at `top` is active during dispatch.
+            let key = vm.frames[top].code().string_values[instr.a() as usize];
+            if let Some(map) = recv.as_map_mut() {
+                let rhs = Value::from_i48(instr.b() as i64);
+                let arena = &vm.arena;
+                map.update_fast_value(key, |old| combine(old, rhs, instr.c(), arena));
+            }
+            OpcodeResult::Next
+        }
+
+        /// `recv.f = recv.f <op> locals[b]`. Operand `a` = field, `b` = the
+        /// local, `c` = [`crate::runtime::opcode::field_op`]. Stack: `recv -> 0`.
+        #[opcode(code = 58, arity = 1, stack = "1 -> 0", reads = "b")]
+        #[inline(always)]
+        fn op_field_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let recv = vm.pop();
+            let rhs = unsafe { *locals.get_unchecked(instr.b() as usize) };
+            // SAFETY: frame at `top` is active during dispatch.
+            let key = vm.frames[top].code().string_values[instr.a() as usize];
+            if let Some(map) = recv.as_map_mut() {
+                let arena = &vm.arena;
+                map.update_fast_value(key, |old| combine(old, rhs, instr.c(), arena));
+            }
+            OpcodeResult::Next
+        }
+
+        /// `recv.a = recv.a <op> recv.b`. Operand `a` = destination field,
+        /// `b` = source field, `c` = [`crate::runtime::opcode::field_op`].
+        /// Stack: `recv -> 0`.
+        #[opcode(code = 59, arity = 1, stack = "1 -> 0")]
+        #[inline(always)]
+        fn op_field_field(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let recv = vm.pop();
+            // SAFETY: frame at `top` is active during dispatch.
+            let code = vm.frames[top].code();
+            let dest_key = code.string_values[instr.a() as usize];
+            let src_key = code.string_values[instr.b() as usize];
+            if let Some(map) = recv.as_map_mut() {
+                let rhs = map.get_fast_value(src_key).unwrap_or_else(Value::nil);
+                let arena = &vm.arena;
+                map.update_fast_value(dest_key, |old| combine(old, rhs, instr.c(), arena));
+            }
+            OpcodeResult::Next
+        }
+
+        /// `$self.f = $self.f <op> c`, with `$self` taken from the frame's
+        /// `arg0`. Operand `a` = field, `b` = the constant, `c` = op.
+        ///
+        /// A method body's field updates never touch the operand stack: this is
+        /// one dispatch for the whole read-modify-write.
+        #[opcode(code = 71, arity = 0, stack = "0 -> 0")]
+        #[inline(always)]
+        fn op_self_field_int(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let recv = vm.frames[top].arg0;
+            // SAFETY: frame at `top` is active during dispatch.
+            let key = vm.frames[top].code().string_values[instr.a() as usize];
+            if let Some(map) = recv.as_map_mut() {
+                let rhs = Value::from_i48(instr.b() as i64);
+                let arena = &vm.arena;
+                map.update_fast_value(key, |old| combine(old, rhs, instr.c(), arena));
+            }
+            OpcodeResult::Next
+        }
+
+        /// `$self.f = $self.f <op> locals[b]`. Operand `a` = field, `b` = the
+        /// local, `c` = op.
+        #[opcode(code = 72, arity = 0, stack = "0 -> 0", reads = "b")]
+        #[inline(always)]
+        fn op_self_field_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let recv = vm.frames[top].arg0;
+            let rhs = unsafe { *locals.get_unchecked(instr.b() as usize) };
+            // SAFETY: frame at `top` is active during dispatch.
+            let key = vm.frames[top].code().string_values[instr.a() as usize];
+            if let Some(map) = recv.as_map_mut() {
+                let arena = &vm.arena;
+                map.update_fast_value(key, |old| combine(old, rhs, instr.c(), arena));
+            }
+            OpcodeResult::Next
+        }
+
+        /// `$self.a = $self.a <op> $self.b`. Operand `a` = destination field,
+        /// `b` = source field, `c` = op.
+        #[opcode(code = 73, arity = 0, stack = "0 -> 0")]
+        #[inline(always)]
+        fn op_self_field_field(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let recv = vm.frames[top].arg0;
+            // SAFETY: frame at `top` is active during dispatch.
+            let code = vm.frames[top].code();
+            let dest_key = code.string_values[instr.a() as usize];
+            let src_key = code.string_values[instr.b() as usize];
+            if let Some(map) = recv.as_map_mut() {
+                let rhs = map.get_fast_value(src_key).unwrap_or_else(Value::nil);
+                let arena = &vm.arena;
+                map.update_fast_value(dest_key, |old| combine(old, rhs, instr.c(), arena));
+            }
+            OpcodeResult::Next
+        }
+
+        /// Pushes `$self.f`. Operand `a` = field.
+        #[inline(always)]
+        #[opcode(code = 74, arity = 0, stack = "0 -> 1")]
+        fn op_self_get_field(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let recv = vm.frames[top].arg0;
+            // SAFETY: frame at `top` is active during dispatch.
+            let key = vm.frames[top].code().string_values[instr.a() as usize];
+            let v = recv
+                .as_map()
+                .and_then(|m| m.get_fast_value(key))
+                .unwrap_or_else(Value::nil);
+            vm.push(v);
+            OpcodeResult::Next
+        }
+
+        /// Applies a fused run of `$self` field updates. Operand `a` = chain.
+        ///
+        /// The steps live in the unit's `field_chains` table. Running them in
+        /// one handler removes a dispatch per update while doing exactly what
+        /// the separate instructions did.
+        #[inline(always)]
+        #[opcode(code = 79, arity = 0, stack = "0 -> 0")]
+        fn op_self_update_chain(
+            vm: &mut VM,
+            locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            // SAFETY: frame at `top` is active during dispatch.
+            let frame = unsafe { vm.frames.get_unchecked(top) };
+            let code = frame.code();
+            let Some(chain) = code.field_chains.get(instr.a() as usize) else {
+                return OpcodeResult::Next;
+            };
+            let recv = frame.arg0;
+            let Some(map) = recv.as_map_mut() else {
+                return OpcodeResult::Next;
+            };
+            let arena = &vm.arena;
+            for step in chain.steps.iter() {
+                let rhs = match step.kind {
+                    0 => Value::from_i48(step.operand as i32 as i64),
+                    1 => unsafe { *locals.get_unchecked(step.operand as usize) },
+                    _ => map
+                        .get_fast_value(step.rhs_key)
+                        .unwrap_or_else(Value::nil),
+                };
+                map.update_fast_value(step.key, |old| combine(old, rhs, step.op, arena));
+            }
+            OpcodeResult::Next
+        }
+
+        /// [`op_self_update_chain`] followed by `return $self.f`.
+        ///
+        /// Operand `a` = chain, `b` = the returned field. The return path pops
+        /// the value this pushes, exactly like `PUSH; RETURN`.
+        #[inline(always)]
+        #[opcode(code = 86, arity = 0, stack = "0 -> 1")]
+        fn op_self_update_chain_return(
+            vm: &mut VM,
+            locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            // SAFETY: frame at `top` is active during dispatch.
+            let frame = unsafe { vm.frames.get_unchecked(top) };
+            let code = frame.code();
+            let recv = frame.arg0;
+            let Some(chain) = code.field_chains.get(instr.a() as usize) else {
+                vm.push(Value::nil());
+                return OpcodeResult::Return;
+            };
+            let ret_key = code.string_values[instr.b() as usize];
+            let Some(map) = recv.as_map_mut() else {
+                vm.push(Value::nil());
+                return OpcodeResult::Return;
+            };
+            let arena = &vm.arena;
+            for step in chain.steps.iter() {
+                let rhs = match step.kind {
+                    0 => Value::from_i48(step.operand as i32 as i64),
+                    1 => unsafe { *locals.get_unchecked(step.operand as usize) },
+                    _ => map
+                        .get_fast_value(step.rhs_key)
+                        .unwrap_or_else(Value::nil),
+                };
+                map.update_fast_value(step.key, |old| combine(old, rhs, step.op, arena));
+            }
+            let v = map.get_fast_value(ret_key).unwrap_or_else(Value::nil);
+            vm.push(v);
+            OpcodeResult::Return
+        }
+
+        /// `return $self.f` in one dispatch: pushes the field and returns.
+        ///
+        /// The return path pops the value from the operand stack, so this is the
+        /// same contract as `PUSH; RETURN` with one less dispatch.
+        #[opcode(code = 78, arity = 0, stack = "0 -> 1")]
+        #[inline(always)]
+        fn op_return_self_field(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let recv = vm.frames[top].arg0;
+            // SAFETY: frame at `top` is active during dispatch.
+            let key = vm.frames[top].code().string_values[instr.a() as usize];
+            let v = recv
+                .as_map()
+                .and_then(|m| m.get_fast_value(key))
+                .unwrap_or_else(Value::nil);
+            vm.push(v);
+            OpcodeResult::Return
         }
     }
 
@@ -1535,6 +1944,11 @@ mod core_ops {
         }
 
         /// Dispatches a method call on a receiver value. Operand `a` = field index, `b` = arg count.
+        ///
+        /// Resolution order: the receiver subtype's domain (`result`/`error`/
+        /// `handle`), a field of that name (for a zero-argument call), a
+        /// top-level function of the unit called with the receiver as argument
+        /// zero, a parent record's domain, then universal natives.
         #[opcode(code = 66, arity = 0, stack = "n+1 -> 1")]
         fn op_call_method(
             vm: &mut VM,
@@ -1542,44 +1956,122 @@ mod core_ops {
             top: usize,
             instr: Instr,
         ) -> OpcodeResult {
-            let field_idx = instr.a() as usize;
             let nargs = instr.b() as usize;
-            // The interned key Value owns a `'static` string, so this needs no
-            // `Arc` clone of the string table and no borrow of the frame.
+            // The receiver sits below its arguments, exactly where a call
+            // expects argument zero, so the hot path never copies them.
+            let arg_start = vm.stack.len() - nargs - 1;
+            dispatch_method(vm, top, instr.a() as usize, nargs, arg_start)
+        }
+
+        /// Method call with one integer argument carried in `b`, which fuses
+        /// `PUSH_INT c; CALL_METHOD m, 1` into a single dispatch.
+        #[opcode(code = 76, arity = 1, stack = "1 -> 1")]
+        fn op_call_method_int(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let arg_start = vm.stack.len() - 1;
+            vm.push(Value::from_i48(instr.b() as i16 as i64));
+            dispatch_method(vm, top, instr.a() as usize, 1, arg_start)
+        }
+
+        /// `locals[a][locals[b]].m c` in one dispatch.
+        ///
+        /// Operand `a` = method name, `b` = the collection slot in the high byte
+        /// and the index slot in the low byte, `c` = the constant argument. This
+        /// is the shape of iterating an array of records and calling a method
+        /// with a small literal.
+        #[opcode(code = 87, arity = 0, stack = "0 -> 1")]
+        #[inline(always)]
+        fn op_index_call_method_int(
+            vm: &mut VM,
+            locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let b = instr.b();
+            let collection = unsafe { *locals.get_unchecked((b >> 8) as usize) };
+            let index = unsafe { *locals.get_unchecked((b & 0xff) as usize) };
+            let receiver = super::data::index_value(collection, index);
+            let arg_start = vm.stack.len();
+            vm.push(receiver);
+            vm.push(Value::from_i48(instr.c() as i8 as i64));
+            dispatch_method(vm, top, instr.a() as usize, 1, arg_start)
+        }
+
+        /// Resolves and enters a method call whose receiver and arguments are on
+        /// the stack starting at `arg_start` (`nargs + 1` values).
+        #[inline(always)]
+        fn dispatch_method(
+            vm: &mut VM,
+            top: usize,
+            field_idx: usize,
+            nargs: usize,
+            arg_start: usize,
+        ) -> OpcodeResult {
+            // The interned key Value owns a `'static` string, and
+            // `function_by_name` is one array load, so neither needs a borrow
+            // of the frame to outlive this block.
             // SAFETY: frame at `top` is active during dispatch.
-            let method_value = vm.frames[top].code().string_values[field_idx];
+            let code = vm.frames[top].code();
+            let method_value = code.string_values[field_idx];
             let method_name = method_value.as_str().unwrap_or("");
+            let ord = code.function_by_name.get(field_idx).copied().unwrap_or(0);
 
-            // One inline buffer holds receiver + args; method calls with up to seven
-            // arguments never touch the heap.
-            let mut all_args: smallvec::SmallVec<[Value; 8]> =
-                smallvec::SmallVec::with_capacity(nargs + 1);
-            all_args.resize(nargs + 1, Value::nil());
-            for i in (1..=nargs).rev() {
-                all_args[i] = vm.pop();
-            }
-            all_args[0] = vm.pop();
-            let receiver = all_args[0];
+            let receiver = vm.stack[arg_start];
 
-            let domain_name = if let Some(subtype) = receiver.map_subtype() {
-                match subtype {
-                    1 => Some("result"),
-                    2 => Some("error"),
-                    3 => Some("handle"),
-                    _ => None,
-                }
-            } else {
-                None
+            let domain_name = match receiver.map_subtype() {
+                Some(1) => Some("result"),
+                Some(2) => Some("error"),
+                Some(3) => Some("handle"),
+                _ => None,
             };
 
-            if let Some(domain) = domain_name {
-                if let Some(impl_) = vm.resolve_domain_method(domain, method_name) {
-                    let impl_copy = *impl_;
-                    let result = impl_copy.call(vm, &all_args);
-                    vm.push(result);
-                    return OpcodeResult::Next;
-                }
+            if let Some(domain) = domain_name
+                && let Some(impl_) = vm.resolve_domain_method(domain, method_name)
+            {
+                let impl_copy = *impl_;
+                let mut all_args: smallvec::SmallVec<[Value; 8]> =
+                    smallvec::SmallVec::with_capacity(nargs + 1);
+                all_args.extend_from_slice(&vm.stack[arg_start..]);
+                vm.stack.truncate(arg_start);
+                let result = impl_copy.call(vm, &all_args);
+                vm.push(result);
+                return OpcodeResult::Next;
             }
+
+            // A field of that name answers a zero-argument call, and a field
+            // wins over a method with the same name.
+            if nargs == 0
+                && let Some(map) = receiver.as_map()
+                && let Some(v) = map.get_fast_value(method_value)
+            {
+                vm.stack.truncate(arg_start);
+                vm.push(v);
+                return OpcodeResult::Next;
+            }
+
+            // The unit's own top-level function: `$e.score 5` calls `score`
+            // with `$e` as argument zero (so `$self` binds to the receiver).
+            if ord != 0
+                && let Some(func_val) = vm
+                    .globals
+                    .get((vm.function_base + ord - 1) as usize)
+                    .copied()
+                && let Some(f) = func_val.as_func()
+            {
+                return vm.enter_call_args_at(f, arg_start, nargs + 1);
+            }
+
+            // Everything below needs `&mut VM` and the arguments at once, so
+            // the values are copied into an inline buffer only on this cold
+            // path.
+            let mut all_args: smallvec::SmallVec<[Value; 8]> =
+                smallvec::SmallVec::with_capacity(nargs + 1);
+            all_args.extend_from_slice(&vm.stack[arg_start..]);
+            vm.stack.truncate(arg_start);
 
             // Resolve parent domain for super delegation using vm.type_entries
             if let Some(map) = receiver.as_map() {
@@ -1608,15 +2100,6 @@ mod core_ops {
                         }
                     }
                 }
-            }
-
-            // Map property lookup: if receiver is a map and no args, return the field value
-            if nargs == 0
-                && let Some(map) = receiver.as_map()
-                && let Some(v) = map.get(method_name)
-            {
-                vm.push(*v);
-                return OpcodeResult::Next;
             }
 
             if let Some(impl_) = vm.resolve_universal_method(method_name) {
@@ -1829,7 +2312,31 @@ mod core_ops {
     }
 
     mod fused_local {
+        use super::data::combine;
         use super::*;
+
+        /// `locals[a] = locals[a] <op> pop()`. Operand `a` = slot, `c` = op.
+        ///
+        /// This is the accumulator form `$acc = $acc + <expr>`: the value of the
+        /// destination is read here instead of being loaded before the right
+        /// side, which saves a load and a store per iteration.
+        #[opcode(code = 75, arity = 1, stack = "1 -> 0", reads = "a", writes = "a")]
+        #[inline(always)]
+        fn op_local_op_top(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let rhs = vm.pop();
+            let slot = instr.a() as usize;
+            let old = unsafe { *locals.get_unchecked(slot) };
+            let new = combine(old, rhs, instr.c(), &vm.arena);
+            unsafe {
+                *locals.get_unchecked_mut(slot) = new;
+            }
+            OpcodeResult::Next
+        }
 
         /// Load two locals onto the stack. Operand `a` = slot1, `b` = slot2.
         #[opcode(code = 60, arity = 0, stack = "0 -> 2", reads = "a,b")]
@@ -2595,7 +3102,14 @@ mod core_ops {
         /// `if $flag { $count = $count + 1 }` is the counting idiom; fusing the
         /// branch and the increment removes a dispatch from every check and
         /// keeps `INC_LOCAL`'s integer fast path.
-        #[opcode(code = 54, arity = 0, stack = "0 -> 0", branch = "abs", reads = "bc", writes = "c")]
+        #[opcode(
+            code = 54,
+            arity = 0,
+            stack = "0 -> 0",
+            branch = "abs",
+            reads = "bc",
+            writes = "c"
+        )]
         fn op_inc_if_local(
             vm: &mut VM,
             locals: LocalSlice,
@@ -2647,6 +3161,7 @@ mod core_ops {
             reads = "c",
             writes = "c"
         )]
+        #[inline(always)]
         fn op_inc_lt_int(
             vm: &mut VM,
             locals: LocalSlice,

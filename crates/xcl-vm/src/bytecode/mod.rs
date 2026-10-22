@@ -71,6 +71,34 @@ pub use codegen::compile_unoptimized;
 pub use instr::Instr;
 pub use opcodes::*;
 
+/// One step of an `OP_SELF_UPDATE_CHAIN`: `$self.f = $self.f <op> x`.
+#[derive(Debug, Clone, Copy)]
+pub struct FieldStep {
+    /// Interned destination field name.
+    pub key: crate::runtime::value::Value,
+    /// Interned source field name, used when `kind == 2`.
+    pub rhs_key: crate::runtime::value::Value,
+    /// `field_op::{ADD, SUB, MUL}`.
+    pub op: u8,
+    /// Where the right-hand side comes from: `0` constant in `operand`,
+    /// `1` local slot, `2` the field named by `rhs_key`.
+    pub kind: u8,
+    /// The constant or the local slot, read according to `kind`.
+    pub operand: u32,
+}
+
+/// A run of consecutive `$self` field updates collapsed into one dispatch.
+///
+/// The steps live outside the instruction stream because a single 64-bit
+/// instruction cannot name two fields, an operator, and an operand. Executing
+/// them in one handler removes one dispatch per update without changing what
+/// each update does.
+#[derive(Debug, Clone)]
+pub struct FieldChain {
+    /// Updates applied in order to the receiver.
+    pub steps: Box<[FieldStep]>,
+}
+
 /// Compiled XCL bytecode unit ready for execution by the VM runtime.
 ///
 /// Stores immutable instruction sequences, constant tables, interned identifier strings,
@@ -104,4 +132,6 @@ pub struct Bytecode {
     pub function_by_name: Arc<[u32]>,
     /// Compiled nested closures and lambda bodies.
     pub closures: Arc<[crate::runtime::value::FuncValue]>,
+    /// Fused `$self` field-update chains, indexed by `OP_SELF_UPDATE_CHAIN`.
+    pub field_chains: Arc<[FieldChain]>,
 }

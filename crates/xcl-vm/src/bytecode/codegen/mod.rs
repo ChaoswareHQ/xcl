@@ -34,8 +34,6 @@ use alloc::collections::BTreeMap;
 #[cfg(not(feature = "std"))]
 use alloc::format;
 #[cfg(not(feature = "std"))]
-use alloc::string::ToString;
-#[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -45,6 +43,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::Bytecode;
+use super::FieldChain;
 use super::instr::Instr;
 use super::opcodes::*;
 use super::peephole::peephole_optimize_once;
@@ -134,6 +133,11 @@ struct Compiler<'h> {
     /// the enclosing loop finishes, so the loop context collects the placeholder
     /// addresses and patches them at the end.
     loops: Vec<LoopCtx>,
+    /// Counter for the scratch locals a compound member write needs to hold its
+    /// target and index while the read-modify-write runs.
+    set_temps: u32,
+    /// Fused `$self` update chains, filled by the last peephole pass.
+    field_chains: Vec<FieldChain>,
     /// Locals whose value is a known integer on every path.
     ///
     /// Only straight-line assignments of an integer literal are recorded, and
@@ -173,6 +177,8 @@ impl<'h> Compiler<'h> {
             local_index: HashMap::new(),
             global_index: HashMap::new(),
             loops: Vec::new(),
+            set_temps: 0,
+            field_chains: Vec::new(),
             const_locals: HashMap::new(),
         }
     }
@@ -355,6 +361,17 @@ impl<'h> Compiler<'h> {
         self.local(&name)
     }
 
+    /// Reserves a scratch local for a compound member write.
+    ///
+    /// The same name is never reused inside one body, so a write nested in
+    /// another write cannot overwrite the outer target.
+    #[inline]
+    fn set_temp(&mut self) -> u32 {
+        let name = format!("__set_tmp_{}", self.set_temps);
+        self.set_temps += 1;
+        self.local(&name)
+    }
+
     fn compile(&mut self, ast: &[AstNode]) -> Bytecode {
         self.compile_with(ast, true, &mut Vec::new())
     }
@@ -382,6 +399,10 @@ impl<'h> Compiler<'h> {
         self.emit(Instr::none(OP_HALT));
 
         let mut code: Vec<Instr> = core::mem::take(&mut self.code);
+        // Built before the passes so fused chains can hold the interned key
+        // values instead of string-table indices.
+        let strings = core::mem::take(&mut self.strings);
+        let string_values: Vec<Value> = strings.iter().map(|s| Value::intern_str(s)).collect();
         if optimize {
             // Run peephole optimizer to fuse common patterns
             peephole_optimize_once(&mut code, &mut self.wide);
@@ -394,13 +415,18 @@ impl<'h> Compiler<'h> {
                 &mut self.locals,
                 self.hot,
             );
+
+            // Fusing `$self` update chains last keeps the chain opcode out of
+            // the passes that reason about local slots: the chain reads locals
+            // named only in its side table, which those passes cannot see.
+            crate::bytecode::peephole::fuse_self_chains(
+                &mut code,
+                &mut self.wide,
+                &mut self.field_chains,
+                &string_values,
+            );
         }
 
-        let strings = core::mem::take(&mut self.strings);
-        let string_values: Vec<Value> = strings
-            .iter()
-            .map(|s| Value::from_str_boxed(s.to_string()))
-            .collect();
 
         // Callee lookup for `OP_CALL_NAME`: one array load instead of a hash.
         // Function names are interned by their call sites, so a function that is
@@ -422,6 +448,7 @@ impl<'h> Compiler<'h> {
             user_functions: core::mem::take(&mut self.functions).into(),
             function_by_name: function_by_name.into(),
             closures: core::mem::take(&mut self.closures).into(),
+            field_chains: core::mem::take(&mut self.field_chains).into(),
         }
     }
 }
@@ -538,6 +565,8 @@ fn node_line(node: &AstNode) -> u32 {
         | AstNode::DictLit { span, .. }
         | AstNode::Index { span, .. }
         | AstNode::FieldAccess { span, .. }
+        | AstNode::SetField { span, .. }
+        | AstNode::SetIndex { span, .. }
         | AstNode::Range { span, .. }
         | AstNode::Block { span, .. }
         | AstNode::TypeDef { span, .. }

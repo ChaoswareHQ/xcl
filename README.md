@@ -394,6 +394,20 @@ print $person.name      # "Alice"
 print $person["age"]    # 30
 ```
 
+Fields and elements are writable. A write to a field that does not exist yet
+inserts it:
+
+```xcl
+$person.age = 31
+$person.city = "Oslo"   # new field
+$person["age"] += 1     # compound writes work too
+
+$scores = [10, 20, 30]
+$scores[1] = 99
+$scores[-1] = 0         # negative offsets count from the end
+$scores[3] = 5          # one past the end appends
+```
+
 ### Custom Types
 
 **Record types** list named, typed fields:
@@ -432,6 +446,21 @@ Drawable = {
 Button is Drawable {
     draw() { print "drawing button" }
 }
+```
+
+Methods receive their receiver as the first argument, so `$self` names it inside
+the body. A function can also be reached as a method on any value: `$e.tick 1`
+passes `$e` first. A field with the same name takes precedence over the method.
+
+```xcl
+tick($v, $d) {
+    $self.hp = $self.hp - $d
+    return $self.hp
+}
+
+$e = { hp: 100 }
+print $e.tick 3         # 97, with $self bound to $e
+print $e.hp             # 97
 ```
 
 ### Type Casting

@@ -165,6 +165,20 @@ pub fn walk<'a>(node: &'a AstNode, f: &mut impl FnMut(&'a AstNode)) {
             walk(index, f);
         }
         AstNode::FieldAccess { target, .. } => walk(target, f),
+        AstNode::SetField { target, value, .. } => {
+            walk(target, f);
+            walk(value, f);
+        }
+        AstNode::SetIndex {
+            target,
+            index,
+            value,
+            ..
+        } => {
+            walk(target, f);
+            walk(index, f);
+            walk(value, f);
+        }
         AstNode::Range { start, end, .. } => {
             if let Some(s) = start {
                 walk(s, f);

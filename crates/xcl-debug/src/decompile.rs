@@ -24,6 +24,7 @@
 //!     user_functions: Arc::new([]),
 //!     function_by_name: Arc::new([]),
 //!     closures: Arc::new([]),
+//!     field_chains: Arc::new([]),
 //! };
 //! let output = xcl_debug::decompile::decompile(&bc);
 //! assert!(output.contains("OP_PUSH_INT"));

@@ -60,21 +60,15 @@ impl VM {
 
         let frame = unsafe { self.frames.get_unchecked_mut(idx) };
         frame.code_ptr = bc as *const Bytecode;
-        frame.ip = 0;
-        // Only clear when non-empty — avoids writing the length on every call.
-        if !frame.iter.is_empty() {
-            frame.iter.clear();
-        }
-        frame.iter_idx = 0;
-        frame.iter_is_range = false;
-        frame.range_cur = 0;
-        frame.range_end = 0;
+        // `ip` is written by the caller once it knows the return address.
+        // Iterator state is initialized by the `OP_FOR_*_START` opcodes before
+        // it is read, so a call does not clear it; only the buffers that ops
+        // push into must start empty.
         if !frame.defer_stack.is_empty() {
             frame.defer_stack.clear();
         }
-        if !frame.argv.is_empty() {
-            frame.argv.clear();
-        }
+        // `argv` is cleared by the call entry that fills it, so only the calls
+        // that actually read `$1..$N` pay for it.
         // `locals`/`local_base` are set by `bind_registers`, which every caller
         // runs next.
         idx
@@ -158,7 +152,13 @@ impl VM {
     /// nil-filled.
     #[inline(always)]
     #[allow(clippy::uninit_vec)]
-    pub(super) fn rebind_registers(&mut self, idx: usize, base: usize, n: usize, copied_params: usize) {
+    pub(super) fn rebind_registers(
+        &mut self,
+        idx: usize,
+        base: usize,
+        n: usize,
+        copied_params: usize,
+    ) {
         self.regs.truncate(base);
         let old_ptr = self.regs.as_ptr();
         self.regs.reserve(n);

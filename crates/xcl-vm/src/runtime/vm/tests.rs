@@ -1184,9 +1184,7 @@ while $i < 100 {
 $i";
     let (result, bc) = eval_with_code(src);
     assert!(
-        bc.instructions
-            .iter()
-            .any(|i| i.op() == OP_WHILE_LT_INT),
+        bc.instructions.iter().any(|i| i.op() == OP_WHILE_LT_INT),
         "the loop must stay when its total does not fit"
     );
     assert_eq!(result.as_i48(), 100);
@@ -1244,7 +1242,10 @@ $s";
 fn a_counter_written_in_the_body_blocks_rotation() {
     let src = "$i = 0\n$s = 0\nwhile $i < 5 {\n  $s = $s + 1\n  if $s == 3 { $i = $i + 2 }\n  $i = $i + 1\n}\n$s";
     let (result, bc) = eval_with_code(src);
-    assert!(!rotates(&bc), "a body that writes the counter must stay as written");
+    assert!(
+        !rotates(&bc),
+        "a body that writes the counter must stay as written"
+    );
     assert_eq!(result.as_i48(), 3);
 }
 
@@ -1258,7 +1259,10 @@ while $i > 0 {
 }
 $s";
     let (result, bc) = eval_with_code(src);
-    assert!(!rotates(&bc), "rotation covers ascending `$i < N` loops only");
+    assert!(
+        !rotates(&bc),
+        "rotation covers ascending `$i < N` loops only"
+    );
     assert_eq!(result.as_i48(), 10);
 }
 
@@ -1328,6 +1332,254 @@ fn a_continue_does_not_block_rotation() {
     // still rotate; the skipped iteration must not advance the counter.
     let src = "$i = 0\n$s = 0\n$k = 0\nwhile $i < 5 {\n  $k = $k + 1\n  if $k == 2 { continue }\n  $s = $s + 1\n  $i = $i + 1\n}\n$s";
     let (result, bc) = eval_with_code(src);
-    assert!(rotates(&bc), "the latch is still the loop's last instruction");
+    assert!(
+        rotates(&bc),
+        "the latch is still the loop's last instruction"
+    );
     assert_eq!(result.as_i48(), 5);
+}
+
+// ── Member assignment and value method dispatch ──
+
+#[test]
+fn field_assignment_updates_and_inserts() {
+    let src = "$e = { a: 1 }\n$e.a = 9\n$e.b = 2\n$e.a * 10 + $e.b";
+    let result = eval_with_args(src, "t.xcl", &[]);
+    assert_eq!(
+        result.as_i48(),
+        92,
+        "existing field overwritten, new field inserted"
+    );
+}
+
+#[test]
+fn index_assignment_updates_an_array() {
+    let src = "$a = [1, 2, 3]\n$a[1] = 9\n$a[0] + $a[1] + $a[2]";
+    let result = eval_with_args(src, "t.xcl", &[]);
+    assert_eq!(result.as_i48(), 13);
+}
+
+#[test]
+fn index_assignment_accepts_a_negative_offset() {
+    let src = "$a = [1, 2, 3]\n$a[-1] = 7\n$a[2]";
+    let result = eval_with_args(src, "t.xcl", &[]);
+    assert_eq!(result.as_i48(), 7);
+}
+
+#[test]
+fn index_assignment_appends_at_the_end() {
+    // The user-facing pattern for building an array: `$a[$a.len] = v`, written
+    // here as the equivalent running index.
+    let src = "$a = []\n$a[0] = 5\n$a[1] = 6\n$a[0] + $a[1]";
+    let result = eval_with_args(src, "t.xcl", &[]);
+    assert_eq!(result.as_i48(), 11);
+}
+
+#[test]
+fn compound_field_assignment_reads_the_target_once() {
+    let src = "$e = { x: 1 }\n$e.x += 4\n$e.x *= 2\n$e.x";
+    let result = eval_with_args(src, "t.xcl", &[]);
+    assert_eq!(result.as_i48(), 10);
+}
+
+#[test]
+fn compound_index_assignment_keeps_the_key() {
+    let src = "$a = [1, 2, 3]\n$i = 1\n$a[$i] *= 5\n$a[1]";
+    let result = eval_with_args(src, "t.xcl", &[]);
+    assert_eq!(result.as_i48(), 10);
+}
+
+#[test]
+fn member_assignment_nests() {
+    let src = "$e = { inner: { v: 1 } }\n$e.inner.v = 5\n$e = $e\n$e.inner.v";
+    let result = eval_with_args(src, "t.xcl", &[]);
+    assert_eq!(result.as_i48(), 5);
+}
+
+#[test]
+fn member_assignment_reaches_through_an_array_of_records() {
+    let src = "$es = [{ v: 1 }, { v: 2 }]\n$es[1].v = 7\n$es[0].v + $es[1].v";
+    let result = eval_with_args(src, "t.xcl", &[]);
+    assert_eq!(result.as_i48(), 8);
+}
+
+#[test]
+fn an_array_can_be_built_by_index_assignment_in_a_loop() {
+    let src = "$es = []\n$i = 0\nwhile $i < 4 {\n  $es[$i] = { v: $i }\n  $i = $i + 1\n}\n$es[0].v + $es[1].v + $es[2].v + $es[3].v";
+    let result = eval_with_args(src, "t.xcl", &[]);
+    assert_eq!(result.as_i48(), 6);
+}
+
+#[test]
+fn a_method_resolves_on_the_receiver_value() {
+    // `score` is never called by name, so resolution must come from the field
+    // name that `$e.score` interns.
+    let src = "score($v) {\n  return $self.hp * 2\n}\n$e = { hp: 21 }\n$e.score";
+    let result = eval_with_args(src, "t.xcl", &[]);
+    assert_eq!(result.as_i48(), 42);
+}
+
+#[test]
+fn a_method_accepts_arguments_after_the_receiver() {
+    let src = "add($v, $n) {\n  return $self.hp + $n\n}\n$e = { hp: 21 }\n$e.add 9";
+    let result = eval_with_args(src, "t.xcl", &[]);
+    assert_eq!(result.as_i48(), 30);
+}
+
+#[test]
+fn a_field_wins_over_a_same_named_method() {
+    let src = "score($v) {\n  return 99\n}\n$e = { score: 7 }\n$e.score";
+    let result = eval_with_args(src, "t.xcl", &[]);
+    assert_eq!(result.as_i48(), 7);
+}
+
+#[test]
+fn self_binds_to_the_receiver_and_can_write_its_fields() {
+    let src = "bump($v) {\n  $self.hp = $self.hp + 1\n  return $self.hp\n}\n$e = { hp: 1 }\nbump $e\n$e.hp";
+    let result = eval_with_args(src, "t.xcl", &[]);
+    assert_eq!(result.as_i48(), 2);
+}
+
+#[test]
+fn a_method_call_through_the_dot_form_writes_through_self() {
+    let src = "bump($v) {\n  $self.hp = $self.hp + 1\n  return $self.hp\n}\n$e = { hp: 5 }\n$e.bump\n$e.hp";
+    let result = eval_with_args(src, "t.xcl", &[]);
+    assert_eq!(result.as_i48(), 6);
+}
+
+// ── Fused field read-modify-write ──
+
+fn field_ops_used(bc: &crate::Bytecode) -> Vec<u8> {
+    use crate::runtime::vm::ops::consts::{OP_FIELD_FIELD, OP_FIELD_INT, OP_FIELD_LOCAL};
+    bc.instructions
+        .iter()
+        .map(|i| i.op())
+        .filter(|op| *op == OP_FIELD_INT || *op == OP_FIELD_LOCAL || *op == OP_FIELD_FIELD)
+        .collect()
+}
+
+#[test]
+fn a_field_update_with_a_constant_fuses_and_computes() {
+    let src = "$e = { x: 10 }\n$e.x = $e.x + 4\n$e.x = $e.x - 1\n$e.x = $e.x * 2\n$e.x";
+    let (result, bc) = eval_with_code(src);
+    assert_eq!(result.as_i48(), 26);
+    assert!(field_ops_used(&bc).contains(&crate::runtime::vm::ops::consts::OP_FIELD_INT));
+}
+
+#[test]
+fn a_compound_write_fuses() {
+    let src = "$e = { x: 3 }\n$e.x += 2\n$e.x *= 4\n$e.x";
+    let (result, bc) = eval_with_code(src);
+    assert_eq!(result.as_i48(), 20);
+    assert!(field_ops_used(&bc).contains(&crate::runtime::vm::ops::consts::OP_FIELD_INT));
+}
+
+#[test]
+fn a_field_update_with_a_local_fuses() {
+    let src = "$e = { x: 1 }\n$d = 7\n$e.x = $e.x + $d\n$e.x = $e.x - $d\n$e.x";
+    let (result, bc) = eval_with_code(src);
+    assert_eq!(result.as_i48(), 1);
+    assert!(field_ops_used(&bc).contains(&crate::runtime::vm::ops::consts::OP_FIELD_LOCAL));
+}
+
+#[test]
+fn a_field_update_with_another_field_fuses() {
+    let src = "$e = { x: 2, y: 5 }\n$e.x = $e.x + $e.y\n$e.x";
+    let (result, bc) = eval_with_code(src);
+    assert_eq!(result.as_i48(), 7);
+    assert!(field_ops_used(&bc).contains(&crate::runtime::vm::ops::consts::OP_FIELD_FIELD));
+}
+
+#[test]
+fn a_fused_field_update_keeps_string_semantics() {
+    let src = "$e = { a: \"x\", b: \"y\" }\n$e.a = $e.a + $e.b\n$e.a";
+    let result = eval_with_args(src, "t.xcl", &[]);
+    assert_eq!(result.as_str(), Some("xy"));
+}
+
+#[test]
+fn a_fused_field_update_on_a_missing_field_matches_the_unfused_form() {
+    // `none + 1` follows the ordinary `OP_ADD` path; the fused form must agree
+    // with the explicit sequence instead of inventing a starting value.
+    let fused = eval_with_args("$e = {}\n$e.n = $e.n + 1\n$e.n", "t.xcl", &[]);
+    let plain = eval_with_args("$e = {}\n$v = $e.n + 1\n$e.n = $v\n$e.n", "t.xcl", &[]);
+    assert_eq!(fused.as_i48(), plain.as_i48());
+}
+
+
+/// Whether any unit in `bc` (the root or a function body) uses `op`.
+fn unit_uses(bc: &crate::Bytecode, op: u8) -> bool {
+    bc.instructions.iter().any(|i| i.op() == op)
+        || bc.user_functions.iter().any(|(_, f)| {
+            f.bytecode
+                .as_ref()
+                .is_some_and(|b| b.instructions.iter().any(|i| i.op() == op))
+        })
+}
+
+#[test]
+fn a_self_field_update_uses_the_receiver_superinstructions() {
+    use crate::runtime::vm::ops::consts::OP_SELF_UPDATE_CHAIN_RETURN;
+    let src = "run($v, $d) {\n\
+                 $self.hp = $self.hp - 1\n\
+                 $self.x = $self.x + $d\n\
+                 $self.y = $self.y - $d\n\
+                 $self.score = $self.score + $self.x\n\
+                 return $self.score\n\
+               }\n\
+               $e = { hp: 3, x: 10, y: 20, score: 0 }\n\
+               $e.run 2";
+    let (result, bc) = eval_with_code(src);
+    assert_eq!(result.as_i48(), 12);
+    assert!(
+        unit_uses(&bc, OP_SELF_UPDATE_CHAIN_RETURN),
+        "the four `$self` updates and the return must collapse into one dispatch"
+    );
+}
+
+#[test]
+fn a_self_field_read_outside_a_return_uses_the_receiver_form() {
+    use crate::runtime::vm::ops::consts::OP_SELF_GET_FIELD;
+    let src = "peek($v) { return $self.hp + 1 }
+$e = { hp: 4 }
+$e.peek";
+    let (result, bc) = eval_with_code(src);
+    assert_eq!(result.as_i48(), 5);
+    assert!(unit_uses(&bc, OP_SELF_GET_FIELD));
+}
+
+#[test]
+fn an_accumulated_call_fuses_the_destination() {
+    use crate::runtime::vm::ops::consts::OP_LOCAL_OP_TOP;
+    let src = "double($n) { return $n * 2 }\n\
+               $sum = 0\n\
+               $i = 0\n\
+               while $i < 5 {\n\
+                 $sum = $sum + double $i\n\
+                 $i = $i + 1\n\
+               }\n\
+               $sum";
+    let (result, bc) = eval_with_code(src);
+    assert_eq!(result.as_i48(), 20);
+    assert!(
+        bc.instructions.iter().any(|i| i.op() == OP_LOCAL_OP_TOP),
+        "the accumulator must not load and store the destination separately"
+    );
+}
+
+#[test]
+fn an_accumulated_string_concat_still_works() {
+    let src = "join($a, $b) { return $a + $b }\n\
+               $s = \"<\"\n\
+               $s = $s + join \"a\" \"b\"\n\
+               $s + \">\"";
+    let result = eval_with_args(src, "t.xcl", &[]);
+    assert_eq!(result.as_str(), Some("<ab>"));
+}
+
+#[test]
+fn an_accumulated_sub_keeps_the_operand_order() {
+    let src = "$x = 10\nid($n) { return $n }\n$x = $x - id 3\n$x";
+    let result = eval_with_args(src, "t.xcl", &[]);
+    assert_eq!(result.as_i48(), 7);
 }
