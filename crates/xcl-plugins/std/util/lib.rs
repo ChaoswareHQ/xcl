@@ -175,6 +175,45 @@ mod plugin_tests {
     use super::{evaluate_new, new_vm};
 
     #[test]
+    fn a_hot_native_compiles_to_one_call_instruction() {
+        let vm = new_vm();
+        for spelling in ["print", "util.print", "std.util.print", "result.is_ok"] {
+            assert!(
+                vm.hot_table().slot(spelling).is_some(),
+                "{spelling} should have a hot slot"
+            );
+        }
+
+        let src = "print \"hi\"";
+        let tokens = xcl_vm::lexer::lex(src, "<test>");
+        let ast = xcl_vm::parser::parse(&tokens, src);
+        let bytecode = xcl_vm::bytecode::compile_hot(&ast, vm.hot_table());
+        assert!(
+            bytecode
+                .instructions
+                .iter()
+                .any(|i| i.op() == xcl_vm::bytecode::OP_CALL_HOT),
+            "a registered hot native must not need a name lookup"
+        );
+    }
+
+    #[test]
+    fn hot_and_named_calls_reach_the_same_function() {
+        // One VM, one AST, two compilations: the hot encoding and the name
+        // encoding must agree on the result.
+        let mut vm = new_vm();
+        let src = "util.is_ok (util.ok 1)";
+        let tokens = xcl_vm::lexer::lex(src, "<test>");
+        let ast = xcl_vm::parser::parse(&tokens, src);
+
+        let hot = xcl_vm::bytecode::compile_hot(&ast, vm.hot_table());
+        assert!(vm.run(&hot).as_bool());
+
+        let named = xcl_vm::bytecode::compile(&ast);
+        assert!(vm.run(&named).as_bool());
+    }
+
+    #[test]
     fn the_vm_knows_the_std_plugin() {
         let vm = new_vm();
         assert!(vm.plugins().iter().any(|p| p.name == "std"));
@@ -201,16 +240,26 @@ mod plugin_tests {
 
         // A dotted method under a qualified module path: `std.util` resolves to
         // `util`, leaving `metadata.all` as the method.
-        let header = evaluate_new("# name: demo
-std.util.metadata.all");
-        assert!(header.as_map().is_some(), "metadata.all returns the header map");
+        let header = evaluate_new(
+            "# name: demo
+std.util.metadata.all",
+        );
+        assert!(
+            header.as_map().is_some(),
+            "metadata.all returns the header map"
+        );
     }
 
     #[test]
     fn a_sibling_domain_qualifies_too() {
-        let named = evaluate_new("# name: demo
-std.metadata.has \"name\"");
-        assert!(named.as_bool(), "`std.metadata.*` must alias to `metadata.*`");
+        let named = evaluate_new(
+            "# name: demo
+std.metadata.has \"name\"",
+        );
+        assert!(
+            named.as_bool(),
+            "`std.metadata.*` must alias to `metadata.*`"
+        );
         let result = evaluate_new("std.result.is_ok (util.ok 3)");
         assert!(result.as_bool());
     }

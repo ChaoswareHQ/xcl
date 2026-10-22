@@ -125,31 +125,31 @@ fn print_all(op: &str, args: &[Value], newline: bool, stderr: bool) -> Value {
 }
 
 /// Print any number of values to stdout without a trailing newline.
-#[xcl_fn(name = "util.print", auto_import)]
+#[xcl_fn(name = "util.print", auto_import, hot)]
 pub fn print(args: &[Value]) -> Value {
     print_all("print", args, false, false)
 }
 
 /// Print any number of values to stdout followed by a newline.
-#[xcl_fn(name = "util.println", auto_import)]
+#[xcl_fn(name = "util.println", auto_import, hot)]
 pub fn println(args: &[Value]) -> Value {
     print_all("println", args, true, false)
 }
 
 /// Print any number of values to stderr followed by a newline.
-#[xcl_fn(name = "util.eprintln", auto_import)]
+#[xcl_fn(name = "util.eprintln", auto_import, hot)]
 pub fn eprintln(args: &[Value]) -> Value {
     print_all("eprintln", args, true, true)
 }
 
 /// Print any number of values to stderr without a trailing newline.
-#[xcl_fn(name = "util.eprint", auto_import)]
+#[xcl_fn(name = "util.eprint", auto_import, hot)]
 pub fn eprint(args: &[Value]) -> Value {
     print_all("eprint", args, false, true)
 }
 
 /// Write to stderr with a newline. Alias kept for the old `io.error` name.
-#[xcl_fn(name = "util.error", auto_import)]
+#[xcl_fn(name = "util.error", auto_import, hot)]
 pub fn error(args: &[Value]) -> Value {
     print_all("error", args, true, true)
 }

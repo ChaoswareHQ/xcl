@@ -54,6 +54,7 @@ use crate::compiler::ast::{
 };
 use crate::compiler::span::Span;
 use crate::runtime::value::{FuncValue, Value};
+use crate::runtime::vm::HotTable;
 
 /// Temp-slot namespace for pipeline accumulators. Ordinary expression temps use
 /// small depths, so this range cannot collide with them.
@@ -89,7 +90,7 @@ struct InlineFn {
     body: InlineBody,
 }
 
-struct Compiler {
+struct Compiler<'h> {
     code: Vec<Instr>,
     wide: Vec<i64>,
     strings: Vec<Box<str>>,
@@ -97,6 +98,9 @@ struct Compiler {
     globals: Vec<Box<str>>,
     functions: Vec<(Box<str>, Arc<FuncValue>)>,
     closures: Vec<FuncValue>,
+    /// Callable name → `OP_CALL_HOT` slot, when compiling against a live VM.
+    /// `None` compiles every call as `OP_CALL_NAME`.
+    hot: Option<&'h HotTable>,
     /// Whether the current function body reads `$1..$N`, `$#`, `$@`, or `$*`.
     ///
     /// `$self`, `$super`, and `$0` do not need the positional argument vector:
@@ -125,7 +129,7 @@ struct Compiler {
     global_index: HashMap<Box<str>, u32>,
 }
 
-impl Compiler {
+impl<'h> Compiler<'h> {
     fn new() -> Self {
         Self {
             code: Vec::with_capacity(64),
@@ -135,6 +139,7 @@ impl Compiler {
             globals: Vec::new(),
             functions: Vec::new(),
             closures: Vec::new(),
+            hot: None,
             uses_argv: false,
             inline_map: BTreeMap::new(),
             inline_counter: 0,
@@ -151,6 +156,19 @@ impl Compiler {
     fn with_inline_map(mut self, map: BTreeMap<String, InlineFn>) -> Self {
         self.inline_map = map;
         self
+    }
+
+    /// Compiles call sites against the VM's hot-native slots.
+    fn with_hot_table(mut self, hot: Option<&'h HotTable>) -> Self {
+        self.hot = hot;
+        self
+    }
+
+    /// Slot for a callable name, or `None` when the call must resolve by name.
+    #[inline]
+    fn hot_slot(&self, name_idx: u32) -> Option<u16> {
+        let table = self.hot?;
+        table.slot(&self.strings[name_idx as usize])
     }
 
     /// Seeds the compiler with the top-level variable slots. The main compiler
@@ -172,6 +190,7 @@ impl Compiler {
     fn body_compiler(&self) -> Self {
         let mut c = Compiler::new();
         c.root_slots = self.root_slots.clone();
+        c.hot = self.hot;
         c
     }
 
@@ -381,6 +400,24 @@ pub fn compile(ast: &[AstNode]) -> Bytecode {
     let mut c = Compiler::new()
         .with_root_vars(&root_vars)
         .with_inline_map(inline_map);
+    c.compile(ast)
+}
+
+/// Compiles `ast`, binding every call whose name the VM made hot to a direct
+/// `OP_CALL_HOT` instruction.
+///
+/// The slots come from the VM that will run the result, which is why this takes
+/// a [`HotTable`] rather than reading a global registry: `xcl_vm::evaluate`
+/// compiles and runs with the same VM, so the slot numbers always agree.
+/// Bytecode containing `OP_CALL_HOT` must not be run on a different VM; run it
+/// through [`compile`] when it needs to be portable.
+pub fn compile_hot(ast: &[AstNode], hot: &HotTable) -> Bytecode {
+    let inline_map = collect_inlineable(ast);
+    let root_vars = collect_top_level_vars(ast);
+    let mut c = Compiler::new()
+        .with_root_vars(&root_vars)
+        .with_inline_map(inline_map)
+        .with_hot_table(Some(hot));
     c.compile(ast)
 }
 

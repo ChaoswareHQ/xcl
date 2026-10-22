@@ -4,11 +4,11 @@
 //! emitting the instructions for that construct. It is the largest part of the
 //! compiler and the only place where source syntax is translated.
 
-use super::*;
 use super::inline::{is_simple_arg, scan_vars, substitute};
 use super::opcode_map::*;
+use super::*;
 
-impl Compiler {
+impl Compiler<'_> {
     pub(super) fn node(&mut self, node: &AstNode) {
         match node {
             AstNode::Assign { name, value, .. } => {
@@ -728,7 +728,7 @@ impl Compiler {
                         let i = self.intern(&name);
                         if let Ok(name16) = u16::try_from(i) {
                             let n = self.emit_call_args(args);
-                            self.emit(Instr::make(OP_CALL_NAME, n as u32, name16, 0));
+                            self.emit_named_call(i, name16, n);
                         } else {
                             self.emit(Instr::a1(OP_PUSH_STR, i));
                             let n = self.emit_call_args(args);
@@ -752,7 +752,7 @@ impl Compiler {
                         let i = self.intern(name);
                         if let Ok(name16) = u16::try_from(i) {
                             let n = self.emit_call_args(args);
-                            self.emit(Instr::make(OP_CALL_NAME, n as u32, name16, 0));
+                            self.emit_named_call(i, name16, n);
                         } else {
                             self.emit(Instr::a1(OP_PUSH_STR, i));
                             let n = self.emit_call_args(args);
@@ -912,7 +912,7 @@ impl Compiler {
                 if let Some(name) = self.zero_arg_domain_call(node) {
                     let i = self.intern(&name);
                     if let Ok(name16) = u16::try_from(i) {
-                        self.emit(Instr::make(OP_CALL_NAME, 0, name16, 0));
+                        self.emit_named_call(i, name16, 0);
                     } else {
                         self.emit(Instr::a1(OP_PUSH_STR, i));
                         self.emit(Instr::a2(OP_CALL, 0, 0));
@@ -1007,7 +1007,7 @@ impl Compiler {
                     }
                     let i = self.intern(&stage.name);
                     if let Ok(name16) = u16::try_from(i) {
-                        self.emit(Instr::make(OP_CALL_NAME, 2, name16, 0));
+                        self.emit_named_call(i, name16, 2);
                     } else {
                         // String-table overflow: rebuild `[callee, acc, arg]`
                         // explicitly (more than 65535 distinct strings).

@@ -891,6 +891,10 @@ fn plugin_seven(_args: &[Value]) -> Value {
     Value::from_i48(7)
 }
 
+fn plugin_seven_hot(_args: &[Value]) -> Value {
+    Value::from_i48(7)
+}
+
 static TEST_PLUGIN_DOMAINS: [DomainAlias; 1] = [DomainAlias {
     path: "std.util",
     domain: "util",
@@ -917,7 +921,33 @@ static TEST_NATIVES: [crate::runtime::value::NativeEntry; 1] =
         arg_desc: &[],
         auto_import: false,
         caps: crate::runtime::primitives::CapSet::EMPTY,
+        hot: false,
     }];
+
+static HOT_NATIVES: [crate::runtime::value::NativeEntry; 1] =
+    [crate::runtime::value::NativeEntry {
+        domain: Some("util"),
+        impl_type: None,
+        override_method: None,
+        method: "seven_hot",
+        kind: crate::runtime::value::NativeKind::Pure,
+        ptr: crate::runtime::value::RawPtr(plugin_seven_hot as *const ()),
+        args: None,
+        ret: None,
+        named: &[],
+        summary: None,
+        arg_desc: &[],
+        auto_import: true,
+        caps: crate::runtime::primitives::CapSet::EMPTY,
+        hot: true,
+    }];
+
+/// Compiles `src` the way `xcl_vm::evaluate` does, against `vm`'s slot table.
+fn compile_hot_for(src: &str, vm: &VM) -> crate::Bytecode {
+    let tokens = lex(src, "<test>");
+    let ast = parse(&tokens, src);
+    crate::bytecode::compile_hot(&ast, vm.hot_table())
+}
 
 #[test]
 fn vm_reports_which_plugin_owns_a_domain() {
@@ -943,4 +973,102 @@ fn a_plugin_path_reaches_the_registered_domain() {
         "qualified path must alias to the flat key"
     );
     assert!(vm.resolve_domain_method("std.math", "seven").is_none());
+}
+
+#[test]
+fn hot_natives_get_a_slot_under_every_spelling() {
+    let mut vm = VM::new();
+    vm.register_plugins(&TEST_PLUGINS);
+    vm.register_natives(&HOT_NATIVES);
+
+    let slot = vm.hot_table().slot("seven_hot").expect("bare name");
+    assert_eq!(vm.hot_table().slot("util.seven_hot"), Some(slot));
+    assert_eq!(vm.hot_table().slot("std.util.seven_hot"), Some(slot));
+    let native = vm.hot_native(slot as usize).expect("slot is populated");
+    assert_eq!(native.domain, Some("util"));
+    assert_eq!(native.method, "seven_hot");
+}
+
+#[test]
+fn a_non_hot_native_keeps_its_name_call() {
+    let mut vm = VM::new();
+    vm.register_natives(&TEST_NATIVES);
+    assert!(vm.hot_table().is_empty(), "nothing was declared hot");
+    let bc = compile_hot_for("util.seven", &vm);
+    assert!(
+        bc.instructions
+            .iter()
+            .all(|i| i.op() != crate::bytecode::OP_CALL_HOT),
+        "an unregistered slot must not be emitted"
+    );
+}
+
+#[test]
+fn a_hot_call_compiles_to_one_instruction_and_runs() {
+    let mut vm = VM::new();
+    vm.register_plugins(&TEST_PLUGINS);
+    vm.register_natives(&HOT_NATIVES);
+
+    let bc = compile_hot_for("seven_hot", &vm);
+    assert!(
+        bc.instructions
+            .iter()
+            .any(|i| i.op() == crate::bytecode::OP_CALL_HOT),
+        "the call must use the hot slot"
+    );
+    assert_eq!(vm.run(&bc).as_i48(), 7);
+
+    // The same program compiled without a slot table still reaches the native.
+    let plain = {
+        let tokens = lex("seven_hot", "<test>");
+        let ast = parse(&tokens, "seven_hot");
+        compile(&ast)
+    };
+    assert_eq!(vm.run(&plain).as_i48(), 7);
+}
+
+#[test]
+fn an_ambiguous_hot_name_is_not_bound() {
+    // Two auto-imported natives with the same bare name: the bare spelling
+    // resolves to exactly one of them, so only that entry may claim it, and a
+    // script that calls it keeps calling the same function it would by name.
+    static DUPLICATES: [crate::runtime::value::NativeEntry; 2] = [
+        crate::runtime::value::NativeEntry {
+            domain: Some("util"),
+            impl_type: None,
+            override_method: None,
+            method: "dup",
+            kind: crate::runtime::value::NativeKind::Pure,
+            ptr: crate::runtime::value::RawPtr(plugin_seven as *const ()),
+            args: None,
+            ret: None,
+            named: &[],
+            summary: None,
+            arg_desc: &[],
+            auto_import: true,
+            caps: crate::runtime::primitives::CapSet::EMPTY,
+            hot: true,
+        },
+        crate::runtime::value::NativeEntry {
+            domain: Some("other"),
+            impl_type: None,
+            override_method: None,
+            method: "dup",
+            kind: crate::runtime::value::NativeKind::Pure,
+            ptr: crate::runtime::value::RawPtr(plugin_seven_hot as *const ()),
+            args: None,
+            ret: None,
+            named: &[],
+            summary: None,
+            arg_desc: &[],
+            auto_import: true,
+            caps: crate::runtime::primitives::CapSet::EMPTY,
+            hot: true,
+        },
+    ];
+
+    let mut vm = VM::new();
+    vm.register_natives(&DUPLICATES);
+    let bc = compile_hot_for("dup", &vm);
+    assert_eq!(vm.run(&bc).as_i48(), 7);
 }

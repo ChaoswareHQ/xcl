@@ -5,10 +5,10 @@
 //! when it did. A miss leaves the stream untouched, so callers emit the
 //! unfused sequence as a fallback.
 
-use super::*;
 use super::opcode_map::*;
+use super::*;
 
-impl Compiler {
+impl Compiler<'_> {
     /// Try to fuse a nested binary expression into superinstructions.
     /// For example, `$zr = $zr*$zr - $zi*$zi + $cr` becomes:
     ///   MUL_LL_ST(temp1, zr, zr)

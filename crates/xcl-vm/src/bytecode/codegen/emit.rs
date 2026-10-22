@@ -5,10 +5,23 @@
 //! `emit_call_args` materialises call arguments — positional values followed
 //! by an optional named-argument map — on the operand stack.
 
-use super::*;
 use super::opcode_map::*;
+use super::*;
 
-impl Compiler {
+impl Compiler<'_> {
+    /// Emits a call whose callee is a name, choosing the cheapest encoding.
+    ///
+    /// `OP_CALL_HOT` when the VM assigned the name a slot, otherwise the fused
+    /// `OP_CALL_NAME`. Both consume the same `n` argument values and leave one
+    /// result, so the two are interchangeable; only the callee lookup differs.
+    #[inline]
+    pub(super) fn emit_named_call(&mut self, name: u32, name16: u16, n: usize) {
+        match self.hot_slot(name) {
+            Some(slot) => self.emit(Instr::make(OP_CALL_HOT, n as u32, slot, 0)),
+            None => self.emit(Instr::make(OP_CALL_NAME, n as u32, name16, 0)),
+        }
+    }
+
     pub(super) fn can_emit_to_slot(&self, node: &AstNode) -> bool {
         match node {
             AstNode::Ident { name, .. } => {
@@ -166,7 +179,7 @@ impl Compiler {
                 if let Some(name) = self.zero_arg_domain_call(node) {
                     let i = self.intern(&name);
                     if let Ok(name16) = u16::try_from(i) {
-                        self.emit(Instr::make(OP_CALL_NAME, 0, name16, 0));
+                        self.emit_named_call(i, name16, 0);
                     } else {
                         self.emit(Instr::a1(OP_PUSH_STR, i));
                         self.emit(Instr::a2(OP_CALL, 0, 0));

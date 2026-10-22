@@ -103,12 +103,12 @@ impl Metadata {
 }
 
 /// Long-form aliases: `util.metadata.get` / `util.metadata.all`.
-#[xcl_fn(name = "util.metadata.get")]
+#[xcl_fn(name = "util.metadata.get", hot)]
 pub fn util_metadata_get(key: String) -> Value {
     get(key.as_str())
 }
 
-#[xcl_fn(name = "util.metadata.all")]
+#[xcl_fn(name = "util.metadata.all", hot)]
 pub fn util_metadata_all() -> Value {
     all()
 }

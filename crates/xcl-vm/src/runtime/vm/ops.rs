@@ -1135,6 +1135,7 @@ mod core_ops {
     mod calls {
         use super::helpers::*;
         use super::*;
+        use crate::runtime::value::{BuiltinImpl, DomainCtx};
 
         /// Calls the function value on top of the stack with no arguments, or
         /// leaves the value in place when it is not a function.
@@ -1244,6 +1245,61 @@ mod core_ops {
             }
 
             call_name_slow(vm, n, arg_start, callee, slot)
+        }
+
+        /// Calls a native through the VM's hot slot table.
+        ///
+        /// Operand `a` = arg count, `b` = slot in [`VM::hot_natives`]. The
+        /// compiler emits this instead of `OP_CALL_NAME` when the callee name has
+        /// a slot, so dispatch is one table index plus one indirect call: no name
+        /// hash, no global table probe, no string table read, and (for a pure
+        /// native) no argument copy.
+        #[opcode(code = 70, arity = 0, stack = "n -> 1")]
+        fn op_call_hot(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let n = instr.a() as usize;
+            let slot = instr.b() as usize;
+            let arg_start = vm.stack.len() - n;
+            let Some(native) = vm.hot_native(slot) else {
+                // Slots belong to the VM that compiled the bytecode. A run on a
+                // different VM cannot honour the call, so drop the arguments
+                // instead of reading a slot that means something else.
+                vm.stack.truncate(arg_start);
+                vm.push(Value::nil());
+                return OpcodeResult::Next;
+            };
+            let result = match native.call {
+                // A pure native cannot reach the VM, so the arguments stay where
+                // they are and no copy is made.
+                BuiltinImpl::Pure(f) => f(&vm.stack[arg_start..]),
+                // A context native needs `&mut VM` and the arguments at once.
+                // Four values cover every std call; wider calls copy into a
+                // small vector, exactly like the name-resolution path.
+                BuiltinImpl::Ctx(f) => {
+                    let mut inline = [Value::nil(); 4];
+                    if n <= inline.len() {
+                        inline[..n].copy_from_slice(&vm.stack[arg_start..]);
+                        f(&mut DomainCtx {
+                            vm: &mut *vm,
+                            args: &inline[..n],
+                        })
+                    } else {
+                        let args: smallvec::SmallVec<[Value; 4]> =
+                            vm.stack[arg_start..].iter().copied().collect();
+                        f(&mut DomainCtx {
+                            vm: &mut *vm,
+                            args: &args,
+                        })
+                    }
+                }
+            };
+            vm.stack.truncate(arg_start);
+            vm.push(result);
+            OpcodeResult::Next
         }
 
         /// Fused named tail call: callee name is embedded in operand `b` (string-table index).
@@ -3007,22 +3063,13 @@ mod core_ops {
                 // 2. Check domain methods. A name has at most one natural split
                 // (`domain.method`), but two shapes sit on top of it:
                 // a plugin may publish a nested path (`std.util.print`), and a
-                // domain may carry a dotted method (`util.metadata.get`). Try
-                // every split point, longest domain first; the lookup is a hash
-                // test per candidate, and this is the cold resolution path.
-                let mut end = name.len();
-                while let Some(pos) = name[..end].rfind('.') {
-                    let (domain, method) = (&name[..pos], &name[pos + 1..]);
-                    if !domain.is_empty()
-                        && !method.is_empty()
-                        && let Some(impl_) = vm.resolve_domain_method(domain, method)
-                    {
-                        let impl_copy = *impl_;
-                        let result = impl_copy.call(vm, &args);
-                        vm.push(result);
-                        return OpcodeResult::Next;
-                    }
-                    end = pos;
+                // domain may carry a dotted method (`util.metadata.get`).
+                // `native_entry` tries every split, longest domain first, and is
+                // the same resolution the hot-slot table is verified against.
+                if let Some(native) = vm.native_entry(name) {
+                    let result = native.call(vm, &args);
+                    vm.push(result);
+                    return OpcodeResult::Next;
                 }
                 // 2b. Domain expansion
                 if vm.domain_index.contains_key(name) {

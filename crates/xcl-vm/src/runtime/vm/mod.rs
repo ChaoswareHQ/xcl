@@ -443,6 +443,10 @@ pub struct VM {
     pub impl_index: Vec<&'static ImplDescriptor>,
     /// Flat list of registered native entries (for override_by_trait lookups).
     pub native_entries: Vec<&'static NativeEntry>,
+    /// Hot natives indexed by the operand of `OP_CALL_HOT`.
+    hot_natives: Vec<HotNative>,
+    /// Callable spelling → hot slot, consulted by the compiler.
+    hot_table: HotTable,
     /// Flat list of registered type descriptors (used by `$super` lookups).
     pub type_entries: Vec<&'static TypeDescriptor>,
     /// Fast bump allocator arena for temporary heap objects created during execution.
@@ -579,6 +583,8 @@ impl VM {
             trait_index: Default::default(),
             impl_index: Vec::new(),
             native_entries: Vec::new(),
+            hot_natives: Vec::new(),
+            hot_table: HotTable::default(),
             type_entries: Vec::new(),
             arena,
             frames,
@@ -620,21 +626,13 @@ impl VM {
     }
 
     /// Registers native functions from a static slice.
+    ///
+    /// Every entry flagged `hot` is also assigned a slot in [`VM::hot_natives`]
+    /// once the slice has been added, so the compiler can emit `OP_CALL_HOT` for
+    /// its call sites.
     pub fn register_natives(&mut self, entries: &'static [NativeEntry]) {
-        use crate::runtime::value::{BuiltinImpl, NativeKind};
         for entry in entries {
-            let impl_ = match entry.kind {
-                NativeKind::Pure => {
-                    let f: crate::runtime::value::BuiltinFn =
-                        unsafe { core::mem::transmute(entry.ptr.0) };
-                    BuiltinImpl::Pure(f)
-                }
-                NativeKind::Ctx => {
-                    let f: crate::runtime::value::BuiltinCtxFn =
-                        unsafe { core::mem::transmute(entry.ptr.0) };
-                    BuiltinImpl::Ctx(f)
-                }
-            };
+            let impl_ = native_impl(entry);
 
             if let Some(domain) = entry.domain {
                 let full_name = format!("{}.{}", domain, entry.method);
@@ -673,6 +671,7 @@ impl VM {
             }
             self.native_entries.push(entry);
         }
+        self.rebuild_hot_table();
     }
 
     /// Registers plugin descriptors from a static slice.
@@ -1108,5 +1107,9 @@ use self::jit::{JitUnit, prepare_jit, prepare_jit_functions};
 mod tests;
 
 mod call;
+mod hot;
 mod registers;
 mod run;
+
+use self::hot::native_impl;
+pub use self::hot::{HotNative, HotTable};

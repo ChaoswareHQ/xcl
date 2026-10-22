@@ -175,7 +175,7 @@ pub mod layout {
     /// Core codes with no opcode today: reserved growth space for new
     /// superinstructions. Keep in sync when adding an opcode.
     pub const CORE_GROWTH: &[u8] = &[
-        49, 50, 51, 54, 55, 56, 57, 58, 59, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 86, 87, 88, 89,
+        49, 50, 51, 54, 55, 56, 57, 58, 59, 71, 72, 73, 74, 75, 76, 77, 78, 79, 86, 87, 88, 89,
     ];
 
     /// Returns `true` when `op` belongs to the core range.

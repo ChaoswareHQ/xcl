@@ -253,13 +253,13 @@ pub use compiler::span::Span;
 pub use compiler::{PARSE_ERROR_CODES, ParseError, ParseOutput, parse_recover};
 pub use runtime::{
     BuiltinImpl, Cap, CapSet, ColdModule, DomainAlias, DomainCtx, DomainSlot, FuncValue,
-    GlobalOverrideGuard, PluginDescriptor,
-    HandleKind, ImplDescriptor, ImplMethod, IntoValue, NamedParam, NativeArg, NativeEntry,
-    NativeKind, OpcodeEntry, OpcodeFn, OpcodeResult, PrimKind, Primitive, RawPtr, SUBTYPE_ERROR,
-    SUBTYPE_HANDLE, SUBTYPE_NONE, SUBTYPE_RANGE, SUBTYPE_RESULT, SUBTYPE_USER_BASE,
-    TraitDescriptor, TraitMethod, TypeDescriptor, TypeField, TypeKind, TypeVariant,
-    VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK, VM, Value, XclType, capability_of_name, extract_arg,
-    is_primitive_of, opcode_name, primitive_of_name, primitive_of_value,
+    GlobalOverrideGuard, HandleKind, HotNative, HotTable, ImplDescriptor, ImplMethod, IntoValue,
+    NamedParam, NativeArg, NativeEntry, NativeKind, OpcodeEntry, OpcodeFn, OpcodeResult,
+    PluginDescriptor, PrimKind, Primitive, RawPtr, SUBTYPE_ERROR, SUBTYPE_HANDLE, SUBTYPE_NONE,
+    SUBTYPE_RANGE, SUBTYPE_RESULT, SUBTYPE_USER_BASE, TraitDescriptor, TraitMethod, TypeDescriptor,
+    TypeField, TypeKind, TypeVariant, VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK, VM, Value, XclType,
+    capability_of_name, extract_arg, is_primitive_of, opcode_name, primitive_of_name,
+    primitive_of_value,
 };
 
 /// Evaluates XCL source code using the provided virtual machine.
@@ -267,8 +267,14 @@ pub use runtime::{
 /// Runs the complete execution pipeline:
 /// 1. Tokenizes `source` using [`compiler::lexer::lex`].
 /// 2. Builds an AST using [`compiler::parser::parse`].
-/// 3. Compiles the AST into bytecode using [`bytecode::compile`].
+/// 3. Compiles the AST into bytecode using [`bytecode::compile_hot`], binding
+///    every native the VM made hot to a direct `OP_CALL_HOT` instruction.
 /// 4. Executes the bytecode on `vm` via [`VM::run`](runtime::vm::VM::run).
+///
+/// Compiling and running against the same VM is what makes step 3 sound: the hot
+/// slots are numbered by the VM, so the bytecode is not portable to another one.
+/// Hosts that cache bytecode across VMs should call [`bytecode::compile`] and
+/// [`VM::run`](runtime::vm::VM::run) themselves.
 ///
 /// # Arguments
 ///
@@ -291,7 +297,7 @@ pub use runtime::{
 pub fn evaluate(source: &str, vm: &mut VM) -> Value {
     let tokens = compiler::lexer::lex(source, "<input>");
     let ast = compiler::parser::parse(&tokens, source);
-    let bytecode = bytecode::compile(&ast);
+    let bytecode = bytecode::compile_hot(&ast, vm.hot_table());
     vm.run(&bytecode)
 }
 
@@ -330,6 +336,6 @@ pub fn evaluate_recover(
     if !out.errors.is_empty() {
         return Err(out.errors);
     }
-    let bytecode = bytecode::compile(&out.ast);
+    let bytecode = bytecode::compile_hot(&out.ast, vm.hot_table());
     Ok(vm.run(&bytecode))
 }

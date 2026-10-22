@@ -697,6 +697,24 @@ Variadics receive `&[Value]` and named arguments arrive as one trailing map, so 
 
 Registration uses `linkme` distributed slices, so it costs nothing at runtime.
 
+### Hot Native Calls
+
+Add `hot` to a native that is called often. The VM then gives it a slot, and the
+compiler emits `OP_CALL_HOT` instead of a named call, which skips the name hash
+and the global-table probe on every call:
+
+```rust
+#[xcl_fn(name = "util.print", auto_import, hot)]
+pub fn print(args: &[Value]) -> Value { /* ... */ }
+```
+
+The flag is a hint, never a semantic change: a name that is shadowed or claimed
+twice keeps its ordinary `OP_CALL_NAME` call, so declaring a native hot cannot
+alter what a call means. Slots are numbered per VM, and `xcl_vm::evaluate`
+compiles against the VM it runs, so nothing has to be wired up by hand. Bytecode
+built with `xcl_vm::bytecode::compile` (no VM) stays portable and contains no hot
+calls.
+
 ## Tools
 
 ### Parser Debug Tool

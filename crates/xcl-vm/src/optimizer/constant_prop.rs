@@ -9,8 +9,8 @@ use alloc::vec::Vec;
 
 use crate::bytecode::Instr;
 use crate::runtime::vm::ops::consts::{
-    OP_CALL, OP_CALL_METHOD, OP_CALL_NAME, OP_DEC_LOCAL, OP_FOR_ITER_NEXT, OP_FOR_NUMBER_LOOP,
-    OP_FOR_RANGE_NEXT, OP_INC_LOCAL, OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL,
+    OP_CALL, OP_CALL_HOT, OP_CALL_METHOD, OP_CALL_NAME, OP_DEC_LOCAL, OP_FOR_ITER_NEXT,
+    OP_FOR_NUMBER_LOOP, OP_FOR_RANGE_NEXT, OP_INC_LOCAL, OP_JUMP, OP_JUMP_IF_FALSE, OP_JUMP_IF_NIL,
     OP_LOAD_CONST_LOCAL, OP_LOAD_GLOBAL, OP_LOAD_LOCAL, OP_LOAD_LOCAL_STORE_LOCAL, OP_PUSH_INT,
     OP_STORE_GLOBAL, OP_STORE_LOCAL, OP_TAIL_CALL_NAME, OP_WHILE_LT_INT, OP_WHILE_LT_INT_WIDE,
     OP_WHILE_LT_LOCAL,
@@ -113,7 +113,7 @@ pub fn constant_propagation(code: &mut Vec<Instr>, wide: &[i64]) {
                 }
             }
             // Function calls and global access invalidate all constants
-            OP_CALL | OP_CALL_METHOD | OP_CALL_NAME | OP_TAIL_CALL_NAME => {
+            OP_CALL | OP_CALL_METHOD | OP_CALL_NAME | OP_CALL_HOT | OP_TAIL_CALL_NAME => {
                 constants.clear();
             }
             OP_LOAD_GLOBAL | OP_STORE_GLOBAL => {

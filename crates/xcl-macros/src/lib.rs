@@ -672,6 +672,7 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
     let uses_typed_params = !func.sig.inputs.is_empty() && !is_raw_args_signature(&func);
 
     let auto_import_val = parsed.auto_import;
+    let hot_val = parsed.hot;
 
     let caps_expr = match &parsed.caps {
         Some(list) => match capability_set_tokens(list, func.sig.ident.span()) {
@@ -713,6 +714,7 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
                 arg_desc: #arg_desc_static,
                 auto_import: #auto_import_val,
                 caps: #caps_expr,
+                hot: #hot_val,
             };
         };
 
@@ -739,6 +741,7 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
                 arg_desc: #arg_desc_static,
                 auto_import: #auto_import_val,
                 caps: #caps_expr,
+                hot: #hot_val,
             };
         };
 
@@ -806,6 +809,7 @@ struct NativeAttr {
     arg_desc: Vec<(String, String)>,
     named: Vec<NamedParamSpec>,
     auto_import: bool,
+    hot: bool,
     caps: Option<String>,
 }
 
@@ -834,6 +838,7 @@ impl syn::parse::Parse for NativeAttr {
                 arg_desc: Vec::new(),
                 named: Vec::new(),
                 auto_import: false,
+                hot: false,
                 caps: None,
             });
         }
@@ -849,6 +854,7 @@ impl syn::parse::Parse for NativeAttr {
         let mut arg_desc = Vec::new();
         let mut named = Vec::new();
         let mut auto_import = false;
+        let mut hot = false;
         let mut caps = None;
 
         loop {
@@ -861,6 +867,14 @@ impl syn::parse::Parse for NativeAttr {
 
             if key_s == "auto_import" {
                 auto_import = true;
+                if input.peek(syn::Token![,]) {
+                    input.parse::<syn::Token![,]>()?;
+                }
+                continue;
+            }
+
+            if key_s == "hot" {
+                hot = true;
                 if input.peek(syn::Token![,]) {
                     input.parse::<syn::Token![,]>()?;
                 }
@@ -965,6 +979,7 @@ impl syn::parse::Parse for NativeAttr {
             arg_desc,
             named,
             auto_import,
+            hot,
             caps,
         })
     }
@@ -1541,6 +1556,7 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                         arg_desc: &[],
                         auto_import: #auto_import_val,
                         caps: ::xcl_vm::CapSet::EMPTY,
+                        hot: false,
                     };
 
                     fn #wrapper_name(args: &[::xcl_vm::Value]) -> ::xcl_vm::Value {
@@ -1949,7 +1965,9 @@ pub fn opcodes(args: TokenStream, input: TokenStream) -> TokenStream {
                         out.push(syn::Item::Mod(m));
                     }
                     syn::Item::Fn(func) => match extract_opcode_attrs(&func.attrs) {
-                        Some(op_meta) => out.push(syn::Item::Fn(self.collect(&func, &op_meta, path)?)),
+                        Some(op_meta) => {
+                            out.push(syn::Item::Fn(self.collect(&func, &op_meta, path)?))
+                        }
                         None => out.push(syn::Item::Fn(func)),
                     },
                     other => out.push(other),

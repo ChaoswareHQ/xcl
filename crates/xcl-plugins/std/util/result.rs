@@ -139,43 +139,43 @@ impl Util {
 /// `util` domain, so they are mirrored here to make `$r.is_ok`, `$r.unwrap()`
 /// and friends resolve. Extra arguments follow the receiver, so
 /// `$e.unwrap_or(0)` works too.
-#[xcl_fn(name = "result.is_result")]
+#[xcl_fn(name = "result.is_result", hot)]
 pub fn result_is_result(value: Value) -> Value {
     Value::bool(Util::is_result(value))
 }
 
 /// True for a successful result: `$r.is_ok`.
-#[xcl_fn(name = "result.is_ok")]
+#[xcl_fn(name = "result.is_ok", hot)]
 pub fn result_is_ok(value: Value) -> Value {
     Value::bool(Util::is_ok(value))
 }
 
 /// True for a failed result: `$r.is_err`.
-#[xcl_fn(name = "result.is_err")]
+#[xcl_fn(name = "result.is_err", hot)]
 pub fn result_is_err(value: Value) -> Value {
     Value::bool(Util::is_err(value))
 }
 
 /// The success payload, or a panic: `$r.unwrap`.
-#[xcl_fn(name = "result.unwrap")]
+#[xcl_fn(name = "result.unwrap", hot)]
 pub fn result_unwrap(value: Value) -> Value {
     Util::unwrap(value)
 }
 
 /// The success payload, or a default: `$r.unwrap_or(0)`.
-#[xcl_fn(name = "result.unwrap_or")]
+#[xcl_fn(name = "result.unwrap_or", hot)]
 pub fn result_unwrap_or(value: Value, default: Value) -> Value {
     Util::unwrap_or(value, default)
 }
 
 /// The success payload, or `none`: `$r.ok_value`.
-#[xcl_fn(name = "result.ok_value")]
+#[xcl_fn(name = "result.ok_value", hot)]
 pub fn result_ok_value(value: Value) -> Value {
     Util::ok_value(value)
 }
 
 /// The failure payload, or `none`: `$e.err_value`.
-#[xcl_fn(name = "result.err_value")]
+#[xcl_fn(name = "result.err_value", hot)]
 pub fn result_err_value(value: Value) -> Value {
     Util::err_value(value)
 }

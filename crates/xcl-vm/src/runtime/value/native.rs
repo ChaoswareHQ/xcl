@@ -33,6 +33,14 @@ pub struct NativeEntry {
     /// Capabilities of the function value itself, declared by the registering macro
     /// (`#[xcl_fn(flags = "PURE | DETERMINISTIC")]`). Empty is always safe.
     pub caps: crate::runtime::primitives::CapSet,
+    /// Whether a call to this native is worth a dedicated instruction.
+    ///
+    /// The registering macro sets this (`#[xcl_fn(..., hot)]`), and the VM turns
+    /// every hot native into a numbered slot that the compiler can call with
+    /// `OP_CALL_HOT`. It is a hint: a name that is shadowed or ambiguous keeps
+    /// its ordinary `OP_CALL_NAME` call, so declaring a native hot never changes
+    /// what a name means.
+    pub hot: bool,
 }
 
 /// A wrapper around a raw function pointer that implements [`Sync`] and [`Send`].
@@ -76,6 +84,20 @@ pub enum BuiltinImpl {
 }
 
 impl BuiltinImpl {
+    /// The function pointer address.
+    ///
+    /// Two [`NativeEntry`] values are the same function when this matches
+    /// `entry.ptr`. Comparing the raw address (rather than the `fn` values)
+    /// keeps the check honest: function pointers are not guaranteed unique, but
+    /// a pointer is.
+    #[inline]
+    pub fn ptr(self) -> *const () {
+        match self {
+            BuiltinImpl::Pure(f) => f as *const (),
+            BuiltinImpl::Ctx(f) => f as *const (),
+        }
+    }
+
     /// Executes the underlying native function using the provided VM and arguments.
     #[inline]
     pub fn call(&self, vm: &mut crate::runtime::vm::VM, args: &[Value]) -> Value {

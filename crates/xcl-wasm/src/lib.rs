@@ -369,6 +369,7 @@ const fn native(method: &'static str, f: fn(&[Value]) -> Value) -> NativeEntry {
         arg_desc: &[],
         auto_import: true,
         caps: CapSet::EMPTY,
+        hot: false,
     }
 }
 

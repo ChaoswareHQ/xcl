@@ -66,6 +66,7 @@ pub mod opcodes {
     pub use crate::runtime::vm::ops::consts::*;
 }
 pub use codegen::compile;
+pub use codegen::compile_hot;
 pub use codegen::compile_unoptimized;
 pub use instr::Instr;
 pub use opcodes::*;
