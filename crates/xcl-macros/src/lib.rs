@@ -1855,6 +1855,17 @@ fn extract_opcode_attrs(attrs: &[Attribute]) -> Option<OpMeta> {
     None
 }
 
+/// `pub(crate)` visibility, used for generated handlers and group modules.
+fn pub_crate_vis() -> Visibility {
+    let span = Span::call_site();
+    Visibility::Restricted(VisRestricted {
+        pub_token: syn::token::Pub(span),
+        paren_token: syn::token::Paren(span),
+        in_token: Some(syn::token::In(span)),
+        path: Box::new(syn::Path::from(Ident::new("crate", span))),
+    })
+}
+
 /// Check if an attribute is op (to filter it out).
 fn is_opcode_attr(attr: &Attribute) -> bool {
     attr.path().is_ident("opcode")
@@ -1902,80 +1913,112 @@ pub fn opcodes(args: TokenStream, input: TokenStream) -> TokenStream {
             .into();
     };
 
-    let mut consts = Vec::new();
-    let mut dispatch_arms = Vec::new();
-    let mut cleaned_items = Vec::new();
-    let mut codes_seen = Vec::new();
-    let mut names_seen = Vec::new();
-    let mut name_arms = Vec::new();
-    let mut branch_assigns = Vec::new();
-    let mut slot_reads_assigns = Vec::new();
-    let mut slot_writes_assigns = Vec::new();
-    let mut caps_assigns = Vec::new();
+    struct OpcodeGen<'a> {
+        scope: &'a str,
+        mod_name: &'a Ident,
+        consts: Vec<proc_macro2::TokenStream>,
+        dispatch_arms: Vec<proc_macro2::TokenStream>,
+        codes_seen: Vec<u8>,
+        names_seen: Vec<String>,
+        name_arms: Vec<proc_macro2::TokenStream>,
+        branch_assigns: Vec<proc_macro2::TokenStream>,
+        slot_reads_assigns: Vec<proc_macro2::TokenStream>,
+        slot_writes_assigns: Vec<proc_macro2::TokenStream>,
+        caps_assigns: Vec<proc_macro2::TokenStream>,
+    }
 
-    for item in funcs {
-        if let syn::Item::Fn(func) = &item {
-            let Some(op_meta) = extract_opcode_attrs(&func.attrs) else {
-                cleaned_items.push(item);
-                continue;
-            };
+    impl OpcodeGen<'_> {
+        /// Collects `#[opcode]` functions, recursing into nested modules.
+        ///
+        /// Grouping handlers (`mod calls { ... }`) keeps a large table readable;
+        /// the generated dispatch arm carries the module path, and the module is
+        /// re-emitted with every handler marked `pub(crate)` by `collect`.
+        fn walk(&mut self, items: Vec<syn::Item>, path: &[Ident]) -> syn::Result<Vec<syn::Item>> {
+            let mut out = Vec::new();
+            for item in items {
+                match item {
+                    syn::Item::Mod(mut m) if m.content.is_some() => {
+                        let (brace, inner) = m.content.take().expect("checked above");
+                        let mut sub = path.to_vec();
+                        sub.push(m.ident.clone());
+                        let cleaned = self.walk(inner, &sub)?;
+                        m.content = Some((brace, cleaned));
+                        // The generated dispatch lives outside `mod #mod_name`,
+                        // so a group module must be reachable from the crate.
+                        m.vis = pub_crate_vis();
+                        out.push(syn::Item::Mod(m));
+                    }
+                    syn::Item::Fn(func) => match extract_opcode_attrs(&func.attrs) {
+                        Some(op_meta) => out.push(syn::Item::Fn(self.collect(&func, &op_meta, path)?)),
+                        None => out.push(syn::Item::Fn(func)),
+                    },
+                    other => out.push(other),
+                }
+            }
+            Ok(out)
+        }
 
+        /// Records one opcode's constant, dispatch arm and meta entries, and
+        /// returns the function with its `#[opcode]` attribute removed.
+        fn collect(
+            &mut self,
+            func: &syn::ItemFn,
+            op_meta: &OpMeta,
+            path: &[Ident],
+        ) -> syn::Result<syn::ItemFn> {
             let code = op_meta.code;
 
             // Validate code < 128 for core
-            if scope == "core" && code >= 128 {
-                return syn::Error::new(
+            if self.scope == "core" && code >= 128 {
+                return Err(syn::Error::new(
                     func.sig.ident.span(),
                     format!("core opcode code must be < 128, got {}", code),
-                )
-                .to_compile_error()
-                .into();
+                ));
             }
 
             // Check duplicate codes
-            if codes_seen.contains(&code) {
-                return syn::Error::new(
+            if self.codes_seen.contains(&code) {
+                return Err(syn::Error::new(
                     func.sig.ident.span(),
                     format!("duplicate opcode code {}", code),
-                )
-                .to_compile_error()
-                .into();
+                ));
             }
-            codes_seen.push(code);
+            self.codes_seen.push(code);
 
             // Determine constant name
             let const_name = op_meta
                 .name
+                .clone()
                 .unwrap_or_else(|| func_to_const(&func.sig.ident.to_string()));
 
             // Check duplicate names
-            if names_seen.contains(&const_name) {
-                return syn::Error::new(
+            if self.names_seen.contains(&const_name) {
+                return Err(syn::Error::new(
                     func.sig.ident.span(),
                     format!("duplicate opcode name {}", const_name),
-                )
-                .to_compile_error()
-                .into();
+                ));
             }
-            names_seen.push(const_name.clone());
+            self.names_seen.push(const_name.clone());
 
             let const_ident = Ident::new(&const_name, func.sig.ident.span());
 
+            let mod_name = self.mod_name;
+            let func_ident = &func.sig.ident;
+
             // Generate constant
-            consts.push(quote! {
+            self.consts.push(quote! {
                 pub const #const_ident: u8 = #code;
             });
 
-            // Generate dispatch arm
-            let func_ident = &func.sig.ident;
-            dispatch_arms.push(quote! {
+            // Generate dispatch arm, carrying the nested module path if any
+            self.dispatch_arms.push(quote! {
                 #code => {
-                    #mod_name::#func_ident(vm, locals, top, instr)
+                    #mod_name::#(#path::)*#func_ident(vm, locals, top, instr)
                 }
             });
 
             // Generate opcode name arm
-            name_arms.push(quote! {
+            self.name_arms.push(quote! {
                 #code => #const_name,
             });
 
@@ -1985,7 +2028,7 @@ pub fn opcodes(args: TokenStream, input: TokenStream) -> TokenStream {
                     BranchKind::Abs => 1u8,
                     BranchKind::Wide => 2u8,
                 };
-                branch_assigns.push(quote! {
+                self.branch_assigns.push(quote! {
                     t[#code as usize] = #kind_val;
                 });
             }
@@ -1994,46 +2037,64 @@ pub fn opcodes(args: TokenStream, input: TokenStream) -> TokenStream {
             let reads_val = op_meta.reads;
             let writes_val = op_meta.writes;
             if reads_val != 0 {
-                slot_reads_assigns.push(quote! {
+                self.slot_reads_assigns.push(quote! {
                     t[#code as usize] = #reads_val;
                 });
             }
             if writes_val != 0 {
-                slot_writes_assigns.push(quote! {
+                self.slot_writes_assigns.push(quote! {
                     t[#code as usize] = #writes_val;
                 });
             }
 
             // Collect declared capabilities for the meta table
             if let Some(ref flags) = op_meta.flags {
-                let caps_expr = match capability_set_tokens_at(
+                let caps_expr = capability_set_tokens_at(
                     flags,
                     func.sig.ident.span(),
                     quote!(crate::runtime::primitives),
-                ) {
-                    Ok(ts) => ts,
-                    Err(e) => return e.to_compile_error().into(),
-                };
-                caps_assigns.push(quote! {
+                )?;
+                self.caps_assigns.push(quote! {
                     t[#code as usize] = #caps_expr.bits();
                 });
             }
 
-            // Build cleaned function (remove op attrs, keep others, make pub(crate))
+            // Cleaned function (remove op attrs, keep others, make pub(crate))
             let mut cleaned_func = func.clone();
             cleaned_func.attrs.retain(|a| !is_opcode_attr(a));
-            let span = Span::call_site();
-            cleaned_func.vis = Visibility::Restricted(VisRestricted {
-                pub_token: syn::token::Pub(span),
-                paren_token: syn::token::Paren(span),
-                in_token: Some(syn::token::In(span)),
-                path: Box::new(syn::Path::from(Ident::new("crate", span))),
-            });
-            cleaned_items.push(syn::Item::Fn(cleaned_func));
-        } else {
-            cleaned_items.push(item);
+            cleaned_func.vis = pub_crate_vis();
+            Ok(cleaned_func)
         }
     }
+
+    let mut generator = OpcodeGen {
+        scope: &scope,
+        mod_name,
+        consts: Vec::new(),
+        dispatch_arms: Vec::new(),
+        codes_seen: Vec::new(),
+        names_seen: Vec::new(),
+        name_arms: Vec::new(),
+        branch_assigns: Vec::new(),
+        slot_reads_assigns: Vec::new(),
+        slot_writes_assigns: Vec::new(),
+        caps_assigns: Vec::new(),
+    };
+    let cleaned_items = match generator.walk(funcs, &[]) {
+        Ok(items) => items,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    let OpcodeGen {
+        consts,
+        dispatch_arms,
+        codes_seen,
+        name_arms,
+        branch_assigns,
+        slot_reads_assigns,
+        slot_writes_assigns,
+        caps_assigns,
+        ..
+    } = generator;
 
     // Build the migrated-opcode bitmask (only for core scope)
     let mask_lit = if scope == "core" {

@@ -3,6 +3,27 @@
 //! Each handler is declared with `#[opcode(...)]` and the macro generates:
 //! - `OP_*` constants in the `consts` submodule
 //! - a `dispatch_core` function with a direct `match` dispatch
+//!
+//! # Layout
+//!
+//! Handlers are grouped by the shape they operate on, so the table stays
+//! navigable. The macro recurses into these modules and prefixes the generated
+//! dispatch arms with the module path; nesting is organisational only.
+//!
+//! | Group | Holds |
+//! |---|---|
+//! | `stack` | constants, locals/globals, special variables, `pop` |
+//! | `arith` | arithmetic, comparisons, logic, bitwise, power |
+//! | `control` | jumps, `return`, `halt`, the cold-module escape |
+//! | `data` | array/map/range construction, indexing, field access |
+//! | `calls` | `call`, named/tail/method calls, lambda loading |
+//! | `loops` | `for` iteration and the numeric loop |
+//! | `types` | `is` / type cast |
+//! | `fused_local` | register-to-register superinstructions |
+//! | `fused_int` | local-with-integer-constant superinstructions |
+//! | `fused_branch` | fused `if`/`while` compare-and-branch |
+//! | `fused_container` | index/field-into-local superinstructions |
+//! | `helpers` | plain fns shared by the groups (name resolution, JIT entry) |
 
 // `alloc` re-exports needed by `no_std` builds (std prelude provides them).
 #[cfg(not(feature = "std"))]
@@ -24,2855 +45,3122 @@ mod core_ops {
 
     // ── Phase A + Tier 1: Stack/constants ──
 
-    /// Does any registered record with this name fit the value's shape?
-    ///
-    /// Records are maps and identity is structural, so a value matches a record
-    /// when it carries every declared field. Cost is O(registered types), which
-    /// is why this is only used on the `is` path.
-    fn record_named(vm: &VM, value: Value, name: &str) -> bool {
-        let Some(map) = value.as_map() else {
-            return false;
-        };
-        vm.type_entries.iter().any(|desc| {
-            desc.name == name
-                && desc.kind == crate::runtime::value::TypeKind::Record
-                && !desc.fields.is_empty()
-                && desc.fields.iter().all(|f| map.contains_key(f.name))
-        })
-    }
+    mod stack {
+        use super::helpers::*;
+        use super::*;
 
-    /// Does any registered record fitting the value's shape declare `cap`?
-    ///
-    /// "Any" rather than "the most specific": a value that satisfies two
-    /// records keeps the capabilities of both.
-    fn record_has_cap(vm: &VM, value: Value, cap: crate::runtime::primitives::Cap) -> bool {
-        let Some(map) = value.as_map() else {
-            return false;
-        };
-        vm.type_entries.iter().any(|desc| {
-            desc.kind == crate::runtime::value::TypeKind::Record
-                && !desc.fields.is_empty()
-                && desc.fields.iter().all(|f| map.contains_key(f.name))
-                && desc.caps.has(cap)
-        })
-    }
-
-    /// No-operation opcode.
-    #[opcode(code = 0, arity = 0, stack = "0 -> 0")]
-    fn op_nop(__vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        OpcodeResult::Next
-    }
-
-    /// Pushes `nil` (`none`) onto the operand stack.
-    #[opcode(code = 1, arity = 0, stack = "0 -> 1")]
-    fn op_push_nil(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        vm.push(Value::nil());
-        OpcodeResult::Next
-    }
-
-    /// Pushes boolean `true` onto the operand stack.
-    #[opcode(code = 2, arity = 0, stack = "0 -> 1")]
-    fn op_push_true(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        vm.push(Value::bool(true));
-        OpcodeResult::Next
-    }
-
-    /// Pushes boolean `false` onto the operand stack.
-    #[opcode(code = 3, arity = 0, stack = "0 -> 1")]
-    fn op_push_false(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        vm.push(Value::bool(false));
-        OpcodeResult::Next
-    }
-
-    /// Pushes a small integer constant encoded directly in operand `a`.
-    #[opcode(code = 4, arity = 0, stack = "0 -> 1")]
-    fn op_push_int(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
-        vm.push(Value::from_i48(instr.a() as i64));
-        OpcodeResult::Next
-    }
-
-    /// Pushes a 64-bit integer constant indexed from `wide_operands` by operand `a`.
-    #[opcode(code = 5, arity = 0, stack = "0 -> 1")]
-    fn op_push_int_wide(
-        vm: &mut VM,
-        _locals: LocalSlice,
-        top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        // SAFETY: frame at `top` is active during dispatch.
-        let v = vm.frames[top].code().wide_operands[instr.a() as usize];
-        vm.push(Value::from_i48(v));
-        OpcodeResult::Next
-    }
-
-    /// Pushes a 64-bit float constant indexed from `wide_operands` by operand `a`.
-    #[opcode(code = 6, arity = 0, stack = "0 -> 1")]
-    fn op_push_float(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
-        // SAFETY: frame at `top` is active during dispatch.
-        let bits = vm.frames[top].code().wide_operands[instr.a() as usize];
-        vm.push(Value::from_f64(f64::from_bits(bits as u64)));
-        OpcodeResult::Next
-    }
-
-    /// Pushes an interned string indexed from `string_values` by operand `a`.
-    #[opcode(code = 7, arity = 0, stack = "0 -> 1")]
-    fn op_push_str(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
-        // SAFETY: frame at `top` is active during dispatch.
-        vm.push(vm.frames[top].code().string_values[instr.a() as usize]);
-        OpcodeResult::Next
-    }
-
-    // ── Locals ──
-
-    /// Loads a local variable from slot index `a` onto the stack.
-    #[opcode(code = 8, arity = 0, stack = "0 -> 1", reads = "a")]
-    fn op_load_local(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
-        let v = unsafe { *locals.get_unchecked(instr.a() as usize) };
-        vm.push(v);
-        OpcodeResult::Next
-    }
-
-    /// Pops a value from the stack and stores it into local slot index `a`.
-    #[opcode(code = 9, arity = 1, stack = "1 -> 0", writes = "a")]
-    fn op_store_local(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
-        let v = vm.pop();
-        unsafe {
-            *locals.get_unchecked_mut(instr.a() as usize) = v;
-        }
-        OpcodeResult::Next
-    }
-
-    // ── Globals ──
-
-    /// Loads a global variable from slot index `a` onto the stack.
-    #[opcode(code = 10, arity = 0, stack = "0 -> 1")]
-    fn op_load_global(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
-        let v = vm
-            .globals
-            .get(instr.a() as usize)
-            .copied()
-            .unwrap_or(Value::nil());
-        vm.push(v);
-        OpcodeResult::Next
-    }
-
-    /// Pops a value from the stack and stores it into global slot index `a`.
-    #[opcode(code = 11, arity = 1, stack = "1 -> 0")]
-    fn op_store_global(
-        vm: &mut VM,
-        _locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let v = vm.pop();
-        if (instr.a() as usize) < vm.globals.len() {
-            vm.globals[instr.a() as usize] = v;
-        }
-        OpcodeResult::Next
-    }
-
-    /// Loads a variable from the **top-level frame's** slot `a`.
-    ///
-    /// Function bodies use this to read top-level variables: the root frame's
-    /// locals are the first registers of the shared register file, so this is a
-    /// plain indexed load that does not depend on the caller's frame.
-    #[opcode(code = 40, arity = 0, stack = "0 -> 1")]
-    fn op_load_root(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
-        let v = vm
-            .regs
-            .get(instr.a() as usize)
-            .copied()
-            .unwrap_or(Value::nil());
-        vm.push(v);
-        OpcodeResult::Next
-    }
-
-    /// Calls the function value on top of the stack with no arguments, or
-    /// leaves the value in place when it is not a function.
-    ///
-    /// This is what a bare `$f` statement compiles to: writing `$f` calls the
-    /// value it holds, while `$x` holding a non-function stays a plain value
-    /// read (so `$x` as the last statement still yields the program result).
-    #[opcode(code = 41, arity = 0, stack = "1 -> 1")]
-    fn op_call_value_zero(
-        vm: &mut VM,
-        _locals: LocalSlice,
-        _top: usize,
-        _instr: Instr,
-    ) -> OpcodeResult {
-        let callee = vm.stack.last().copied().unwrap_or(Value::nil());
-        let Some(func) = callee.as_func() else {
-            return OpcodeResult::Next;
-        };
-        // The callee slot is replaced by the result on return.
-        let arg_base = vm.stack.len() - 1;
-        vm.enter_call_at(func, arg_base, 0)
-    }
-
-    // ── Arithmetic ──
-
-    /// Pops two values, adds them, and pushes the result.
-    #[opcode(
-        code = 12,
-        arity = 2,
-        stack = "2 -> 1",
-        flags = "PURE | DETERMINISTIC | COMMUTATIVE"
-    )]
-    fn op_add(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let b = vm.pop();
-        let a = vm.pop();
-        if a.is_int() && b.is_int() {
-            let ai = a.as_i48();
-            let bi = b.as_i48();
-            if let Some(sum) = ai.checked_add(bi) {
-                vm.push(Value::from_i48(sum));
-            } else {
-                vm.push(Value::from_f64(ai as f64 + bi as f64));
-            }
-        } else if a.is_float() && b.is_float() {
-            vm.push(Value::from_f64(a.as_f64() + b.as_f64()));
-        } else {
-            vm.push(a.add(b, &vm.arena));
-        }
-        OpcodeResult::Next
-    }
-
-    /// Pops two values, subtracts `top` from `second`, and pushes the result.
-    #[opcode(code = 13, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_sub(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let b = vm.pop();
-        let a = vm.pop();
-        if a.is_int() && b.is_int() {
-            let ai = a.as_i48();
-            let bi = b.as_i48();
-            if let Some(diff) = ai.checked_sub(bi) {
-                vm.push(Value::from_i48(diff));
-            } else {
-                vm.push(Value::from_f64(ai as f64 - bi as f64));
-            }
-        } else if a.is_float() && b.is_float() {
-            vm.push(Value::from_f64(a.as_f64() - b.as_f64()));
-        } else {
-            vm.push(a.sub_(b));
-        }
-        OpcodeResult::Next
-    }
-
-    /// Pops two values, multiplies them, and pushes the result.
-    #[opcode(
-        code = 14,
-        arity = 2,
-        stack = "2 -> 1",
-        flags = "PURE | DETERMINISTIC | COMMUTATIVE"
-    )]
-    fn op_mul(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let b = vm.pop();
-        let a = vm.pop();
-        if a.is_int() && b.is_int() {
-            let ai = a.as_i48();
-            let bi = b.as_i48();
-            if let Some(prod) = ai.checked_mul(bi) {
-                vm.push(Value::from_i48(prod));
-            } else {
-                vm.push(Value::from_f64(ai as f64 * bi as f64));
-            }
-        } else if a.is_float() && b.is_float() {
-            vm.push(Value::from_f64(a.as_f64() * b.as_f64()));
-        } else {
-            vm.push(a.mul(b, &vm.arena));
-        }
-        OpcodeResult::Next
-    }
-
-    /// Pops two values, divides `second` by `top`, and pushes the result.
-    #[opcode(code = 15, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_div(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let b = vm.pop();
-        let a = vm.pop();
-        if a.is_int() && b.is_int() {
-            let bi = b.as_i48();
-            if bi == 0 {
-                vm.push(Value::from_f64(f64::INFINITY));
-            } else {
-                vm.push(Value::from_i48(a.as_i48() / bi));
-            }
-        } else if a.is_float() && b.is_float() {
-            vm.push(Value::from_f64(a.as_f64() / b.as_f64()));
-        } else {
-            vm.push(a.div_(b));
-        }
-        OpcodeResult::Next
-    }
-
-    /// Pops two values, computes modulo remainder, and pushes the result.
-    #[opcode(code = 16, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_mod(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let b = vm.pop();
-        let a = vm.pop();
-        if a.is_int() && b.is_int() {
-            let bi = b.as_i48();
-            if bi == 0 {
-                vm.push(Value::from_f64(f64::NAN));
-            } else {
-                vm.push(Value::from_i48(a.as_i48() % bi));
-            }
-        } else if a.is_float() && b.is_float() {
-            vm.push(Value::from_f64(a.as_f64() % b.as_f64()));
-        } else {
-            vm.push(a.mod_(b));
-        }
-        OpcodeResult::Next
-    }
-
-    /// Negates the value on the top of the stack.
-    #[opcode(code = 17, arity = 1, stack = "1 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_neg(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let a = vm.pop();
-        vm.push(a.neg_());
-        OpcodeResult::Next
-    }
-
-    // ── Comparison ──
-
-    /// Compares two top stack values for equality (`==`).
-    #[opcode(
-        code = 18,
-        arity = 2,
-        stack = "2 -> 1",
-        flags = "PURE | DETERMINISTIC | COMMUTATIVE"
-    )]
-    fn op_eq(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let b = vm.pop();
-        let a = vm.pop();
-        let result = if a.is_int() && b.is_int() {
-            a.as_i48() == b.as_i48()
-        } else if a.is_float() && b.is_float() {
-            (a.as_f64() - b.as_f64()).abs() < 1e-15
-        } else {
-            a.eq_(b)
-        };
-        vm.push(Value::bool(result));
-        OpcodeResult::Next
-    }
-
-    /// Compares two top stack values for inequality (`!=`).
-    #[opcode(
-        code = 19,
-        arity = 2,
-        stack = "2 -> 1",
-        flags = "PURE | DETERMINISTIC | COMMUTATIVE"
-    )]
-    fn op_neq(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let b = vm.pop();
-        let a = vm.pop();
-        let result = if a.is_int() && b.is_int() {
-            a.as_i48() != b.as_i48()
-        } else if a.is_float() && b.is_float() {
-            (a.as_f64() - b.as_f64()).abs() >= 1e-15
-        } else {
-            !a.eq_(b)
-        };
-        vm.push(Value::bool(result));
-        OpcodeResult::Next
-    }
-
-    /// Tests if second stack value is less than top stack value (`<`).
-    #[opcode(code = 20, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_lt(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let b = vm.pop();
-        let a = vm.pop();
-        let result = if a.is_int() && b.is_int() {
-            a.as_i48() < b.as_i48()
-        } else if a.is_float() && b.is_float() {
-            a.as_f64() < b.as_f64()
-        } else {
-            a.lt(b)
-        };
-        vm.push(Value::bool(result));
-        OpcodeResult::Next
-    }
-
-    /// Tests if second stack value is greater than top stack value (`>`).
-    #[opcode(code = 21, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_gt(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let b = vm.pop();
-        let a = vm.pop();
-        let result = if a.is_int() && b.is_int() {
-            a.as_i48() > b.as_i48()
-        } else if a.is_float() && b.is_float() {
-            a.as_f64() > b.as_f64()
-        } else {
-            a.gt(b)
-        };
-        vm.push(Value::bool(result));
-        OpcodeResult::Next
-    }
-
-    /// Tests if second stack value is less than or equal to top stack value (`<=`).
-    #[opcode(code = 22, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_le(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let b = vm.pop();
-        let a = vm.pop();
-        let result = if a.is_int() && b.is_int() {
-            a.as_i48() <= b.as_i48()
-        } else if a.is_float() && b.is_float() {
-            a.as_f64() <= b.as_f64()
-        } else {
-            a.lt(b) || a.eq_(b)
-        };
-        vm.push(Value::bool(result));
-        OpcodeResult::Next
-    }
-
-    /// Tests if second stack value is greater than or equal to top stack value (`>=`).
-    #[opcode(code = 23, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_ge(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let b = vm.pop();
-        let a = vm.pop();
-        let result = if a.is_int() && b.is_int() {
-            a.as_i48() >= b.as_i48()
-        } else if a.is_float() && b.is_float() {
-            a.as_f64() >= b.as_f64()
-        } else {
-            a.gt(b) || a.eq_(b)
-        };
-        vm.push(Value::bool(result));
-        OpcodeResult::Next
-    }
-
-    /// Logical AND of top two stack values.
-    #[opcode(code = 24, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_and(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let b = vm.pop();
-        let a = vm.pop();
-        vm.push(Value::bool(a.is_truthy() && b.is_truthy()));
-        OpcodeResult::Next
-    }
-
-    /// Logical OR of top two stack values.
-    #[opcode(code = 25, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_or(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let b = vm.pop();
-        let a = vm.pop();
-        vm.push(Value::bool(a.is_truthy() || b.is_truthy()));
-        OpcodeResult::Next
-    }
-
-    /// Logical inversion of top stack value (`!`).
-    #[opcode(code = 26, arity = 1, stack = "1 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_not(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let a = vm.pop();
-        vm.push(a.not_());
-        OpcodeResult::Next
-    }
-
-    /// Tests membership (`in`).
-    #[opcode(code = 27, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
-    fn op_in(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let c = vm.pop();
-        let item = vm.pop();
-        let found = c
-            .as_array()
-            .map(|a| a.iter().any(|v| v.eq_(item)))
-            .unwrap_or(false);
-        vm.push(Value::bool(found));
-        OpcodeResult::Next
-    }
-
-    // ── Control flow ──
-
-    /// Discards the value on top of the operand stack.
-    ///
-    /// Used by brace-expanded calls (`print { "a"; "b" }`) to drop every
-    /// item's result except the last one.
-    #[opcode(code = 31, arity = 0, stack = "1 -> 0")]
-    fn op_pop(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        vm.pop();
-        OpcodeResult::Next
-    }
-
-    /// Unconditional jump to instruction pointer address `a`.
-    #[opcode(code = 28, arity = 0, stack = "0 -> 0", branch = "abs")]
-    fn op_jump(__vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
-        OpcodeResult::Jump(instr.a())
-    }
-
-    /// Conditional jump to address `a` if top of stack is falsy.
-    #[opcode(code = 29, arity = 1, stack = "1 -> 0", branch = "abs")]
-    fn op_jump_if_false(
-        vm: &mut VM,
-        _locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let c = vm.pop();
-        if c.is_truthy() {
+        /// No-operation opcode.
+        #[opcode(code = 0, arity = 0, stack = "0 -> 0")]
+        fn op_nop(__vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
             OpcodeResult::Next
-        } else {
-            OpcodeResult::Jump(instr.a())
         }
-    }
 
-    /// Conditional jump to address `a` if top of stack is nil.
-    #[opcode(code = 30, arity = 1, stack = "1 -> 0", branch = "abs")]
-    fn op_jump_if_nil(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
-        let v = vm.pop();
-        if v.is_nil() {
-            OpcodeResult::Jump(instr.a())
-        } else {
+        /// Pushes `nil` (`none`) onto the operand stack.
+        #[opcode(code = 1, arity = 0, stack = "0 -> 1")]
+        fn op_push_nil(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            _instr: Instr,
+        ) -> OpcodeResult {
+            vm.push(Value::nil());
+            OpcodeResult::Next
+        }
+
+        /// Pushes boolean `true` onto the operand stack.
+        #[opcode(code = 2, arity = 0, stack = "0 -> 1")]
+        fn op_push_true(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            _instr: Instr,
+        ) -> OpcodeResult {
+            vm.push(Value::bool(true));
+            OpcodeResult::Next
+        }
+
+        /// Pushes boolean `false` onto the operand stack.
+        #[opcode(code = 3, arity = 0, stack = "0 -> 1")]
+        fn op_push_false(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            _instr: Instr,
+        ) -> OpcodeResult {
+            vm.push(Value::bool(false));
+            OpcodeResult::Next
+        }
+
+        /// Pushes a small integer constant encoded directly in operand `a`.
+        #[opcode(code = 4, arity = 0, stack = "0 -> 1")]
+        fn op_push_int(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            vm.push(Value::from_i48(instr.a() as i64));
+            OpcodeResult::Next
+        }
+
+        /// Pushes a 64-bit integer constant indexed from `wide_operands` by operand `a`.
+        #[opcode(code = 5, arity = 0, stack = "0 -> 1")]
+        fn op_push_int_wide(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            // SAFETY: frame at `top` is active during dispatch.
+            let v = vm.frames[top].code().wide_operands[instr.a() as usize];
+            vm.push(Value::from_i48(v));
+            OpcodeResult::Next
+        }
+
+        /// Pushes a 64-bit float constant indexed from `wide_operands` by operand `a`.
+        #[opcode(code = 6, arity = 0, stack = "0 -> 1")]
+        fn op_push_float(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            // SAFETY: frame at `top` is active during dispatch.
+            let bits = vm.frames[top].code().wide_operands[instr.a() as usize];
+            vm.push(Value::from_f64(f64::from_bits(bits as u64)));
+            OpcodeResult::Next
+        }
+
+        /// Pushes an interned string indexed from `string_values` by operand `a`.
+        #[opcode(code = 7, arity = 0, stack = "0 -> 1")]
+        fn op_push_str(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
+            // SAFETY: frame at `top` is active during dispatch.
+            vm.push(vm.frames[top].code().string_values[instr.a() as usize]);
+            OpcodeResult::Next
+        }
+
+        // ── Locals ──
+
+        /// Loads a local variable from slot index `a` onto the stack.
+        #[opcode(code = 8, arity = 0, stack = "0 -> 1", reads = "a")]
+        fn op_load_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let v = unsafe { *locals.get_unchecked(instr.a() as usize) };
+            vm.push(v);
+            OpcodeResult::Next
+        }
+
+        /// Pops a value from the stack and stores it into local slot index `a`.
+        #[opcode(code = 9, arity = 1, stack = "1 -> 0", writes = "a")]
+        fn op_store_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let v = vm.pop();
+            unsafe {
+                *locals.get_unchecked_mut(instr.a() as usize) = v;
+            }
+            OpcodeResult::Next
+        }
+
+        // ── Globals ──
+
+        /// Loads a global variable from slot index `a` onto the stack.
+        #[opcode(code = 10, arity = 0, stack = "0 -> 1")]
+        fn op_load_global(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let v = vm
+                .globals
+                .get(instr.a() as usize)
+                .copied()
+                .unwrap_or(Value::nil());
+            vm.push(v);
+            OpcodeResult::Next
+        }
+
+        /// Pops a value from the stack and stores it into global slot index `a`.
+        #[opcode(code = 11, arity = 1, stack = "1 -> 0")]
+        fn op_store_global(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let v = vm.pop();
+            if (instr.a() as usize) < vm.globals.len() {
+                vm.globals[instr.a() as usize] = v;
+            }
+            OpcodeResult::Next
+        }
+
+        /// Loads a variable from the **top-level frame's** slot `a`.
+        ///
+        /// Function bodies use this to read top-level variables: the root frame's
+        /// locals are the first registers of the shared register file, so this is a
+        /// plain indexed load that does not depend on the caller's frame.
+        #[opcode(code = 40, arity = 0, stack = "0 -> 1")]
+        fn op_load_root(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let v = vm
+                .regs
+                .get(instr.a() as usize)
+                .copied()
+                .unwrap_or(Value::nil());
+            vm.push(v);
+            OpcodeResult::Next
+        }
+
+        /// Discards the value on top of the operand stack.
+        ///
+        /// Used by brace-expanded calls (`print { "a"; "b" }`) to drop every
+        /// item's result except the last one.
+        #[opcode(code = 31, arity = 0, stack = "1 -> 0")]
+        fn op_pop(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            vm.pop();
+            OpcodeResult::Next
+        }
+
+        /// Push `local[a] <op> b` for a small integer constant. Operand `a` = slot,
+        /// `b` = constant, `c` = 0 add / 1 sub / 2 mul.
+        ///
+        /// Call arguments are the hot case: `fib($n - 1)` used to be
+        /// `LOAD_LOCAL, PUSH_INT, SUB` (three dispatches) before every call.
+        #[opcode(code = 125, arity = 0, stack = "0 -> 1")]
+        fn op_push_local_int_op(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let v = unsafe { *locals.get_unchecked(instr.a() as usize) };
+            let c = instr.b() as i64;
+            let r = if v.tag() == TAG_INT {
+                let a = v.as_i48();
+                let folded = match instr.c() {
+                    1 => a.checked_sub(c),
+                    2 => a.checked_mul(c),
+                    _ => a.checked_add(c),
+                };
+                match folded {
+                    Some(r) => Value::from_i48(r),
+                    None => Value::from_f64(a as f64 + c as f64),
+                }
+            } else {
+                let cv = Value::from_i48(c);
+                match instr.c() {
+                    1 => v.sub_(cv),
+                    2 => v.mul(cv, &vm.arena),
+                    _ => v.add(cv, &vm.arena),
+                }
+            };
+            vm.push(r);
+            OpcodeResult::Next
+        }
+
+        /// Load constant directly to local slot. Operand `a` = slot, `b` = value/index, `c` = kind.
+        #[opcode(code = 108, arity = 0, stack = "0 -> 0", writes = "a")]
+        fn op_load_const_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let slot = instr.a() as usize;
+            let b = instr.b();
+            let kind = instr.c();
+            // SAFETY: frame at `top` is active during dispatch.
+            let code = vm.frames[top].code();
+            let val = match kind {
+                0 => Value::from_i48(b as i64),
+                1 => {
+                    let bits = code.wide_operands[b as usize];
+                    Value::from_f64(f64::from_bits(bits as u64))
+                }
+                2 => {
+                    // Interned string constant: reuse the pre-built value instead
+                    // of re-allocating the bytes on every execution.
+                    code.string_values[b as usize]
+                }
+                3 => Value::nil(),
+                4 => Value::bool(true),
+                5 => Value::bool(false),
+                6 => {
+                    let v = code.wide_operands[b as usize];
+                    Value::from_i48(v)
+                }
+                _ => Value::nil(),
+            };
+            let l = &locals;
+            unsafe {
+                *l.get_unchecked_mut(slot) = val;
+            }
+            OpcodeResult::Next
+        }
+
+        /// Pushes a read-only special variable.
+        ///
+        /// Operand `a` = positional index (`$1..$N`), operand `c` = kind
+        /// (`runtime::opcode::special_var_kind`).
+        #[opcode(code = 118, arity = 0, stack = "0 -> 1")]
+        fn op_special_var(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::opcode::special_var_kind as sv;
+
+            let index = instr.a() as usize;
+            let value = match instr.c() {
+                sv::SCRIPT_NAME => {
+                    // Built on first read and cached for the rest of the run, so a
+                    // program that never mentions `$0` never touches the arena.
+                    if vm.script_name_value.is_nil() {
+                        let built = Value::from_str_ref(
+                            vm.script_name
+                                .as_deref()
+                                .unwrap_or(crate::runtime::vm::DEFAULT_SCRIPT_NAME),
+                            &vm.arena,
+                        );
+                        vm.script_name_value = built;
+                    }
+                    vm.script_name_value
+                }
+                sv::POSITIONAL => {
+                    // $1 maps to argv[0], $2 to argv[1], etc.
+                    let arr_idx = if index > 0 { index - 1 } else { 0 };
+                    vm.frames[top]
+                        .argv
+                        .get(arr_idx)
+                        .copied()
+                        .unwrap_or(Value::nil())
+                }
+                sv::ARG_COUNT => Value::from_i48(vm.frames[top].argv.len() as i64),
+                sv::ARGS_ARRAY => Value::from_array(vm.frames[top].argv.clone(), &vm.arena),
+                sv::ARGS_JOINED => {
+                    let mut joined = String::new();
+                    for (i, arg) in vm.frames[top].argv.iter().enumerate() {
+                        if i > 0 {
+                            joined.push(' ');
+                        }
+                        joined.push_str(&arg.as_string());
+                    }
+                    Value::from_str(joined, &vm.arena)
+                }
+                // `$self` is the receiver: the first call argument. It is stored in
+                // `arg0` on every call, so a function that only uses `$self` does not
+                // need an `argv` vector.
+                sv::SELF => vm.frames[top].arg0,
+                sv::SUPER => parent_record(vm, vm.frames[top].arg0),
+                _ => Value::nil(),
+            };
+            vm.push(value);
             OpcodeResult::Next
         }
     }
 
-    /// Returns from the current function call frame.
-    #[opcode(code = 33, arity = 0, stack = "0 -> 0")]
-    fn op_return(__vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        OpcodeResult::Return
-    }
+    mod arith {
+        use super::*;
 
-    /// Halts VM execution.
-    #[opcode(code = 34, arity = 0, stack = "0 -> 0")]
-    fn op_halt(__vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        OpcodeResult::Return
-    }
-
-    /// Escape into a cold plugin module.
-    ///
-    /// Operand `a` = module id, `c` = the module's local opcode, `b` = a 16-bit
-    /// operand for the callee. Modules are declared once and registered with
-    /// [`VM::register_cold_modules`](crate::runtime::vm::VM::register_cold_modules).
-    ///
-    /// An unknown module or opcode does nothing, matching how an unclaimed hot
-    /// byte behaves — a missing extension is a no-op, not a crash.
-    #[opcode(code = 127, arity = 0, stack = "0 -> 1")]
-    fn op_ext(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
-        vm.invoke_cold_opcode(instr.a(), instr.c(), top, instr)
-    }
-
-    // ── Collections ──
-
-    /// Constructs an array from `a` elements on the stack.
-    #[opcode(code = 35, arity = 0, stack = "n -> 1")]
-    fn op_make_array(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
-        let n = instr.a() as usize;
-        let mut arr = Vec::with_capacity(n);
-        for _ in 0..n {
-            arr.push(vm.pop());
+        /// Pops two values, subtracts `top` from `second`, and pushes the result.
+        #[opcode(code = 13, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
+        fn op_sub(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let b = vm.pop();
+            let a = vm.pop();
+            if a.is_int() && b.is_int() {
+                let ai = a.as_i48();
+                let bi = b.as_i48();
+                if let Some(diff) = ai.checked_sub(bi) {
+                    vm.push(Value::from_i48(diff));
+                } else {
+                    vm.push(Value::from_f64(ai as f64 - bi as f64));
+                }
+            } else if a.is_float() && b.is_float() {
+                vm.push(Value::from_f64(a.as_f64() - b.as_f64()));
+            } else {
+                vm.push(a.sub_(b));
+            }
+            OpcodeResult::Next
         }
-        arr.reverse();
-        vm.push(Value::from_array(arr, &vm.arena));
-        OpcodeResult::Next
+
+        /// Pops two values, divides `second` by `top`, and pushes the result.
+        #[opcode(code = 15, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
+        fn op_div(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let b = vm.pop();
+            let a = vm.pop();
+            if a.is_int() && b.is_int() {
+                let bi = b.as_i48();
+                if bi == 0 {
+                    vm.push(Value::from_f64(f64::INFINITY));
+                } else {
+                    vm.push(Value::from_i48(a.as_i48() / bi));
+                }
+            } else if a.is_float() && b.is_float() {
+                vm.push(Value::from_f64(a.as_f64() / b.as_f64()));
+            } else {
+                vm.push(a.div_(b));
+            }
+            OpcodeResult::Next
+        }
+
+        /// Pops two values, computes modulo remainder, and pushes the result.
+        #[opcode(code = 16, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
+        fn op_mod(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let b = vm.pop();
+            let a = vm.pop();
+            if a.is_int() && b.is_int() {
+                let bi = b.as_i48();
+                if bi == 0 {
+                    vm.push(Value::from_f64(f64::NAN));
+                } else {
+                    vm.push(Value::from_i48(a.as_i48() % bi));
+                }
+            } else if a.is_float() && b.is_float() {
+                vm.push(Value::from_f64(a.as_f64() % b.as_f64()));
+            } else {
+                vm.push(a.mod_(b));
+            }
+            OpcodeResult::Next
+        }
+
+        /// Negates the value on the top of the stack.
+        #[opcode(code = 17, arity = 1, stack = "1 -> 1", flags = "PURE | DETERMINISTIC")]
+        fn op_neg(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let a = vm.pop();
+            vm.push(a.neg_());
+            OpcodeResult::Next
+        }
+
+        // ── Comparison ──
+
+        /// Compares two top stack values for equality (`==`).
+        #[opcode(
+            code = 18,
+            arity = 2,
+            stack = "2 -> 1",
+            flags = "PURE | DETERMINISTIC | COMMUTATIVE"
+        )]
+
+        fn op_eq(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let b = vm.pop();
+            let a = vm.pop();
+            let result = if a.is_int() && b.is_int() {
+                a.as_i48() == b.as_i48()
+            } else if a.is_float() && b.is_float() {
+                (a.as_f64() - b.as_f64()).abs() < 1e-15
+            } else {
+                a.eq_(b)
+            };
+            vm.push(Value::bool(result));
+            OpcodeResult::Next
+        }
+
+        /// Tests if second stack value is less than top stack value (`<`).
+        #[opcode(code = 20, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
+        fn op_lt(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let b = vm.pop();
+            let a = vm.pop();
+            let result = if a.is_int() && b.is_int() {
+                a.as_i48() < b.as_i48()
+            } else if a.is_float() && b.is_float() {
+                a.as_f64() < b.as_f64()
+            } else {
+                a.lt(b)
+            };
+            vm.push(Value::bool(result));
+            OpcodeResult::Next
+        }
+
+        /// Tests if second stack value is greater than top stack value (`>`).
+        #[opcode(code = 21, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
+        fn op_gt(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let b = vm.pop();
+            let a = vm.pop();
+            let result = if a.is_int() && b.is_int() {
+                a.as_i48() > b.as_i48()
+            } else if a.is_float() && b.is_float() {
+                a.as_f64() > b.as_f64()
+            } else {
+                a.gt(b)
+            };
+            vm.push(Value::bool(result));
+            OpcodeResult::Next
+        }
+
+        /// Tests if second stack value is less than or equal to top stack value (`<=`).
+        #[opcode(code = 22, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
+        fn op_le(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let b = vm.pop();
+            let a = vm.pop();
+            let result = if a.is_int() && b.is_int() {
+                a.as_i48() <= b.as_i48()
+            } else if a.is_float() && b.is_float() {
+                a.as_f64() <= b.as_f64()
+            } else {
+                a.lt(b) || a.eq_(b)
+            };
+            vm.push(Value::bool(result));
+            OpcodeResult::Next
+        }
+
+        /// Tests if second stack value is greater than or equal to top stack value (`>=`).
+        #[opcode(code = 23, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
+        fn op_ge(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let b = vm.pop();
+            let a = vm.pop();
+            let result = if a.is_int() && b.is_int() {
+                a.as_i48() >= b.as_i48()
+            } else if a.is_float() && b.is_float() {
+                a.as_f64() >= b.as_f64()
+            } else {
+                a.gt(b) || a.eq_(b)
+            };
+            vm.push(Value::bool(result));
+            OpcodeResult::Next
+        }
+
+        /// Logical AND of top two stack values.
+        #[opcode(code = 24, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
+        fn op_and(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let b = vm.pop();
+            let a = vm.pop();
+            vm.push(Value::bool(a.is_truthy() && b.is_truthy()));
+            OpcodeResult::Next
+        }
+
+        /// Logical OR of top two stack values.
+        #[opcode(code = 25, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
+        fn op_or(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let b = vm.pop();
+            let a = vm.pop();
+            vm.push(Value::bool(a.is_truthy() || b.is_truthy()));
+            OpcodeResult::Next
+        }
+
+        /// Logical inversion of top stack value (`!`).
+        #[opcode(code = 26, arity = 1, stack = "1 -> 1", flags = "PURE | DETERMINISTIC")]
+        fn op_not(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let a = vm.pop();
+            vm.push(a.not_());
+            OpcodeResult::Next
+        }
+
+        /// Tests membership (`in`).
+        #[opcode(code = 27, arity = 2, stack = "2 -> 1", flags = "PURE | DETERMINISTIC")]
+        fn op_in(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let c = vm.pop();
+            let item = vm.pop();
+            let found = c
+                .as_array()
+                .map(|a| a.iter().any(|v| v.eq_(item)))
+                .unwrap_or(false);
+            vm.push(Value::bool(found));
+            OpcodeResult::Next
+        }
+
+        // ── Control flow ──
+
+        /// Null coalescing operator (`??`).
+        #[opcode(code = 47, arity = 2, stack = "2 -> 1")]
+        fn op_coalesce(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            _instr: Instr,
+        ) -> OpcodeResult {
+            let fallback = vm.pop();
+            let value = vm.pop();
+            if value.is_nil() {
+                vm.push(fallback);
+            } else {
+                vm.push(value);
+            }
+            OpcodeResult::Next
+        }
+
+        // ── Bitwise ──
+
+        /// Bitwise left shift: pop two values, push `a << b`.
+        #[opcode(
+            code = 115,
+            arity = 2,
+            stack = "2 -> 1",
+            flags = "PURE | DETERMINISTIC"
+        )]
+
+        fn op_shl(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let b = vm.pop();
+            let a = vm.pop();
+            if a.is_int() && b.is_int() {
+                let shift = b.as_i48() as u32;
+                if shift < 64 {
+                    vm.push(Value::from_i48(a.as_i48() << shift));
+                } else {
+                    vm.push(Value::from_i48(0));
+                }
+            } else {
+                vm.push(Value::nil());
+            }
+            OpcodeResult::Next
+        }
+
+        /// Bitwise right shift: pop two values, push `a >> b`.
+        #[opcode(
+            code = 116,
+            arity = 2,
+            stack = "2 -> 1",
+            flags = "PURE | DETERMINISTIC"
+        )]
+
+        fn op_shr(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let b = vm.pop();
+            let a = vm.pop();
+            if a.is_int() && b.is_int() {
+                let shift = b.as_i48() as u32;
+                if shift < 64 {
+                    vm.push(Value::from_i48(a.as_i48() >> shift));
+                } else {
+                    vm.push(Value::from_i48(0));
+                }
+            } else {
+                vm.push(Value::nil());
+            }
+            OpcodeResult::Next
+        }
+
+        /// Bitwise AND: pop two values, push `a & b`.
+        #[opcode(
+            code = 117,
+            arity = 2,
+            stack = "2 -> 1",
+            flags = "PURE | DETERMINISTIC | COMMUTATIVE"
+        )]
+
+        fn op_bitand(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let b = vm.pop();
+            let a = vm.pop();
+            if a.is_int() && b.is_int() {
+                vm.push(Value::from_i48(a.as_i48() & b.as_i48()));
+            } else {
+                vm.push(Value::nil());
+            }
+            OpcodeResult::Next
+        }
+
+        /// Pops two values, pushes `a | b` (integers only; otherwise nil).
+        #[opcode(
+            code = 119,
+            arity = 2,
+            stack = "2 -> 1",
+            flags = "PURE | DETERMINISTIC | COMMUTATIVE"
+        )]
+
+        fn op_bitor(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let b = vm.pop();
+            let a = vm.pop();
+            if a.is_int() && b.is_int() {
+                vm.push(Value::from_i48(a.as_i48() | b.as_i48()));
+            } else {
+                vm.push(Value::nil());
+            }
+            OpcodeResult::Next
+        }
+
+        /// Pops two values, pushes `a ^ b` (integers only; otherwise nil).
+        #[opcode(
+            code = 120,
+            arity = 2,
+            stack = "2 -> 1",
+            flags = "PURE | DETERMINISTIC | COMMUTATIVE"
+        )]
+
+        fn op_bitxor(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let b = vm.pop();
+            let a = vm.pop();
+            if a.is_int() && b.is_int() {
+                vm.push(Value::from_i48(a.as_i48() ^ b.as_i48()));
+            } else {
+                vm.push(Value::nil());
+            }
+            OpcodeResult::Next
+        }
+
+        /// Pops one value, pushes bitwise `~a` (integer only; otherwise nil).
+        #[opcode(
+            code = 121,
+            arity = 1,
+            stack = "1 -> 1",
+            flags = "PURE | DETERMINISTIC"
+        )]
+
+        fn op_bitnot(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            let a = vm.pop();
+            if a.is_int() {
+                vm.push(Value::from_i48(!a.as_i48()));
+            } else {
+                vm.push(Value::nil());
+            }
+            OpcodeResult::Next
+        }
+
+        /// Compares two top stack values for inequality (`!=`).
+        #[opcode(
+            code = 19,
+            arity = 2,
+            stack = "2 -> 1",
+            flags = "PURE | DETERMINISTIC | COMMUTATIVE"
+        )]
+        pub(super) fn op_neq(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            _instr: Instr,
+        ) -> OpcodeResult {
+            let b = vm.pop();
+            let a = vm.pop();
+            let result = if a.is_int() && b.is_int() {
+                a.as_i48() != b.as_i48()
+            } else if a.is_float() && b.is_float() {
+                (a.as_f64() - b.as_f64()).abs() >= 1e-15
+            } else {
+                !a.eq_(b)
+            };
+            vm.push(Value::bool(result));
+            OpcodeResult::Next
+        }
+
+        /// Pops two values, adds them, and pushes the result.
+        #[opcode(
+            code = 12,
+            arity = 2,
+            stack = "2 -> 1",
+            flags = "PURE | DETERMINISTIC | COMMUTATIVE"
+        )]
+        pub(super) fn op_add(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            _instr: Instr,
+        ) -> OpcodeResult {
+            let b = vm.pop();
+            let a = vm.pop();
+            if a.is_int() && b.is_int() {
+                let ai = a.as_i48();
+                let bi = b.as_i48();
+                if let Some(sum) = ai.checked_add(bi) {
+                    vm.push(Value::from_i48(sum));
+                } else {
+                    vm.push(Value::from_f64(ai as f64 + bi as f64));
+                }
+            } else if a.is_float() && b.is_float() {
+                vm.push(Value::from_f64(a.as_f64() + b.as_f64()));
+            } else {
+                vm.push(a.add(b, &vm.arena));
+            }
+            OpcodeResult::Next
+        }
+
+        /// Pops two values, multiplies them, and pushes the result.
+        #[opcode(
+            code = 14,
+            arity = 2,
+            stack = "2 -> 1",
+            flags = "PURE | DETERMINISTIC | COMMUTATIVE"
+        )]
+        pub(super) fn op_mul(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            _instr: Instr,
+        ) -> OpcodeResult {
+            let b = vm.pop();
+            let a = vm.pop();
+            if a.is_int() && b.is_int() {
+                let ai = a.as_i48();
+                let bi = b.as_i48();
+                if let Some(prod) = ai.checked_mul(bi) {
+                    vm.push(Value::from_i48(prod));
+                } else {
+                    vm.push(Value::from_f64(ai as f64 * bi as f64));
+                }
+            } else if a.is_float() && b.is_float() {
+                vm.push(Value::from_f64(a.as_f64() * b.as_f64()));
+            } else {
+                vm.push(a.mul(b, &vm.arena));
+            }
+            OpcodeResult::Next
+        }
+
+        /// Pops two values, pushes `a ** b`.
+        #[opcode(
+            code = 122,
+            arity = 2,
+            stack = "2 -> 1",
+            flags = "PURE | DETERMINISTIC"
+        )]
+        pub(super) fn op_pow(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            _instr: Instr,
+        ) -> OpcodeResult {
+            let exp_val = vm.pop();
+            let base_val = vm.pop();
+
+            if base_val.is_int() && exp_val.is_int() {
+                let base = base_val.as_i48();
+                let exp = exp_val.as_i48();
+
+                if let Ok(exp_u32) = u32::try_from(exp) {
+                    // Non-negative integer exponent: use checked_pow
+                    let result = base.checked_pow(exp_u32);
+                    match result {
+                        Some(r) => {
+                            // Check if result fits in 48-bit signed range
+                            let i48_min = -140_737_488_355_328_i128; // -2^47
+                            let i48_max = 140_737_488_355_327_i128; // 2^47 - 1
+                            let r128 = r as i128;
+                            if r128 >= i48_min && r128 <= i48_max {
+                                vm.push(Value::from_i48(r));
+                            } else {
+                                vm.push(Value::from_f64(r as f64));
+                            }
+                        }
+                        None => {
+                            // Overflow: fall back to float
+                            vm.push(Value::from_f64((base as f64).powf(exp as f64)));
+                        }
+                    }
+                } else {
+                    // Negative or too-large exponent: use float powf
+                    vm.push(Value::from_f64((base as f64).powf(exp as f64)));
+                }
+            } else if base_val.is_float() || exp_val.is_float() {
+                // Float/mixed numeric operands
+                let base = base_val.as_float();
+                let exp = exp_val.as_float();
+                vm.push(Value::from_f64(base.powf(exp)));
+            } else {
+                // Non-numeric operands
+                vm.push(Value::nil());
+            }
+            OpcodeResult::Next
+        }
     }
 
-    /// Constructs a dictionary map from `a` key-value pairs on the stack.
-    #[opcode(code = 36, arity = 0, stack = "2n -> 1")]
-    fn op_make_dict(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
-        let n = instr.a() as usize;
-        if n <= crate::runtime::value::SMALL_MAP_MAX {
-            // Small path: inline SmallVec with cached fingerprint, no String allocation
+    mod control {
+        use super::*;
+
+        /// Unconditional jump to instruction pointer address `a`.
+        #[opcode(code = 28, arity = 0, stack = "0 -> 0", branch = "abs")]
+        fn op_jump(__vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
+            OpcodeResult::Jump(instr.a())
+        }
+
+        /// Conditional jump to address `a` if top of stack is falsy.
+        #[opcode(code = 29, arity = 1, stack = "1 -> 0", branch = "abs")]
+        fn op_jump_if_false(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let c = vm.pop();
+            if c.is_truthy() {
+                OpcodeResult::Next
+            } else {
+                OpcodeResult::Jump(instr.a())
+            }
+        }
+
+        /// Conditional jump to address `a` if top of stack is nil.
+        #[opcode(code = 30, arity = 1, stack = "1 -> 0", branch = "abs")]
+        fn op_jump_if_nil(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let v = vm.pop();
+            if v.is_nil() {
+                OpcodeResult::Jump(instr.a())
+            } else {
+                OpcodeResult::Next
+            }
+        }
+
+        /// Returns from the current function call frame.
+        #[opcode(code = 33, arity = 0, stack = "0 -> 0")]
+        fn op_return(
+            __vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            _instr: Instr,
+        ) -> OpcodeResult {
+            OpcodeResult::Return
+        }
+
+        /// Halts VM execution.
+        #[opcode(code = 34, arity = 0, stack = "0 -> 0")]
+        fn op_halt(__vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
+            OpcodeResult::Return
+        }
+
+        /// Escape into a cold plugin module.
+        ///
+        /// Operand `a` = module id, `c` = the module's local opcode, `b` = a 16-bit
+        /// operand for the callee. Modules are declared once and registered with
+        /// [`VM::register_cold_modules`](crate::runtime::vm::VM::register_cold_modules).
+        ///
+        /// An unknown module or opcode does nothing, matching how an unclaimed hot
+        /// byte behaves — a missing extension is a no-op, not a crash.
+        #[opcode(code = 127, arity = 0, stack = "0 -> 1")]
+        fn op_ext(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
+            vm.invoke_cold_opcode(instr.a(), instr.c(), top, instr)
+        }
+
+        // ── Collections ──
+    }
+
+    mod data {
+        use super::*;
+
+        /// Constructs an array from `a` elements on the stack.
+        #[opcode(code = 35, arity = 0, stack = "n -> 1")]
+        fn op_make_array(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let n = instr.a() as usize;
+            let mut arr = Vec::with_capacity(n);
+            for _ in 0..n {
+                arr.push(vm.pop());
+            }
+            arr.reverse();
+            vm.push(Value::from_array(arr, &vm.arena));
+            OpcodeResult::Next
+        }
+
+        /// Constructs a dictionary map from `a` key-value pairs on the stack.
+        #[opcode(code = 36, arity = 0, stack = "2n -> 1")]
+        fn op_make_dict(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let n = instr.a() as usize;
+            if n <= crate::runtime::value::SMALL_MAP_MAX {
+                // Small path: inline SmallVec with cached fingerprint, no String allocation
+                let mut entries: smallvec::SmallVec<
+                    [(Value, Value, u64); crate::runtime::value::SMALL_MAP_MAX],
+                > = smallvec::SmallVec::with_capacity(n);
+                for _ in 0..n {
+                    let v = vm.pop();
+                    let k = vm.pop();
+                    // Keys are already interned string Values from the compiler;
+                    // if not a string, convert via as_string() and wrap back
+                    let key_val = if k.as_str().is_some() {
+                        k
+                    } else {
+                        let s = k.as_string();
+                        Value::from_str(s, &vm.arena)
+                    };
+                    let hash = fast_hash(key_val.as_str().unwrap_or("").as_bytes());
+                    entries.push((key_val, v, hash));
+                }
+                entries.reverse();
+                vm.push(Value::from_small_map(entries, &vm.arena));
+            } else {
+                // Large path: existing HashMap + key_hashes + key_values
+                let mut key_hashes = Vec::with_capacity(n);
+                let mut key_values = Vec::with_capacity(n);
+                let mut data = crate::runtime::value::XclMap::with_capacity(n);
+                for _ in 0..n {
+                    let v = vm.pop();
+                    let k = vm.pop();
+                    let key_str = k
+                        .as_str()
+                        .map(String::from)
+                        .unwrap_or_else(|| k.as_string());
+                    let hash = fast_hash(key_str.as_bytes());
+                    key_hashes.push((hash, key_str.clone()));
+                    key_values.push(v);
+                    data.insert(key_str, v);
+                }
+                vm.push(Value::from_map_xcl(data, key_hashes, key_values, &vm.arena));
+            }
+            OpcodeResult::Next
+        }
+
+        /// Builds a numeric range value from the two bounds on the stack.
+        ///
+        /// Stack: `start, end -> range`. `..` is language syntax, so the value is
+        /// produced by the VM itself and needs no plugin registered. The result is a
+        /// two-entry map tagged with [`SUBTYPE_RANGE`]: `for` iterates the bounds
+        /// directly (see `op_for_iter_start`) and `.start` / `.end` read them like
+        /// any other field.
+        #[opcode(code = 48, arity = 2, stack = "2 -> 1")]
+        fn op_make_range(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            _instr: Instr,
+        ) -> OpcodeResult {
+            let end = vm.pop().as_int();
+            let start = vm.pop().as_int();
             let mut entries: smallvec::SmallVec<
                 [(Value, Value, u64); crate::runtime::value::SMALL_MAP_MAX],
-            > = smallvec::SmallVec::with_capacity(n);
-            for _ in 0..n {
-                let v = vm.pop();
-                let k = vm.pop();
-                // Keys are already interned string Values from the compiler;
-                // if not a string, convert via as_string() and wrap back
-                let key_val = if k.as_str().is_some() {
-                    k
-                } else {
-                    let s = k.as_string();
-                    Value::from_str(s, &vm.arena)
-                };
-                let hash = fast_hash(key_val.as_str().unwrap_or("").as_bytes());
-                entries.push((key_val, v, hash));
-            }
-            entries.reverse();
-            vm.push(Value::from_small_map(entries, &vm.arena));
-        } else {
-            // Large path: existing HashMap + key_hashes + key_values
-            let mut key_hashes = Vec::with_capacity(n);
-            let mut key_values = Vec::with_capacity(n);
-            let mut data = crate::runtime::value::XclMap::with_capacity(n);
-            for _ in 0..n {
-                let v = vm.pop();
-                let k = vm.pop();
-                let key_str = k
-                    .as_str()
-                    .map(String::from)
-                    .unwrap_or_else(|| k.as_string());
-                let hash = fast_hash(key_str.as_bytes());
-                key_hashes.push((hash, key_str.clone()));
-                key_values.push(v);
-                data.insert(key_str, v);
-            }
-            vm.push(Value::from_map_xcl(data, key_hashes, key_values, &vm.arena));
+            > = smallvec::SmallVec::with_capacity(2);
+            entries.push((
+                Value::from_str(String::from("start"), &vm.arena),
+                Value::from_i48(start),
+                fast_hash(b"start"),
+            ));
+            entries.push((
+                Value::from_str(String::from("end"), &vm.arena),
+                Value::from_i48(end),
+                fast_hash(b"end"),
+            ));
+            vm.push(Value::from_small_map_typed(
+                entries,
+                crate::runtime::value::SUBTYPE_RANGE,
+                crate::runtime::value::VARIANT_DEFAULT,
+                &vm.arena,
+            ));
+            OpcodeResult::Next
         }
-        OpcodeResult::Next
-    }
 
-    /// Builds a numeric range value from the two bounds on the stack.
-    ///
-    /// Stack: `start, end -> range`. `..` is language syntax, so the value is
-    /// produced by the VM itself and needs no plugin registered. The result is a
-    /// two-entry map tagged with [`SUBTYPE_RANGE`]: `for` iterates the bounds
-    /// directly (see `op_for_iter_start`) and `.start` / `.end` read them like
-    /// any other field.
-    #[opcode(code = 48, arity = 2, stack = "2 -> 1")]
-    fn op_make_range(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let end = vm.pop().as_int();
-        let start = vm.pop().as_int();
-        let mut entries: smallvec::SmallVec<
-            [(Value, Value, u64); crate::runtime::value::SMALL_MAP_MAX],
-        > = smallvec::SmallVec::with_capacity(2);
-        entries.push((
-            Value::from_str(String::from("start"), &vm.arena),
-            Value::from_i48(start),
-            fast_hash(b"start"),
-        ));
-        entries.push((
-            Value::from_str(String::from("end"), &vm.arena),
-            Value::from_i48(end),
-            fast_hash(b"end"),
-        ));
-        vm.push(Value::from_small_map_typed(
-            entries,
-            crate::runtime::value::SUBTYPE_RANGE,
-            crate::runtime::value::VARIANT_DEFAULT,
-            &vm.arena,
-        ));
-        OpcodeResult::Next
-    }
-
-    /// Retrieves an element by indexing `target[index]`.
-    #[opcode(code = 37, arity = 2, stack = "2 -> 1")]
-    fn op_get_index(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let idx = vm.pop();
-        let target = vm.pop();
-        let result = if let Some(arr) = target.as_array() {
-            // Array indexing — never cached
-            let i = idx.as_int();
-            let i = if i < 0 { arr.len() as i64 + i } else { i };
-            arr.get(i as usize).copied().unwrap_or(Value::nil())
-        } else if let Some(map_obj) = target.as_map() {
-            if idx.as_str().is_some() {
-                map_obj.get_fast_value(idx).unwrap_or(Value::nil())
+        /// Retrieves an element by indexing `target[index]`.
+        #[opcode(code = 37, arity = 2, stack = "2 -> 1")]
+        fn op_get_index(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            _instr: Instr,
+        ) -> OpcodeResult {
+            let idx = vm.pop();
+            let target = vm.pop();
+            let result = if let Some(arr) = target.as_array() {
+                // Array indexing — never cached
+                let i = idx.as_int();
+                let i = if i < 0 { arr.len() as i64 + i } else { i };
+                arr.get(i as usize).copied().unwrap_or(Value::nil())
+            } else if let Some(map_obj) = target.as_map() {
+                if idx.as_str().is_some() {
+                    map_obj.get_fast_value(idx).unwrap_or(Value::nil())
+                } else {
+                    Value::nil()
+                }
             } else {
                 Value::nil()
+            };
+            vm.push(result);
+            OpcodeResult::Next
+        }
+
+        /// Pushes an element onto an array.
+        #[opcode(code = 39, arity = 2, stack = "2 -> 1")]
+        fn op_array_push(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            _instr: Instr,
+        ) -> OpcodeResult {
+            let elem = vm.pop();
+            let target = vm.pop();
+            if let Some(arr) = target.as_array_mut() {
+                arr.push(elem);
             }
-        } else {
-            Value::nil()
-        };
-        vm.push(result);
-        OpcodeResult::Next
-    }
-
-    /// Pushes an element onto an array.
-    #[opcode(code = 39, arity = 2, stack = "2 -> 1")]
-    fn op_array_push(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let elem = vm.pop();
-        let target = vm.pop();
-        if let Some(arr) = target.as_array_mut() {
-            arr.push(elem);
+            target.bump_array_version();
+            vm.push(target);
+            OpcodeResult::Next
         }
-        target.bump_array_version();
-        vm.push(target);
-        OpcodeResult::Next
-    }
 
-    // ── Iteration/coalesce ──
+        // ── Iteration/coalesce ──
 
-    /// Loads a compiled lambda closure onto the stack. Operand `a` = closure index.
-    #[opcode(code = 46, arity = 0, stack = "0 -> 1")]
-    fn op_load_lambda(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
-        let idx = instr.a() as usize;
-        // SAFETY: frame at `top` is active during dispatch.
-        let mut func = vm.frames[top].code().closures[idx].clone();
-        let count = func.closure_captures.len();
-        if count > 0 {
-            // The creation site pushed one value per capture, in order.
-            let mut values = vec![Value::nil(); count];
-            for i in (0..count).rev() {
-                values[i] = vm.pop();
-            }
-            func.closure_env = func.closure_captures.iter().cloned().zip(values).collect();
-        }
-        vm.push(Value::from_func(func, &vm.arena));
-        OpcodeResult::Next
-    }
+        /// Gets a field from a map or resolves a universal method. Operand `a` = string table index.
+        #[opcode(code = 38, arity = 1, stack = "1 -> 1")]
+        fn op_get_field(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let field_idx = instr.a() as usize;
+            let target = vm.pop();
+            // SAFETY: frame at `top` is active during dispatch.
+            let code = vm.frames[top].code();
+            let field = &code.string_table[field_idx];
+            let field_val = code.string_values[field_idx];
 
-    /// Null coalescing operator (`??`).
-    #[opcode(code = 47, arity = 2, stack = "2 -> 1")]
-    fn op_coalesce(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let fallback = vm.pop();
-        let value = vm.pop();
-        if value.is_nil() {
-            vm.push(fallback);
-        } else {
-            vm.push(value);
-        }
-        OpcodeResult::Next
-    }
-
-    // ── Bitwise ──
-
-    /// Bitwise left shift: pop two values, push `a << b`.
-    #[opcode(
-        code = 115,
-        arity = 2,
-        stack = "2 -> 1",
-        flags = "PURE | DETERMINISTIC"
-    )]
-    fn op_shl(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let b = vm.pop();
-        let a = vm.pop();
-        if a.is_int() && b.is_int() {
-            let shift = b.as_i48() as u32;
-            if shift < 64 {
-                vm.push(Value::from_i48(a.as_i48() << shift));
-            } else {
-                vm.push(Value::from_i48(0));
-            }
-        } else {
-            vm.push(Value::nil());
-        }
-        OpcodeResult::Next
-    }
-
-    /// Bitwise right shift: pop two values, push `a >> b`.
-    #[opcode(
-        code = 116,
-        arity = 2,
-        stack = "2 -> 1",
-        flags = "PURE | DETERMINISTIC"
-    )]
-    fn op_shr(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let b = vm.pop();
-        let a = vm.pop();
-        if a.is_int() && b.is_int() {
-            let shift = b.as_i48() as u32;
-            if shift < 64 {
-                vm.push(Value::from_i48(a.as_i48() >> shift));
-            } else {
-                vm.push(Value::from_i48(0));
-            }
-        } else {
-            vm.push(Value::nil());
-        }
-        OpcodeResult::Next
-    }
-
-    /// Bitwise AND: pop two values, push `a & b`.
-    #[opcode(
-        code = 117,
-        arity = 2,
-        stack = "2 -> 1",
-        flags = "PURE | DETERMINISTIC | COMMUTATIVE"
-    )]
-    fn op_bitand(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let b = vm.pop();
-        let a = vm.pop();
-        if a.is_int() && b.is_int() {
-            vm.push(Value::from_i48(a.as_i48() & b.as_i48()));
-        } else {
-            vm.push(Value::nil());
-        }
-        OpcodeResult::Next
-    }
-
-    /// Pops two values, pushes `a | b` (integers only; otherwise nil).
-    #[opcode(
-        code = 119,
-        arity = 2,
-        stack = "2 -> 1",
-        flags = "PURE | DETERMINISTIC | COMMUTATIVE"
-    )]
-    fn op_bitor(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let b = vm.pop();
-        let a = vm.pop();
-        if a.is_int() && b.is_int() {
-            vm.push(Value::from_i48(a.as_i48() | b.as_i48()));
-        } else {
-            vm.push(Value::nil());
-        }
-        OpcodeResult::Next
-    }
-
-    /// Pops two values, pushes `a ^ b` (integers only; otherwise nil).
-    #[opcode(
-        code = 120,
-        arity = 2,
-        stack = "2 -> 1",
-        flags = "PURE | DETERMINISTIC | COMMUTATIVE"
-    )]
-    fn op_bitxor(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let b = vm.pop();
-        let a = vm.pop();
-        if a.is_int() && b.is_int() {
-            vm.push(Value::from_i48(a.as_i48() ^ b.as_i48()));
-        } else {
-            vm.push(Value::nil());
-        }
-        OpcodeResult::Next
-    }
-
-    /// Pops one value, pushes bitwise `~a` (integer only; otherwise nil).
-    #[opcode(
-        code = 121,
-        arity = 1,
-        stack = "1 -> 1",
-        flags = "PURE | DETERMINISTIC"
-    )]
-    fn op_bitnot(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let a = vm.pop();
-        if a.is_int() {
-            vm.push(Value::from_i48(!a.as_i48()));
-        } else {
-            vm.push(Value::nil());
-        }
-        OpcodeResult::Next
-    }
-
-    /// Pops two values, pushes `a ** b`.
-    #[opcode(
-        code = 122,
-        arity = 2,
-        stack = "2 -> 1",
-        flags = "PURE | DETERMINISTIC"
-    )]
-    fn op_pow(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let exp_val = vm.pop();
-        let base_val = vm.pop();
-
-        if base_val.is_int() && exp_val.is_int() {
-            let base = base_val.as_i48();
-            let exp = exp_val.as_i48();
-
-            if let Ok(exp_u32) = u32::try_from(exp) {
-                // Non-negative integer exponent: use checked_pow
-                let result = base.checked_pow(exp_u32);
-                match result {
-                    Some(r) => {
-                        // Check if result fits in 48-bit signed range
-                        let i48_min = -140_737_488_355_328_i128; // -2^47
-                        let i48_max = 140_737_488_355_327_i128; // 2^47 - 1
-                        let r128 = r as i128;
-                        if r128 >= i48_min && r128 <= i48_max {
-                            vm.push(Value::from_i48(r));
-                        } else {
-                            vm.push(Value::from_f64(r as f64));
-                        }
-                    }
-                    None => {
-                        // Overflow: fall back to float
-                        vm.push(Value::from_f64((base as f64).powf(exp as f64)));
-                    }
-                }
-            } else {
-                // Negative or too-large exponent: use float powf
-                vm.push(Value::from_f64((base as f64).powf(exp as f64)));
-            }
-        } else if base_val.is_float() || exp_val.is_float() {
-            // Float/mixed numeric operands
-            let base = base_val.as_float();
-            let exp = exp_val.as_float();
-            vm.push(Value::from_f64(base.powf(exp)));
-        } else {
-            // Non-numeric operands
-            vm.push(Value::nil());
-        }
-        OpcodeResult::Next
-    }
-
-    // ── Batch 1: calls, fields, types, iteration ──
-
-    /// Runs a compiled integer function for a cached call site.
-    ///
-    /// Returns `None` when the cached callee has no native entry, when the
-    /// arity does not match, or when any argument is not an integer; the
-    /// caller then takes the ordinary interpreter path.
-    ///
-    /// The argument values are read and the frame is rebuilt **after** the
-    /// native call, so no borrow of the VM is live across it.
-    #[cfg(feature = "jit")]
-    #[inline(always)]
-    fn try_jit_function(
-        vm: &mut VM,
-        slot: usize,
-        arg_start: usize,
-        n: usize,
-    ) -> Option<OpcodeResult> {
-        let f = vm.jit_call_cache[slot]?;
-        if n != f.nparams as usize {
-            return None;
-        }
-        let end = arg_start.checked_add(n)?;
-        let mut args = [0i64; 4];
-        for (i, v) in vm.stack.get(arg_start..end)?.iter().enumerate() {
-            if v.tag() != crate::runtime::value::TAG_INT {
-                return None;
-            }
-            args[i] = v.as_i48();
-        }
-        // SAFETY: `JitFunction::func` is compiled with signature
-        // `(i64, i64, i64, i64) -> i64` and only integer arguments are passed.
-        let result = unsafe { (f.func)(args[0], args[1], args[2], args[3]) };
-        vm.stack.truncate(arg_start);
-        vm.push(Value::from_i48(result));
-        Some(OpcodeResult::Next)
-    }
-
-    /// Without the JIT feature there is nothing to enter.
-    #[cfg(not(feature = "jit"))]
-    #[inline(always)]
-    fn try_jit_function(
-        _vm: &mut VM,
-        _slot: usize,
-        _arg_start: usize,
-        _n: usize,
-    ) -> Option<OpcodeResult> {
-        None
-    }
-
-    /// Hot path for named calls: callee and args are on the stack at `base..base+n+1`.
-    /// Returns immediately when the callee resolves to a function (fast path or cache hit).
-    /// Falls through to `call_from_stack_slow` for name resolution.
-    #[inline(always)]
-    fn call_from_stack(vm: &mut VM, n: usize, base: usize) -> OpcodeResult {
-        let callee = vm.stack[base];
-        if let Some(f) = callee.as_func() {
-            return vm.enter_call_at(f, base, n);
-        }
-        let slot = ((callee.0 >> 4) as usize) & crate::runtime::vm::CALL_CACHE_MASK;
-        if callee.0 == vm.call_cache[slot].0.0 {
-            if let Some(f) = vm.call_cache[slot].1.as_func() {
-                return vm.enter_call_at(f, base, n);
-            }
-        }
-        call_from_stack_slow(vm, n, base, callee, slot)
-    }
-
-    /// Cold path for `OP_CALL`: the callee is on the stack below the args.
-    #[cold]
-    #[inline(never)]
-    fn call_from_stack_slow(
-        vm: &mut VM,
-        n: usize,
-        base: usize,
-        callee: Value,
-        slot: usize,
-    ) -> OpcodeResult {
-        let stack_len = vm.stack.len();
-        let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(n);
-        args.extend_from_slice(&vm.stack[base + 1..stack_len]);
-        vm.stack.truncate(base);
-        resolve_name_slow(vm, callee, &args, slot)
-    }
-
-    /// Cold path for `OP_CALL_NAME`: args start at `arg_start` and there is no
-    /// callee word on the stack to skip.
-    #[cold]
-    #[inline(never)]
-    fn call_name_slow(
-        vm: &mut VM,
-        n: usize,
-        arg_start: usize,
-        callee: Value,
-        slot: usize,
-    ) -> OpcodeResult {
-        let stack_len = vm.stack.len();
-        let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(n);
-        args.extend_from_slice(&vm.stack[arg_start..stack_len]);
-        vm.stack.truncate(arg_start);
-        resolve_name_slow(vm, callee, &args, slot)
-    }
-
-    /// Resolves a callee name and invokes it. The operand stack is already
-    /// truncated to the slot the result should occupy.
-    #[cold]
-    #[inline(never)]
-    fn resolve_name_slow(vm: &mut VM, callee: Value, args: &[Value], slot: usize) -> OpcodeResult {
-        if let Some(name) = callee.as_str() {
-            // 1. Check global builtins first
-            if let Some(&idx) = vm.global_index.get(name) {
-                let gt_len = vm.global_table.len();
-                if (idx as usize) < gt_len {
-                    // Index points into global_table (builtins)
-                    if let Some(Some(impl_)) = vm.global_table.get(idx as usize) {
-                        let impl_copy = *impl_;
-                        let result = impl_copy.call(vm, &args);
-                        vm.push(result);
-                        return OpcodeResult::Next;
-                    }
-                }
-                // Check user-defined globals (indices offset by global_table.len())
-                if idx >= gt_len as u32 {
-                    let globals_idx = (idx - gt_len as u32) as usize;
-                    if globals_idx < vm.globals.len() {
-                        let func = vm.globals[globals_idx];
-                        if let Some(f) = func.as_func() {
-                            vm.cache_callee(slot, callee, func);
-                            return vm.enter_call_from_op(f, &args);
-                        }
-                    }
+            // Fast path: use HeapMap::get_fast_value with interned key identity
+            if let Some(map_obj) = target.as_map() {
+                if let Some(v) = map_obj.get_fast_value(field_val) {
+                    vm.push(v);
+                    return OpcodeResult::Next;
                 }
             }
-            // 2. Check domain methods (e.g. "io.read") — only for two-part names
-            if name.split('.').count() == 2 {
-                if let Some(dot_pos) = name.find('.') {
-                    let domain = &name[..dot_pos];
-                    let method = &name[dot_pos + 1..];
-                    if let Some(impl_) = vm.resolve_domain_method(domain, method) {
-                        let impl_copy = *impl_;
-                        let result = impl_copy.call(vm, &args);
-                        vm.push(result);
-                        return OpcodeResult::Next;
-                    }
+
+            if let Some(impl_) = vm.resolve_universal_method(field) {
+                let impl_copy = *impl_;
+                let all_args = [target];
+                let result = impl_copy.call(vm, &all_args);
+                vm.push(result);
+                return OpcodeResult::Next;
+            }
+
+            vm.push(Value::nil());
+            OpcodeResult::Next
+        }
+    }
+
+    mod calls {
+        use super::helpers::*;
+        use super::*;
+
+        /// Calls the function value on top of the stack with no arguments, or
+        /// leaves the value in place when it is not a function.
+        ///
+        /// This is what a bare `$f` statement compiles to: writing `$f` calls the
+        /// value it holds, while `$x` holding a non-function stays a plain value
+        /// read (so `$x` as the last statement still yields the program result).
+        #[opcode(code = 41, arity = 0, stack = "1 -> 1")]
+        fn op_call_value_zero(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            _instr: Instr,
+        ) -> OpcodeResult {
+            let callee = vm.stack.last().copied().unwrap_or(Value::nil());
+            let Some(func) = callee.as_func() else {
+                return OpcodeResult::Next;
+            };
+            // The callee slot is replaced by the result on return.
+            let arg_base = vm.stack.len() - 1;
+            vm.enter_call_at(func, arg_base, 0)
+        }
+
+        // ── Arithmetic ──
+
+        /// Loads a compiled lambda closure onto the stack. Operand `a` = closure index.
+        #[opcode(code = 46, arity = 0, stack = "0 -> 1")]
+        fn op_load_lambda(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let idx = instr.a() as usize;
+            // SAFETY: frame at `top` is active during dispatch.
+            // Cloning a `FuncValue` is now refcount bumps: name/params/captures are
+            // shared, and the capture buffer below is inline for ≤ 4 captures.
+            let mut func = vm.frames[top].code().closures[idx].clone();
+            let count = func.closure_captures.len();
+            if count > 0 {
+                // The creation site pushed one value per capture, in order.
+                let mut env: smallvec::SmallVec<[Value; 4]> =
+                    smallvec::SmallVec::with_capacity(count);
+                env.resize(count, Value::nil());
+                for i in (0..count).rev() {
+                    env[i] = vm.pop();
+                }
+                func.closure_env = env;
+            }
+            vm.push(Value::from_func(func, &vm.arena));
+            OpcodeResult::Next
+        }
+
+        /// Calls a function or builtin by name. Operand `a` = arg count.
+        #[opcode(code = 32, arity = 0, stack = "n+1 -> 1")]
+        fn op_call(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
+            let n = instr.a() as usize;
+            let stack_len = vm.stack.len();
+            let base = stack_len - n - 1;
+            call_from_stack(vm, n, base)
+        }
+
+        /// Fused named call: callee name is embedded in operand `b` (string-table index).
+        /// Operand `a` = arg count. Stack: n -> 1.
+        #[opcode(code = 67, arity = 0, stack = "n -> 1")]
+        fn op_call_name(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let n = instr.a() as usize;
+            let name_idx = instr.b() as usize;
+            // SAFETY: frame at `top` is active during dispatch.
+            let callee = vm.frames[top].code().string_values[name_idx];
+            let arg_start = vm.stack.len() - n;
+
+            let slot = ((callee.0 >> 4) as usize) & crate::runtime::vm::CALL_CACHE_MASK;
+            if callee.0 == vm.call_cache[slot].0.0 {
+                if let Some(result) = try_jit_function(vm, slot, arg_start, n) {
+                    return result;
+                }
+                if let Some(f) = vm.call_cache[slot].1.as_func() {
+                    return vm.enter_call_args_at(f, arg_start, n);
                 }
             }
-            // 2b. Domain expansion
-            if vm.domain_index.contains_key(name) {
-                if let Some((func_idx, func)) = args
-                    .iter()
-                    .enumerate()
-                    .find_map(|(i, a)| a.as_func().map(|f| (i, f.clone())))
+
+            // Named user function: one array load through `function_by_name`.
+            // `global_index` is checked first (and is normally empty for user
+            // functions) so a domain-expansion override keeps priority.
+            let ord = {
+                // SAFETY: frame at `top` is active during dispatch.
+                let code = vm.frames[top].code();
+                code.function_by_name.get(name_idx).copied().unwrap_or(0)
+            };
+            if ord != 0
+                && let Some(name) = callee.as_str()
+                && !vm.global_index.contains_key(name)
+            {
+                let func_slot = (vm.function_base + ord - 1) as usize;
+                if let Some(func_val) = vm.globals.get(func_slot).copied()
+                    && let Some(f) = func_val.as_func()
                 {
-                    let call_args: Vec<Value> = args
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| *i != func_idx)
-                        .map(|(_, v)| *v)
-                        .collect();
-                    let &didx = vm.domain_index.get(name).unwrap();
-                    let slot = &vm.domain_table[didx as usize];
-                    let mut saved: Vec<(Box<str>, Option<u32>)> = Vec::new();
-                    for (method_name, &midx) in slot.index.iter() {
-                        let existing = vm
-                            .global_index
-                            .insert(method_name.clone(), vm.global_table.len() as u32);
-                        saved.push((method_name.clone(), existing));
-                        let impl_ = slot.methods[midx as usize];
-                        vm.global_table.push(impl_);
-                    }
-                    let func_value = Value::from_func(func.clone(), &vm.arena);
-                    let result = vm.call_value(func_value, &call_args);
-                    for (method_name, existing) in saved.into_iter().rev() {
-                        vm.global_table.pop();
-                        if let Some(idx) = existing {
-                            vm.global_index.insert(method_name.clone(), idx);
-                        } else {
-                            vm.global_index.remove(&method_name);
+                    vm.cache_callee(slot, callee, func_val);
+                    return vm.enter_call_args_at(f, arg_start, n);
+                }
+            }
+
+            call_name_slow(vm, n, arg_start, callee, slot)
+        }
+
+        /// Fused named tail call: callee name is embedded in operand `b` (string-table index).
+        /// Operand `a` = arg count. Stack: n -> 0.
+        #[opcode(code = 68, arity = 0, stack = "n -> 0")]
+        fn op_tail_call_name(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let n = instr.a() as usize;
+            let name_idx = instr.b() as usize;
+            // SAFETY: frame at `top` is active during dispatch.
+            let callee = vm.frames[top].code().string_values[name_idx];
+
+            // Collect args before any resolution so all paths have them
+            let base = vm.stack.len() - n;
+            let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(n);
+            args.extend_from_slice(&vm.stack[base..base + n]);
+            vm.stack.truncate(base);
+
+            // Fast path: callee is already a function value (unlikely for string_values)
+            if let Some(f) = callee.as_func() {
+                return vm.enter_tail_call(f, &args);
+            }
+
+            // Name cache: use the same slot computation as op_call
+            let slot = ((callee.0 >> 4) as usize) & crate::runtime::vm::CALL_CACHE_MASK;
+            if callee.0 == vm.call_cache[slot].0.0 {
+                if let Some(f) = vm.call_cache[slot].1.as_func() {
+                    return vm.enter_tail_call(f, &args);
+                }
+            }
+
+            // Named user function: one array load through `function_by_name`.
+            let ord = {
+                // SAFETY: frame at `top` is active during dispatch.
+                let code = vm.frames[top].code();
+                code.function_by_name.get(name_idx).copied().unwrap_or(0)
+            };
+            if ord != 0
+                && let Some(name) = callee.as_str()
+                && !vm.global_index.contains_key(name)
+            {
+                let func_slot = (vm.function_base + ord - 1) as usize;
+                if let Some(func_val) = vm.globals.get(func_slot).copied()
+                    && let Some(f) = func_val.as_func()
+                {
+                    vm.cache_callee(slot, callee, func_val);
+                    return vm.enter_tail_call(f, &args);
+                }
+            }
+
+            // Resolve the function (same cold logic as op_tail_call)
+            let func = if let Some(name) = callee.as_str() {
+                // 1. Check global builtins first
+                if let Some(&idx) = vm.global_index.get(name) {
+                    let gt_len = vm.global_table.len();
+                    if (idx as usize) < gt_len {
+                        if let Some(Some(impl_)) = vm.global_table.get(idx as usize) {
+                            let impl_copy = *impl_;
+                            let result = impl_copy.call(vm, &args);
+                            if let Some(frame) = vm.frames.last() {
+                                vm.stack.truncate(frame.stack_base as usize);
+                            }
+                            vm.push(result);
+                            if let Some(frame) = vm.frames.last_mut() {
+                                frame.ip = instr.a();
+                            }
+                            return OpcodeResult::Next;
                         }
                     }
+                    if idx >= gt_len as u32 {
+                        let globals_idx = (idx - gt_len as u32) as usize;
+                        if globals_idx < vm.globals.len() {
+                            let func_val = vm.globals[globals_idx];
+                            if let Some(f) = func_val.as_func() {
+                                vm.cache_callee(slot, callee, func_val);
+                                return vm.enter_tail_call(f, &args);
+                            }
+                        }
+                    }
+                }
+                // 2. Check domain methods
+                if name.split('.').count() == 2 {
+                    if let Some(dot_pos) = name.find('.') {
+                        let domain = &name[..dot_pos];
+                        let method = &name[dot_pos + 1..];
+                        if let Some(impl_) = vm.resolve_domain_method(domain, method) {
+                            let impl_copy = *impl_;
+                            let result = impl_copy.call(vm, &args);
+                            if let Some(frame) = vm.frames.last() {
+                                vm.stack.truncate(frame.stack_base as usize);
+                            }
+                            vm.push(result);
+                            return OpcodeResult::Next;
+                        }
+                    }
+                }
+                // 3. Fallback: search all globals by name
+                let found = vm
+                    .globals
+                    .iter()
+                    .find_map(|g| g.as_func().filter(|f| &*f.name == name).map(|_| *g));
+                if let Some(func_val) = found {
+                    vm.cache_callee(slot, callee, func_val);
+                    if let Some(f) = func_val.as_func() {
+                        return vm.enter_tail_call(f, &args);
+                    }
+                }
+                None
+            } else {
+                None
+            };
+
+            if let Some(f) = func {
+                return vm.enter_tail_call(&f, &args);
+            }
+
+            if let Some(frame) = vm.frames.last() {
+                vm.stack.truncate(frame.stack_base as usize);
+            }
+            vm.push(Value::nil());
+            OpcodeResult::Next
+        }
+
+        /// Tail-call: pops args and callee, resolves the function, and reuses the current frame
+        /// instead of pushing a new one. Operand `a` = arg count.
+        #[opcode(code = 123, arity = 0, stack = "n+1 -> 0")]
+        fn op_tail_call(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let n = instr.a() as usize;
+            let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(n);
+            for _ in 0..n {
+                args.push(vm.pop());
+            }
+            args.reverse();
+            let callee = vm.pop();
+
+            // Fast path: callee is already a function value
+            if let Some(f) = callee.as_func() {
+                return vm.enter_tail_call(f, &args);
+            }
+
+            // Name cache: use the same slot computation as op_call
+            let slot = ((callee.0 >> 4) as usize) & crate::runtime::vm::CALL_CACHE_MASK;
+            if callee.0 == vm.call_cache[slot].0.0 {
+                if let Some(f) = vm.call_cache[slot].1.as_func() {
+                    return vm.enter_tail_call(f, &args);
+                }
+            }
+
+            // Resolve the function (same logic as OP_CALL, using the 4-entry cache)
+            let func = if let Some(name) = callee.as_str() {
+                // 1. Check global builtins first
+                if let Some(&idx) = vm.global_index.get(name) {
+                    let gt_len = vm.global_table.len();
+                    if (idx as usize) < gt_len {
+                        if let Some(Some(impl_)) = vm.global_table.get(idx as usize) {
+                            let impl_copy = *impl_;
+                            let result = impl_copy.call(vm, &args);
+                            // Truncate operand stack and push result
+                            if let Some(frame) = vm.frames.last() {
+                                vm.stack.truncate(frame.stack_base as usize);
+                            }
+                            vm.push(result);
+                            // Reuse current frame: reset ip and code
+                            if let Some(frame) = vm.frames.last_mut() {
+                                frame.ip = instr.a(); // will be adjusted by caller
+                            }
+                            return OpcodeResult::Next;
+                        }
+                    }
+                    // Check user-defined globals
+                    if idx >= gt_len as u32 {
+                        let globals_idx = (idx - gt_len as u32) as usize;
+                        if globals_idx < vm.globals.len() {
+                            let func_val = vm.globals[globals_idx];
+                            if let Some(f) = func_val.as_func() {
+                                vm.cache_callee(slot, callee, func_val);
+                                return vm.enter_tail_call(f, &args);
+                            }
+                        }
+                    }
+                }
+                // 2. Check domain methods
+                if name.split('.').count() == 2 {
+                    if let Some(dot_pos) = name.find('.') {
+                        let domain = &name[..dot_pos];
+                        let method = &name[dot_pos + 1..];
+                        if let Some(impl_) = vm.resolve_domain_method(domain, method) {
+                            let impl_copy = *impl_;
+                            let result = impl_copy.call(vm, &args);
+                            if let Some(frame) = vm.frames.last() {
+                                vm.stack.truncate(frame.stack_base as usize);
+                            }
+                            vm.push(result);
+                            return OpcodeResult::Next;
+                        }
+                    }
+                }
+                // 3. Fallback: search all globals by name
+                let found = vm
+                    .globals
+                    .iter()
+                    .find_map(|g| g.as_func().filter(|f| &*f.name == name).map(|_| *g));
+                if let Some(func_val) = found {
+                    vm.cache_callee(slot, callee, func_val);
+                    if let Some(f) = func_val.as_func() {
+                        return vm.enter_tail_call(f, &args);
+                    }
+                }
+                None
+            } else {
+                None
+            };
+
+            if let Some(f) = func {
+                return vm.enter_tail_call(&f, &args);
+            }
+
+            // Fallback: push nil and return normally
+            if let Some(frame) = vm.frames.last() {
+                vm.stack.truncate(frame.stack_base as usize);
+            }
+            vm.push(Value::nil());
+            OpcodeResult::Next
+        }
+
+        /// Dispatches a method call on a receiver value. Operand `a` = field index, `b` = arg count.
+        #[opcode(code = 66, arity = 0, stack = "n+1 -> 1")]
+        fn op_call_method(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let field_idx = instr.a() as usize;
+            let nargs = instr.b() as usize;
+            // The interned key Value owns a `'static` string, so this needs no
+            // `Arc` clone of the string table and no borrow of the frame.
+            // SAFETY: frame at `top` is active during dispatch.
+            let method_value = vm.frames[top].code().string_values[field_idx];
+            let method_name = method_value.as_str().unwrap_or("");
+
+            // One inline buffer holds receiver + args; method calls with up to seven
+            // arguments never touch the heap.
+            let mut all_args: smallvec::SmallVec<[Value; 8]> =
+                smallvec::SmallVec::with_capacity(nargs + 1);
+            all_args.resize(nargs + 1, Value::nil());
+            for i in (1..=nargs).rev() {
+                all_args[i] = vm.pop();
+            }
+            all_args[0] = vm.pop();
+            let receiver = all_args[0];
+
+            let domain_name = if let Some(subtype) = receiver.map_subtype() {
+                match subtype {
+                    1 => Some("result"),
+                    2 => Some("error"),
+                    3 => Some("handle"),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            if let Some(domain) = domain_name {
+                if let Some(impl_) = vm.resolve_domain_method(domain, method_name) {
+                    let impl_copy = *impl_;
+                    let result = impl_copy.call(vm, &all_args);
                     vm.push(result);
                     return OpcodeResult::Next;
                 }
-                if let Some((_map_idx, map)) = args
-                    .iter()
-                    .enumerate()
-                    .find_map(|(i, a)| a.as_map().map(|m| (i, m)))
-                {
-                    let &didx = vm.domain_index.get(name).unwrap();
-                    let calls: Vec<(u32, Value)> = vm.domain_table[didx as usize]
-                        .index
-                        .iter()
-                        .filter_map(|(method_name, &midx)| map.get(method_name).map(|v| (midx, *v)))
-                        .collect();
-                    let mut last_result = Value::nil();
-                    for (midx, value) in calls {
-                        let impl_ = vm.domain_table[didx as usize].methods[midx as usize]
-                            .as_ref()
-                            .copied()
-                            .unwrap();
-                        last_result = impl_.call(vm, &[value]);
+            }
+
+            // Resolve parent domain for super delegation using vm.type_entries
+            if let Some(map) = receiver.as_map() {
+                for desc in vm.type_entries.iter() {
+                    let desc = *desc;
+                    if desc.kind == crate::runtime::value::TypeKind::Record {
+                        let mut matches = true;
+                        for field in desc.fields {
+                            if !map.contains_key(field.name) {
+                                matches = false;
+                                break;
+                            }
+                        }
+                        if matches && !desc.fields.is_empty() {
+                            if let Some(parent_name) = desc.parent_type {
+                                if let Some(impl_) =
+                                    vm.resolve_domain_method(&parent_name, method_name)
+                                {
+                                    let impl_copy = *impl_;
+                                    let result = impl_copy.call(vm, &all_args);
+                                    vm.push(result);
+                                    return OpcodeResult::Next;
+                                }
+                            }
+                            break;
+                        }
                     }
-                    vm.push(last_result);
-                    return OpcodeResult::Next;
                 }
             }
-            // 3. Fallback: search all globals by name
-            let found = vm
-                .globals
-                .iter()
-                .find_map(|g| g.as_func().filter(|f| &*f.name == name).map(|_| *g));
-            if let Some(func_val) = found {
-                vm.cache_callee(slot, callee, func_val);
-                if let Some(f) = func_val.as_func() {
-                    return vm.enter_call_from_op(f, &args);
-                }
-            }
-        }
-        vm.push(Value::nil());
-        OpcodeResult::Next
-    }
 
-    /// Calls a function or builtin by name. Operand `a` = arg count.
-    #[opcode(code = 32, arity = 0, stack = "n+1 -> 1")]
-    fn op_call(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
-        let n = instr.a() as usize;
-        let stack_len = vm.stack.len();
-        let base = stack_len - n - 1;
-        call_from_stack(vm, n, base)
-    }
-
-    /// Fused named call: callee name is embedded in operand `b` (string-table index).
-    /// Operand `a` = arg count. Stack: n -> 1.
-    #[opcode(code = 67, arity = 0, stack = "n -> 1")]
-    fn op_call_name(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
-        let n = instr.a() as usize;
-        let name_idx = instr.b() as usize;
-        // SAFETY: frame at `top` is active during dispatch.
-        let callee = vm.frames[top].code().string_values[name_idx];
-        let arg_start = vm.stack.len() - n;
-
-        let slot = ((callee.0 >> 4) as usize) & crate::runtime::vm::CALL_CACHE_MASK;
-        if callee.0 == vm.call_cache[slot].0.0 {
-            if let Some(result) = try_jit_function(vm, slot, arg_start, n) {
-                return result;
-            }
-            if let Some(f) = vm.call_cache[slot].1.as_func() {
-                return vm.enter_call_args_at(f, arg_start, n);
-            }
-        }
-
-        // Named user function: one array load through `function_by_name`.
-        // `global_index` is checked first (and is normally empty for user
-        // functions) so a domain-expansion override keeps priority.
-        let ord = {
-            // SAFETY: frame at `top` is active during dispatch.
-            let code = vm.frames[top].code();
-            code.function_by_name.get(name_idx).copied().unwrap_or(0)
-        };
-        if ord != 0
-            && let Some(name) = callee.as_str()
-            && !vm.global_index.contains_key(name)
-        {
-            let func_slot = (vm.function_base + ord - 1) as usize;
-            if let Some(func_val) = vm.globals.get(func_slot).copied()
-                && let Some(f) = func_val.as_func()
+            // Map property lookup: if receiver is a map and no args, return the field value
+            if nargs == 0
+                && let Some(map) = receiver.as_map()
+                && let Some(v) = map.get(method_name)
             {
-                vm.cache_callee(slot, callee, func_val);
-                return vm.enter_call_args_at(f, arg_start, n);
-            }
-        }
-
-        call_name_slow(vm, n, arg_start, callee, slot)
-    }
-
-    /// Fused named tail call: callee name is embedded in operand `b` (string-table index).
-    /// Operand `a` = arg count. Stack: n -> 0.
-    #[opcode(code = 68, arity = 0, stack = "n -> 0")]
-    fn op_tail_call_name(
-        vm: &mut VM,
-        _locals: LocalSlice,
-        top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let n = instr.a() as usize;
-        let name_idx = instr.b() as usize;
-        // SAFETY: frame at `top` is active during dispatch.
-        let callee = vm.frames[top].code().string_values[name_idx];
-
-        // Collect args before any resolution so all paths have them
-        let base = vm.stack.len() - n;
-        let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(n);
-        args.extend_from_slice(&vm.stack[base..base + n]);
-        vm.stack.truncate(base);
-
-        // Fast path: callee is already a function value (unlikely for string_values)
-        if let Some(f) = callee.as_func() {
-            return vm.enter_tail_call(f, &args);
-        }
-
-        // Name cache: use the same slot computation as op_call
-        let slot = ((callee.0 >> 4) as usize) & crate::runtime::vm::CALL_CACHE_MASK;
-        if callee.0 == vm.call_cache[slot].0.0 {
-            if let Some(f) = vm.call_cache[slot].1.as_func() {
-                return vm.enter_tail_call(f, &args);
-            }
-        }
-
-        // Named user function: one array load through `function_by_name`.
-        let ord = {
-            // SAFETY: frame at `top` is active during dispatch.
-            let code = vm.frames[top].code();
-            code.function_by_name.get(name_idx).copied().unwrap_or(0)
-        };
-        if ord != 0
-            && let Some(name) = callee.as_str()
-            && !vm.global_index.contains_key(name)
-        {
-            let func_slot = (vm.function_base + ord - 1) as usize;
-            if let Some(func_val) = vm.globals.get(func_slot).copied()
-                && let Some(f) = func_val.as_func()
-            {
-                vm.cache_callee(slot, callee, func_val);
-                return vm.enter_tail_call(f, &args);
-            }
-        }
-
-        // Resolve the function (same cold logic as op_tail_call)
-        let func = if let Some(name) = callee.as_str() {
-            // 1. Check global builtins first
-            if let Some(&idx) = vm.global_index.get(name) {
-                let gt_len = vm.global_table.len();
-                if (idx as usize) < gt_len {
-                    if let Some(Some(impl_)) = vm.global_table.get(idx as usize) {
-                        let impl_copy = *impl_;
-                        let result = impl_copy.call(vm, &args);
-                        if let Some(frame) = vm.frames.last() {
-                            vm.stack.truncate(frame.stack_base as usize);
-                        }
-                        vm.push(result);
-                        if let Some(frame) = vm.frames.last_mut() {
-                            frame.ip = instr.a();
-                        }
-                        return OpcodeResult::Next;
-                    }
-                }
-                if idx >= gt_len as u32 {
-                    let globals_idx = (idx - gt_len as u32) as usize;
-                    if globals_idx < vm.globals.len() {
-                        let func_val = vm.globals[globals_idx];
-                        if let Some(f) = func_val.as_func() {
-                            vm.cache_callee(slot, callee, func_val);
-                            return vm.enter_tail_call(f, &args);
-                        }
-                    }
-                }
-            }
-            // 2. Check domain methods
-            if name.split('.').count() == 2 {
-                if let Some(dot_pos) = name.find('.') {
-                    let domain = &name[..dot_pos];
-                    let method = &name[dot_pos + 1..];
-                    if let Some(impl_) = vm.resolve_domain_method(domain, method) {
-                        let impl_copy = *impl_;
-                        let result = impl_copy.call(vm, &args);
-                        if let Some(frame) = vm.frames.last() {
-                            vm.stack.truncate(frame.stack_base as usize);
-                        }
-                        vm.push(result);
-                        return OpcodeResult::Next;
-                    }
-                }
-            }
-            // 3. Fallback: search all globals by name
-            let found = vm
-                .globals
-                .iter()
-                .find_map(|g| g.as_func().filter(|f| &*f.name == name).map(|_| *g));
-            if let Some(func_val) = found {
-                vm.cache_callee(slot, callee, func_val);
-                if let Some(f) = func_val.as_func() {
-                    return vm.enter_tail_call(f, &args);
-                }
-            }
-            None
-        } else {
-            None
-        };
-
-        if let Some(f) = func {
-            return vm.enter_tail_call(&f, &args);
-        }
-
-        if let Some(frame) = vm.frames.last() {
-            vm.stack.truncate(frame.stack_base as usize);
-        }
-        vm.push(Value::nil());
-        OpcodeResult::Next
-    }
-
-    /// Tail-call: pops args and callee, resolves the function, and reuses the current frame
-    /// instead of pushing a new one. Operand `a` = arg count.
-    #[opcode(code = 123, arity = 0, stack = "n+1 -> 0")]
-    fn op_tail_call(vm: &mut VM, _locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
-        let n = instr.a() as usize;
-        let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(n);
-        for _ in 0..n {
-            args.push(vm.pop());
-        }
-        args.reverse();
-        let callee = vm.pop();
-
-        // Fast path: callee is already a function value
-        if let Some(f) = callee.as_func() {
-            return vm.enter_tail_call(f, &args);
-        }
-
-        // Name cache: use the same slot computation as op_call
-        let slot = ((callee.0 >> 4) as usize) & crate::runtime::vm::CALL_CACHE_MASK;
-        if callee.0 == vm.call_cache[slot].0.0 {
-            if let Some(f) = vm.call_cache[slot].1.as_func() {
-                return vm.enter_tail_call(f, &args);
-            }
-        }
-
-        // Resolve the function (same logic as OP_CALL, using the 4-entry cache)
-        let func = if let Some(name) = callee.as_str() {
-            // 1. Check global builtins first
-            if let Some(&idx) = vm.global_index.get(name) {
-                let gt_len = vm.global_table.len();
-                if (idx as usize) < gt_len {
-                    if let Some(Some(impl_)) = vm.global_table.get(idx as usize) {
-                        let impl_copy = *impl_;
-                        let result = impl_copy.call(vm, &args);
-                        // Truncate operand stack and push result
-                        if let Some(frame) = vm.frames.last() {
-                            vm.stack.truncate(frame.stack_base as usize);
-                        }
-                        vm.push(result);
-                        // Reuse current frame: reset ip and code
-                        if let Some(frame) = vm.frames.last_mut() {
-                            frame.ip = instr.a(); // will be adjusted by caller
-                        }
-                        return OpcodeResult::Next;
-                    }
-                }
-                // Check user-defined globals
-                if idx >= gt_len as u32 {
-                    let globals_idx = (idx - gt_len as u32) as usize;
-                    if globals_idx < vm.globals.len() {
-                        let func_val = vm.globals[globals_idx];
-                        if let Some(f) = func_val.as_func() {
-                            vm.cache_callee(slot, callee, func_val);
-                            return vm.enter_tail_call(f, &args);
-                        }
-                    }
-                }
-            }
-            // 2. Check domain methods
-            if name.split('.').count() == 2 {
-                if let Some(dot_pos) = name.find('.') {
-                    let domain = &name[..dot_pos];
-                    let method = &name[dot_pos + 1..];
-                    if let Some(impl_) = vm.resolve_domain_method(domain, method) {
-                        let impl_copy = *impl_;
-                        let result = impl_copy.call(vm, &args);
-                        if let Some(frame) = vm.frames.last() {
-                            vm.stack.truncate(frame.stack_base as usize);
-                        }
-                        vm.push(result);
-                        return OpcodeResult::Next;
-                    }
-                }
-            }
-            // 3. Fallback: search all globals by name
-            let found = vm
-                .globals
-                .iter()
-                .find_map(|g| g.as_func().filter(|f| &*f.name == name).map(|_| *g));
-            if let Some(func_val) = found {
-                vm.cache_callee(slot, callee, func_val);
-                if let Some(f) = func_val.as_func() {
-                    return vm.enter_tail_call(f, &args);
-                }
-            }
-            None
-        } else {
-            None
-        };
-
-        if let Some(f) = func {
-            return vm.enter_tail_call(&f, &args);
-        }
-
-        // Fallback: push nil and return normally
-        if let Some(frame) = vm.frames.last() {
-            vm.stack.truncate(frame.stack_base as usize);
-        }
-        vm.push(Value::nil());
-        OpcodeResult::Next
-    }
-
-    /// Gets a field from a map or resolves a universal method. Operand `a` = string table index.
-    #[opcode(code = 38, arity = 1, stack = "1 -> 1")]
-    fn op_get_field(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
-        let field_idx = instr.a() as usize;
-        let target = vm.pop();
-        // SAFETY: frame at `top` is active during dispatch.
-        let code = vm.frames[top].code();
-        let field = &code.string_table[field_idx];
-        let field_val = code.string_values[field_idx];
-
-        // Fast path: use HeapMap::get_fast_value with interned key identity
-        if let Some(map_obj) = target.as_map() {
-            if let Some(v) = map_obj.get_fast_value(field_val) {
-                vm.push(v);
+                vm.push(*v);
                 return OpcodeResult::Next;
             }
-        }
 
-        if let Some(impl_) = vm.resolve_universal_method(field) {
-            let impl_copy = *impl_;
-            let all_args = [target];
-            let result = impl_copy.call(vm, &all_args);
-            vm.push(result);
-            return OpcodeResult::Next;
-        }
-
-        vm.push(Value::nil());
-        OpcodeResult::Next
-    }
-
-    /// Starts iterating over an array. Pops the iterable.
-    #[opcode(code = 42, arity = 1, stack = "1 -> 0")]
-    fn op_for_iter_start(
-        vm: &mut VM,
-        _locals: LocalSlice,
-        top: usize,
-        _instr: Instr,
-    ) -> OpcodeResult {
-        let iterable = vm.pop();
-        let is_range = iterable.map_subtype() == Some(crate::runtime::value::SUBTYPE_RANGE);
-        let f = &mut vm.frames[top];
-        f.iter.clear();
-        f.iter_is_range = is_range;
-        if is_range {
-            let map = iterable.as_map().expect("range subtype implies a map");
-            f.range_cur = map.get("start").map(|v| v.as_int()).unwrap_or(0);
-            f.range_end = map.get("end").map(|v| v.as_int()).unwrap_or(0);
-        } else if let Some(arr) = iterable.as_array() {
-            f.iter.extend_from_slice(arr);
-        }
-        f.iter_idx = 0;
-        OpcodeResult::Next
-    }
-
-    /// Advances the iterator, pushing the next value or jumping to end. Operand `a` = jump target.
-    #[opcode(code = 43, arity = 0, stack = "0 -> 1", branch = "abs")]
-    fn op_for_iter_next(
-        vm: &mut VM,
-        _locals: LocalSlice,
-        top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let f = &mut vm.frames[top];
-        if f.iter_is_range {
-            if f.range_cur < f.range_end {
-                let v = f.range_cur;
-                f.range_cur += 1;
-                vm.push(Value::from_i48(v));
-                return OpcodeResult::Next;
-            }
-            return OpcodeResult::Jump(instr.a());
-        }
-        if (f.iter_idx as usize) < f.iter.len() {
-            let v = f.iter[f.iter_idx as usize];
-            f.iter_idx += 1;
-            vm.push(v);
-            OpcodeResult::Next
-        } else {
-            OpcodeResult::Jump(instr.a())
-        }
-    }
-
-    /// Starts a numeric range iteration. Pops end, start.
-    #[opcode(code = 44, arity = 2, stack = "2 -> 0")]
-    fn op_for_range_start(
-        vm: &mut VM,
-        _locals: LocalSlice,
-        top: usize,
-        _instr: Instr,
-    ) -> OpcodeResult {
-        let end = vm.pop().as_int();
-        let start = vm.pop().as_int();
-        let f = &mut vm.frames[top];
-        f.range_cur = start;
-        f.range_end = end;
-        OpcodeResult::Next
-    }
-
-    /// Advances the range iterator, pushing the next value or jumping to end. Operand `a` = jump target.
-    #[opcode(code = 45, arity = 0, stack = "0 -> 1", branch = "abs")]
-    fn op_for_range_next(
-        vm: &mut VM,
-        _locals: LocalSlice,
-        top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let f = &mut vm.frames[top];
-        if f.range_cur < f.range_end {
-            let v = f.range_cur;
-            f.range_cur += 1;
-            vm.push(Value::from_i48(v));
-            OpcodeResult::Next
-        } else {
-            OpcodeResult::Jump(instr.a())
-        }
-    }
-
-    /// Tests if a value is of a given type. Stack: value, type_name -> bool.
-    ///
-    /// Resolutions, in order:
-    /// 1. primitive type or alias (`str`, `u32`, `range`)
-    /// 2. capability (`Order`, `Len`, `Pure`) — primitives answer from the
-    ///    static table, registered types answer from `TypeDescriptor::caps`
-    /// 3. registered record shape (`$p is Point`)
-    /// 4. sum-type `tag` field
-    #[opcode(code = 52, arity = 2, stack = "2 -> 1")]
-    fn op_type_test(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        use crate::runtime::primitives::{capability_of_name, is_primitive_of, primitive_of_name};
-        let type_name_s = vm.pop().as_str();
-        let value = vm.pop();
-        let is_type = match type_name_s {
-            Some(tn) => {
-                if is_primitive_of(value, tn) {
-                    true
-                } else if let Some(cap) = capability_of_name(tn) {
-                    // Not satisfied by the static primitive table: a registered
-                    // type may still declare it.
-                    record_has_cap(vm, value, cap)
-                } else if tn == "any" || primitive_of_name(tn).is_some() {
-                    // A known primitive that did not match this value.
-                    false
-                } else if record_named(vm, value, tn) {
-                    true
-                } else {
-                    // Not a primitive: sum-type variants carry a `tag` field.
-                    value
-                        .as_map()
-                        .and_then(|map| map.get("tag"))
-                        .and_then(|tag| tag.as_str())
-                        .is_some_and(|tag| tag == tn)
-                }
-            }
-            None => false,
-        };
-        vm.push(Value::bool(is_type));
-        OpcodeResult::Next
-    }
-
-    /// Casts a value to a type (no-op for now). Stack: value, type_name -> value.
-    #[opcode(code = 53, arity = 2, stack = "2 -> 1")]
-    fn op_type_cast(vm: &mut VM, _locals: LocalSlice, _top: usize, _instr: Instr) -> OpcodeResult {
-        let type_name_s = vm.pop().as_str();
-        let value = vm.pop();
-        let _ = type_name_s;
-        vm.push(value);
-        OpcodeResult::Next
-    }
-
-    /// Dispatches a method call on a receiver value. Operand `a` = field index, `b` = arg count.
-    #[opcode(code = 66, arity = 0, stack = "n+1 -> 1")]
-    fn op_call_method(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
-        let field_idx = instr.a() as usize;
-        let nargs = instr.b() as usize;
-        // The interned key Value owns a `'static` string, so this needs no
-        // `Arc` clone of the string table and no borrow of the frame.
-        // SAFETY: frame at `top` is active during dispatch.
-        let method_value = vm.frames[top].code().string_values[field_idx];
-        let method_name = method_value.as_str().unwrap_or("");
-
-        // One inline buffer holds receiver + args; method calls with up to seven
-        // arguments never touch the heap.
-        let mut all_args: smallvec::SmallVec<[Value; 8]> =
-            smallvec::SmallVec::with_capacity(nargs + 1);
-        all_args.resize(nargs + 1, Value::nil());
-        for i in (1..=nargs).rev() {
-            all_args[i] = vm.pop();
-        }
-        all_args[0] = vm.pop();
-        let receiver = all_args[0];
-
-        let domain_name = if let Some(subtype) = receiver.map_subtype() {
-            match subtype {
-                1 => Some("result"),
-                2 => Some("error"),
-                3 => Some("handle"),
-                _ => None,
-            }
-        } else {
-            None
-        };
-
-        if let Some(domain) = domain_name {
-            if let Some(impl_) = vm.resolve_domain_method(domain, method_name) {
+            if let Some(impl_) = vm.resolve_universal_method(method_name) {
                 let impl_copy = *impl_;
                 let result = impl_copy.call(vm, &all_args);
                 vm.push(result);
                 return OpcodeResult::Next;
             }
+
+            vm.push(Value::nil());
+            OpcodeResult::Next
         }
 
-        // Resolve parent domain for super delegation using vm.type_entries
-        if let Some(map) = receiver.as_map() {
-            for desc in vm.type_entries.iter() {
-                let desc = *desc;
-                if desc.kind == crate::runtime::value::TypeKind::Record {
-                    let mut matches = true;
-                    for field in desc.fields {
-                        if !map.contains_key(field.name) {
-                            matches = false;
-                            break;
-                        }
-                    }
-                    if matches && !desc.fields.is_empty() {
-                        if let Some(parent_name) = desc.parent_type {
-                            if let Some(impl_) = vm.resolve_domain_method(&parent_name, method_name)
-                            {
-                                let impl_copy = *impl_;
-                                let result = impl_copy.call(vm, &all_args);
-                                vm.push(result);
-                                return OpcodeResult::Next;
-                            }
-                        }
-                        break;
+        // ── Batch 2: fused/specialized opcodes ──
+    }
+
+    mod loops {
+        use super::*;
+
+        /// Starts iterating over an array. Pops the iterable.
+        #[opcode(code = 42, arity = 1, stack = "1 -> 0")]
+        fn op_for_iter_start(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            _instr: Instr,
+        ) -> OpcodeResult {
+            let iterable = vm.pop();
+            let is_range = iterable.map_subtype() == Some(crate::runtime::value::SUBTYPE_RANGE);
+            let f = &mut vm.frames[top];
+            f.iter.clear();
+            f.iter_is_range = is_range;
+            if is_range {
+                let map = iterable.as_map().expect("range subtype implies a map");
+                f.range_cur = map.get("start").map(|v| v.as_int()).unwrap_or(0);
+                f.range_end = map.get("end").map(|v| v.as_int()).unwrap_or(0);
+            } else if let Some(arr) = iterable.as_array() {
+                f.iter.extend_from_slice(arr);
+            }
+            f.iter_idx = 0;
+            OpcodeResult::Next
+        }
+
+        /// Advances the iterator, pushing the next value or jumping to end. Operand `a` = jump target.
+        #[opcode(code = 43, arity = 0, stack = "0 -> 1", branch = "abs")]
+        fn op_for_iter_next(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let f = &mut vm.frames[top];
+            if f.iter_is_range {
+                if f.range_cur < f.range_end {
+                    let v = f.range_cur;
+                    f.range_cur += 1;
+                    vm.push(Value::from_i48(v));
+                    return OpcodeResult::Next;
+                }
+                return OpcodeResult::Jump(instr.a());
+            }
+            if (f.iter_idx as usize) < f.iter.len() {
+                let v = f.iter[f.iter_idx as usize];
+                f.iter_idx += 1;
+                vm.push(v);
+                OpcodeResult::Next
+            } else {
+                OpcodeResult::Jump(instr.a())
+            }
+        }
+
+        /// Starts a numeric range iteration. Pops end, start.
+        #[opcode(code = 44, arity = 2, stack = "2 -> 0")]
+        fn op_for_range_start(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            _instr: Instr,
+        ) -> OpcodeResult {
+            let end = vm.pop().as_int();
+            let start = vm.pop().as_int();
+            let f = &mut vm.frames[top];
+            f.range_cur = start;
+            f.range_end = end;
+            OpcodeResult::Next
+        }
+
+        /// Advances the range iterator, pushing the next value or jumping to end. Operand `a` = jump target.
+        #[opcode(code = 45, arity = 0, stack = "0 -> 1", branch = "abs")]
+        fn op_for_range_next(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let f = &mut vm.frames[top];
+            if f.range_cur < f.range_end {
+                let v = f.range_cur;
+                f.range_cur += 1;
+                vm.push(Value::from_i48(v));
+                OpcodeResult::Next
+            } else {
+                OpcodeResult::Jump(instr.a())
+            }
+        }
+
+        /// Numeric for-loop (Luau FORNLOOP style). Operand `a` = (var_slot << 16) | start_wide_idx, `b` = end_wide_idx.
+        #[opcode(code = 90, arity = 0, stack = "0 -> 0", branch = "wide")]
+        fn op_for_number_loop(
+            vm: &mut VM,
+            locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let f = &mut vm.frames[top];
+            let var_slot = (instr.a() >> 16) as usize;
+            let start_wide_idx = (instr.a() & 0xFFFF) as usize;
+            let end_wide_idx = instr.b() as usize;
+
+            // SAFETY: frame at `top` is active during dispatch.
+            let code = f.code();
+            let start = code.wide_operands[start_wide_idx];
+            let end = code.wide_operands[end_wide_idx];
+
+            let cur = unsafe { *locals.get_unchecked(var_slot) };
+            let cur_val = if cur.is_int() { cur.as_i48() } else { start };
+
+            let next_val = cur_val + 1;
+
+            if next_val < end {
+                unsafe {
+                    *locals.get_unchecked_mut(var_slot) = Value::from_i48(next_val);
+                }
+                OpcodeResult::Next
+            } else {
+                // The compiler records the loop exit address in the wide operand
+                // when it emits the backward jump, so no scan is needed here.
+                // SAFETY: frame at `top` is active during dispatch.
+                OpcodeResult::Jump(f.code().wide_operands[instr.c() as usize] as u32)
+            }
+        }
+    }
+
+    mod types {
+        use super::helpers::*;
+        use super::*;
+
+        /// Tests if a value is of a given type. Stack: value, type_name -> bool.
+        ///
+        /// Resolutions, in order:
+        /// 1. primitive type or alias (`str`, `u32`, `range`)
+        /// 2. capability (`Order`, `Len`, `Pure`) — primitives answer from the
+        ///    static table, registered types answer from `TypeDescriptor::caps`
+        /// 3. registered record shape (`$p is Point`)
+        /// 4. sum-type `tag` field
+        #[opcode(code = 52, arity = 2, stack = "2 -> 1")]
+        fn op_type_test(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            _instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::primitives::{
+                capability_of_name, is_primitive_of, primitive_of_name,
+            };
+            let type_name_s = vm.pop().as_str();
+            let value = vm.pop();
+            let is_type = match type_name_s {
+                Some(tn) => {
+                    if is_primitive_of(value, tn) {
+                        true
+                    } else if let Some(cap) = capability_of_name(tn) {
+                        // Not satisfied by the static primitive table: a registered
+                        // type may still declare it.
+                        record_has_cap(vm, value, cap)
+                    } else if tn == "any" || primitive_of_name(tn).is_some() {
+                        // A known primitive that did not match this value.
+                        false
+                    } else if record_named(vm, value, tn) {
+                        true
+                    } else {
+                        // Not a primitive: sum-type variants carry a `tag` field.
+                        value
+                            .as_map()
+                            .and_then(|map| map.get("tag"))
+                            .and_then(|tag| tag.as_str())
+                            .is_some_and(|tag| tag == tn)
                     }
                 }
+                None => false,
+            };
+            vm.push(Value::bool(is_type));
+            OpcodeResult::Next
+        }
+
+        /// Casts a value to a type (no-op for now). Stack: value, type_name -> value.
+        #[opcode(code = 53, arity = 2, stack = "2 -> 1")]
+        fn op_type_cast(
+            vm: &mut VM,
+            _locals: LocalSlice,
+            _top: usize,
+            _instr: Instr,
+        ) -> OpcodeResult {
+            let type_name_s = vm.pop().as_str();
+            let value = vm.pop();
+            let _ = type_name_s;
+            vm.push(value);
+            OpcodeResult::Next
+        }
+    }
+
+    mod fused_local {
+        use super::*;
+
+        /// Load two locals onto the stack. Operand `a` = slot1, `b` = slot2.
+        #[opcode(code = 60, arity = 0, stack = "0 -> 2", reads = "a,b")]
+        fn op_load_local_load_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let l = &locals;
+            let a = unsafe { *l.get_unchecked(instr.a() as usize) };
+            let b = unsafe { *l.get_unchecked(instr.b() as usize) };
+            vm.push(a);
+            vm.push(b);
+            OpcodeResult::Next
+        }
+
+        /// Add two locals and push result. Operand `a` = slot1, `b` = slot2.
+        #[opcode(code = 61, arity = 0, stack = "0 -> 1", reads = "a,b")]
+        fn op_add_local_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let l = &locals;
+            let a = unsafe { *l.get_unchecked(instr.a() as usize) };
+            let b = unsafe { *l.get_unchecked(instr.b() as usize) };
+            vm.push(a.add(b, &vm.arena));
+            OpcodeResult::Next
+        }
+
+        /// Subtract two locals and push result. Operand `a` = slot1, `b` = slot2.
+        #[opcode(code = 62, arity = 0, stack = "0 -> 1", reads = "a,b")]
+        fn op_sub_local_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let l = &locals;
+            let a = unsafe { *l.get_unchecked(instr.a() as usize) };
+            let b = unsafe { *l.get_unchecked(instr.b() as usize) };
+            vm.push(a.sub_(b));
+            OpcodeResult::Next
+        }
+
+        /// Less-than compare two locals and push bool. Operand `a` = slot1, `b` = slot2.
+        #[opcode(code = 63, arity = 0, stack = "0 -> 1", reads = "a,b")]
+        fn op_lt_local_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let l = &locals;
+            let a = unsafe { *l.get_unchecked(instr.a() as usize) };
+            let b = unsafe { *l.get_unchecked(instr.b() as usize) };
+            vm.push(Value::bool(a.lt(b)));
+            OpcodeResult::Next
+        }
+
+        /// Load local and push int constant. Operand `a` = slot, `b` = int.
+        #[opcode(code = 64, arity = 0, stack = "0 -> 2", reads = "a")]
+        fn op_load_local_push_int(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let v = unsafe { *locals.get_unchecked(instr.a() as usize) };
+            vm.push(v);
+            vm.push(Value::from_i48(instr.b() as i64));
+            OpcodeResult::Next
+        }
+
+        /// Copy local `a` to local `b`. Operand `a` = src, `b` = dest.
+        #[opcode(code = 65, arity = 0, stack = "0 -> 0", reads = "a", writes = "b")]
+        fn op_load_local_store_local(
+            _vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let v = unsafe { *locals.get_unchecked(instr.a() as usize) };
+            unsafe {
+                *locals.get_unchecked_mut(instr.b() as usize) = v;
             }
+            OpcodeResult::Next
         }
 
-        // Map property lookup: if receiver is a map and no args, return the field value
-        if nargs == 0
-            && let Some(map) = receiver.as_map()
-            && let Some(v) = map.get(method_name)
-        {
-            vm.push(*v);
-            return OpcodeResult::Next;
+        /// Multiply two locals and push result. Operand `a` = slot1, `b` = slot2.
+        #[opcode(code = 82, arity = 0, stack = "0 -> 1", reads = "a,b")]
+        fn op_mul_local_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let l = &locals;
+            let a = unsafe { *l.get_unchecked(instr.a() as usize) };
+            let b = unsafe { *l.get_unchecked(instr.b() as usize) };
+            vm.push(a.mul(b, &vm.arena));
+            OpcodeResult::Next
         }
 
-        if let Some(impl_) = vm.resolve_universal_method(method_name) {
-            let impl_copy = *impl_;
-            let result = impl_copy.call(vm, &all_args);
+        /// Divide two locals and push result. Operand `a` = slot1, `b` = slot2.
+        #[opcode(code = 83, arity = 0, stack = "0 -> 1", reads = "a,b")]
+        fn op_div_local_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let l = &locals;
+            let a = unsafe { *l.get_unchecked(instr.a() as usize) };
+            let b = unsafe { *l.get_unchecked(instr.b() as usize) };
+            vm.push(a.div_(b));
+            OpcodeResult::Next
+        }
+
+        /// Store local[a] = local[a] + local[b]. Operand `a` = dest, `b` = src.
+        #[opcode(code = 92, arity = 0, stack = "0 -> 0", reads = "a,b", writes = "a")]
+        fn op_add_local_store(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let l = &locals;
+            let dest = instr.a() as usize;
+            let src = instr.b() as usize;
+            let a = unsafe { *l.get_unchecked(dest) };
+            let b = unsafe { *l.get_unchecked(src) };
+            if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                let r = a
+                    .as_i48()
+                    .checked_add(b.as_i48())
+                    .unwrap_or_else(|| (a.as_i48() as f64 + b.as_i48() as f64) as i64);
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_i48(r);
+                }
+            } else if a.is_float() && b.is_float() {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() + b.as_f64());
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = a.add(b, &vm.arena);
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Store local[a] = local[a] * local[b]. Operand `a` = dest, `b` = src.
+        #[opcode(code = 96, arity = 0, stack = "0 -> 0", reads = "a,b", writes = "a")]
+        fn op_mul_local_store(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let l = &locals;
+            let dest = instr.a() as usize;
+            let src = instr.b() as usize;
+            let a = unsafe { *l.get_unchecked(dest) };
+            let b = unsafe { *l.get_unchecked(src) };
+            if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                let r = a
+                    .as_i48()
+                    .checked_mul(b.as_i48())
+                    .unwrap_or_else(|| (a.as_i48() as f64 * b.as_i48() as f64) as i64);
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_i48(r);
+                }
+            } else if a.is_float() && b.is_float() {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() * b.as_f64());
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = a.mul(b, &vm.arena);
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Store local[a] = local[a] / local[b]. Operand `a` = dest, `b` = src.
+        #[opcode(code = 97, arity = 0, stack = "0 -> 0", reads = "a,b", writes = "a")]
+        fn op_div_local_store(
+            _vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let l = &locals;
+            let dest = instr.a() as usize;
+            let src = instr.b() as usize;
+            let a = unsafe { *l.get_unchecked(dest) };
+            let b = unsafe { *l.get_unchecked(src) };
+            if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                let r = if b.as_i48() != 0 {
+                    a.as_i48() / b.as_i48()
+                } else {
+                    0
+                };
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_i48(r);
+                }
+            } else if a.is_float() && b.is_float() {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() / b.as_f64());
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = a.div_(b);
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Store local[a] = local[a] - local[b]. Operand `a` = dest, `b` = src.
+        #[opcode(code = 98, arity = 0, stack = "0 -> 0", reads = "a,b", writes = "a")]
+        fn op_sub_local_store(
+            _vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let l = &locals;
+            let dest = instr.a() as usize;
+            let src = instr.b() as usize;
+            let a = unsafe { *l.get_unchecked(dest) };
+            let b = unsafe { *l.get_unchecked(src) };
+            if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                let r = a
+                    .as_i48()
+                    .checked_sub(b.as_i48())
+                    .unwrap_or_else(|| (a.as_i48() as f64 - b.as_i48() as f64) as i64);
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_i48(r);
+                }
+            } else if a.is_float() && b.is_float() {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() - b.as_f64());
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = a.sub_(b);
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Store local[a] = local[c] + local[b]. Operand `a` = dest, `b` = src2, `c` = src1.
+        #[opcode(code = 99, arity = 0, stack = "0 -> 0", reads = "b,c", writes = "a")]
+        fn op_add_local_local_store(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let l = &locals;
+            let dest = instr.a() as usize;
+            let src1 = instr.c() as usize;
+            let src2 = instr.b() as usize;
+            let a = unsafe { *l.get_unchecked(src1) };
+            let b = unsafe { *l.get_unchecked(src2) };
+            if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                let r = a
+                    .as_i48()
+                    .checked_add(b.as_i48())
+                    .unwrap_or_else(|| (a.as_i48() as f64 + b.as_i48() as f64) as i64);
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_i48(r);
+                }
+            } else if a.is_float() && b.is_float() {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() + b.as_f64());
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = a.add(b, &vm.arena);
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Store local[a] = local[c] * local[b]. Operand `a` = dest, `b` = src2, `c` = src1.
+        #[opcode(code = 100, arity = 0, stack = "0 -> 0", reads = "b,c", writes = "a")]
+        fn op_mul_local_local_store(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let l = &locals;
+            let dest = instr.a() as usize;
+            let src1 = instr.c() as usize;
+            let src2 = instr.b() as usize;
+            let a = unsafe { *l.get_unchecked(src1) };
+            let b = unsafe { *l.get_unchecked(src2) };
+            if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                let r = a
+                    .as_i48()
+                    .checked_mul(b.as_i48())
+                    .unwrap_or_else(|| (a.as_i48() as f64 * b.as_i48() as f64) as i64);
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_i48(r);
+                }
+            } else if a.is_float() && b.is_float() {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() * b.as_f64());
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = a.mul(b, &vm.arena);
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Store local[a] = local[c] - local[b]. Operand `a` = dest, `b` = src2, `c` = src1.
+        #[opcode(code = 101, arity = 0, stack = "0 -> 0", reads = "b,c", writes = "a")]
+        fn op_sub_local_local_store(
+            _vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let l = &locals;
+            let dest = instr.a() as usize;
+            let src1 = instr.c() as usize;
+            let src2 = instr.b() as usize;
+            let a = unsafe { *l.get_unchecked(src1) };
+            let b = unsafe { *l.get_unchecked(src2) };
+            if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                let r = a
+                    .as_i48()
+                    .checked_sub(b.as_i48())
+                    .unwrap_or_else(|| (a.as_i48() as f64 - b.as_i48() as f64) as i64);
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_i48(r);
+                }
+            } else if a.is_float() && b.is_float() {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() - b.as_f64());
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = a.sub_(b);
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Store local[a] = local[c] / local[b]. Operand `a` = dest, `b` = src2, `c` = src1.
+        #[opcode(code = 102, arity = 0, stack = "0 -> 0", reads = "b,c", writes = "a")]
+        fn op_div_local_local_store(
+            _vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let l = &locals;
+            let dest = instr.a() as usize;
+            let src1 = instr.c() as usize;
+            let src2 = instr.b() as usize;
+            let a = unsafe { *l.get_unchecked(src1) };
+            let b = unsafe { *l.get_unchecked(src2) };
+            if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                let r = if b.as_i48() != 0 {
+                    a.as_i48() / b.as_i48()
+                } else {
+                    0
+                };
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_i48(r);
+                }
+            } else if a.is_float() && b.is_float() {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() / b.as_f64());
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = a.div_(b);
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Store local[a] = local[c] % local[b]. Operand `a` = dest, `b` = src2, `c` = src1.
+        #[opcode(code = 107, arity = 0, stack = "0 -> 0", reads = "b,c", writes = "a")]
+        fn op_mod_local_local_store(
+            _vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let l = &locals;
+            let dest = instr.a() as usize;
+            let src2 = instr.b() as usize;
+            let src1 = instr.c() as usize;
+            let a = unsafe { *l.get_unchecked(src1) };
+            let b = unsafe { *l.get_unchecked(src2) };
+            if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                let bi = b.as_i48();
+                let r = if bi != 0 { a.as_i48() % bi } else { 0 };
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_i48(r);
+                }
+            } else if a.is_float() && b.is_float() {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() % b.as_f64());
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = a.mod_(b);
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Add float constant to local. Operand `a` = slot, `b` = wide_operands index.
+        #[opcode(code = 110, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
+        fn op_add_float_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            // SAFETY: frame at `top` is active during dispatch.
+            let frame = &vm.frames[top];
+            let f = f64::from_bits(frame.code().wide_operands[instr.b() as usize] as u64);
+            let l = &locals;
+            let idx = instr.a() as usize;
+            let v = unsafe { *l.get_unchecked(idx) };
+            if v.is_float() {
+                unsafe {
+                    *l.get_unchecked_mut(idx) = Value::from_f64(v.as_f64() + f);
+                }
+            } else if v.tag() == TAG_INT {
+                unsafe {
+                    *l.get_unchecked_mut(idx) = Value::from_f64(v.as_i48() as f64 + f);
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(idx) = v.add(Value::from_f64(f), &vm.arena);
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Subtract float constant from local. Operand `a` = slot, `b` = wide_operands index.
+        #[opcode(code = 111, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
+        fn op_sub_float_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            // SAFETY: frame at `top` is active during dispatch.
+            let frame = &vm.frames[top];
+            let f = f64::from_bits(frame.code().wide_operands[instr.b() as usize] as u64);
+            let l = &locals;
+            let idx = instr.a() as usize;
+            let v = unsafe { *l.get_unchecked(idx) };
+            if v.is_float() {
+                unsafe {
+                    *l.get_unchecked_mut(idx) = Value::from_f64(v.as_f64() - f);
+                }
+            } else if v.tag() == TAG_INT {
+                unsafe {
+                    *l.get_unchecked_mut(idx) = Value::from_f64(v.as_i48() as f64 - f);
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(idx) = v.sub_(Value::from_f64(f));
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Multiply local by float constant. Operand `a` = slot, `b` = wide_operands index.
+        #[opcode(code = 112, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
+        fn op_mul_float_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            // SAFETY: frame at `top` is active during dispatch.
+            let frame = &vm.frames[top];
+            let f = f64::from_bits(frame.code().wide_operands[instr.b() as usize] as u64);
+            let l = &locals;
+            let idx = instr.a() as usize;
+            let v = unsafe { *l.get_unchecked(idx) };
+            if v.is_float() {
+                unsafe {
+                    *l.get_unchecked_mut(idx) = Value::from_f64(v.as_f64() * f);
+                }
+            } else if v.tag() == TAG_INT {
+                unsafe {
+                    *l.get_unchecked_mut(idx) = Value::from_f64(v.as_i48() as f64 * f);
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(idx) = v.mul(Value::from_f64(f), &vm.arena);
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Divide local by float constant. Operand `a` = slot, `b` = wide_operands index.
+        #[opcode(code = 113, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
+        fn op_div_float_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            // SAFETY: frame at `top` is active during dispatch.
+            let frame = &vm.frames[top];
+            let f = f64::from_bits(frame.code().wide_operands[instr.b() as usize] as u64);
+            let l = &locals;
+            let idx = instr.a() as usize;
+            let v = unsafe { *l.get_unchecked(idx) };
+            if v.is_float() {
+                unsafe {
+                    *l.get_unchecked_mut(idx) = Value::from_f64(v.as_f64() / f);
+                }
+            } else if v.tag() == TAG_INT {
+                unsafe {
+                    *l.get_unchecked_mut(idx) = Value::from_f64(v.as_i48() as f64 / f);
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(idx) = v.div_(Value::from_f64(f));
+                }
+            }
+            OpcodeResult::Next
+        }
+    }
+
+    mod fused_int {
+        use super::*;
+
+        /// Increment local by 1. Operand `a` = slot.
+        #[opcode(code = 80, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
+        fn op_inc_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let l = &locals;
+            let idx = instr.a() as usize;
+            let v = unsafe { *l.get_unchecked(idx) };
+            if v.tag() == TAG_INT {
+                let r = v.as_i48().checked_add(1).unwrap_or(v.as_i48());
+                unsafe {
+                    *l.get_unchecked_mut(idx) = Value::from_i48(r);
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(idx) = v.add(Value::from_i48(1), &vm.arena);
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Decrement local by 1. Operand `a` = slot.
+        #[opcode(code = 81, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
+        fn op_dec_local(
+            _vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let l = &locals;
+            let idx = instr.a() as usize;
+            let v = unsafe { *l.get_unchecked(idx) };
+            if v.tag() == TAG_INT {
+                let r = v.as_i48().checked_sub(1).unwrap_or(v.as_i48());
+                unsafe {
+                    *l.get_unchecked_mut(idx) = Value::from_i48(r);
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(idx) = v.sub_(Value::from_i48(1));
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Store local[a] = local[b] + c. Operand `a` = dest, `b` = src, `c` = int constant.
+        #[opcode(code = 84, arity = 0, stack = "0 -> 0", reads = "b", writes = "a")]
+        fn op_add_int_store_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let l = &locals;
+            let dest = instr.a() as usize;
+            let src = instr.b() as usize;
+            let c = instr.c() as i64;
+            let v = unsafe { *l.get_unchecked(src) };
+            if v.is_int() {
+                let r = v.as_i48().checked_add(c).unwrap_or(v.as_i48());
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_i48(r);
+                }
+            } else {
+                let r = v.add(Value::from_i48(c), &vm.arena);
+                unsafe {
+                    *l.get_unchecked_mut(dest) = r;
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Increment local by constant. Operand `a` = slot, `b` = int constant.
+        #[opcode(code = 85, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
+        fn op_inc_local_int(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let l = &locals;
+            let idx = instr.a() as usize;
+            let c = instr.b() as i64;
+            let v = unsafe { *l.get_unchecked(idx) };
+            if v.is_int() {
+                let r = v.as_i48().checked_add(c).unwrap_or(v.as_i48());
+                unsafe {
+                    *l.get_unchecked_mut(idx) = Value::from_i48(r);
+                }
+            } else {
+                let r = v.add(Value::from_i48(c), &vm.arena);
+                unsafe {
+                    *l.get_unchecked_mut(idx) = r;
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Add int constant to local. Operand `a` = slot, `b` = int constant.
+        #[opcode(code = 91, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
+        fn op_add_int_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let l = &locals;
+            let idx = instr.a() as usize;
+            let c = instr.b() as i64;
+            let v = unsafe { *l.get_unchecked(idx) };
+            if v.tag() == TAG_INT {
+                let r = v.as_i48().checked_add(c).unwrap_or(v.as_i48());
+                unsafe {
+                    *l.get_unchecked_mut(idx) = Value::from_i48(r);
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(idx) = v.add(Value::from_i48(c), &vm.arena);
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Subtract int constant from local. Operand `a` = slot, `b` = int constant.
+        #[opcode(code = 93, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
+        fn op_sub_int_local(
+            _vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let l = &locals;
+            let idx = instr.a() as usize;
+            let c = instr.b() as i64;
+            let v = unsafe { *l.get_unchecked(idx) };
+            if v.tag() == TAG_INT {
+                let r = v.as_i48().checked_sub(c).unwrap_or(v.as_i48());
+                unsafe {
+                    *l.get_unchecked_mut(idx) = Value::from_i48(r);
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(idx) = v.sub_(Value::from_i48(c));
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Multiply local by int constant. Operand `a` = slot, `b` = int constant.
+        #[opcode(code = 94, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
+        fn op_mul_int_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let l = &locals;
+            let idx = instr.a() as usize;
+            let c = instr.b() as i64;
+            let v = unsafe { *l.get_unchecked(idx) };
+            if v.tag() == TAG_INT {
+                let r = v.as_i48().checked_mul(c).unwrap_or(v.as_i48());
+                unsafe {
+                    *l.get_unchecked_mut(idx) = Value::from_i48(r);
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(idx) = v.mul(Value::from_i48(c), &vm.arena);
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Test local[a] % b == c. Operand `a` = slot, `b` = divisor, `c` = eq_val.
+        #[opcode(code = 114, arity = 0, stack = "0 -> 1", reads = "a")]
+        fn op_mod_eq_int(
+            vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let l = &locals;
+            let idx = instr.a() as usize;
+            let divisor = instr.b() as i64;
+            let eq_val = instr.c() as i64;
+            let v = unsafe { *l.get_unchecked(idx) };
+            let result = if v.tag() == TAG_INT && divisor != 0 {
+                let val = v.as_i48();
+                let mod_result = val % divisor;
+                Value::bool(mod_result == eq_val)
+            } else {
+                let mod_val = v.mod_(Value::from_i48(divisor));
+                Value::bool(mod_val.eq_(Value::from_i48(eq_val)))
+            };
             vm.push(result);
-            return OpcodeResult::Next;
-        }
-
-        vm.push(Value::nil());
-        OpcodeResult::Next
-    }
-
-    // ── Batch 2: fused/specialized opcodes ──
-
-    /// Load two locals onto the stack. Operand `a` = slot1, `b` = slot2.
-    #[opcode(code = 60, arity = 0, stack = "0 -> 2", reads = "a,b")]
-    fn op_load_local_load_local(
-        vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let l = &locals;
-        let a = unsafe { *l.get_unchecked(instr.a() as usize) };
-        let b = unsafe { *l.get_unchecked(instr.b() as usize) };
-        vm.push(a);
-        vm.push(b);
-        OpcodeResult::Next
-    }
-
-    /// Add two locals and push result. Operand `a` = slot1, `b` = slot2.
-    #[opcode(code = 61, arity = 0, stack = "0 -> 1", reads = "a,b")]
-    fn op_add_local_local(
-        vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let l = &locals;
-        let a = unsafe { *l.get_unchecked(instr.a() as usize) };
-        let b = unsafe { *l.get_unchecked(instr.b() as usize) };
-        vm.push(a.add(b, &vm.arena));
-        OpcodeResult::Next
-    }
-
-    /// Subtract two locals and push result. Operand `a` = slot1, `b` = slot2.
-    #[opcode(code = 62, arity = 0, stack = "0 -> 1", reads = "a,b")]
-    fn op_sub_local_local(
-        vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let l = &locals;
-        let a = unsafe { *l.get_unchecked(instr.a() as usize) };
-        let b = unsafe { *l.get_unchecked(instr.b() as usize) };
-        vm.push(a.sub_(b));
-        OpcodeResult::Next
-    }
-
-    /// Less-than compare two locals and push bool. Operand `a` = slot1, `b` = slot2.
-    #[opcode(code = 63, arity = 0, stack = "0 -> 1", reads = "a,b")]
-    fn op_lt_local_local(
-        vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let l = &locals;
-        let a = unsafe { *l.get_unchecked(instr.a() as usize) };
-        let b = unsafe { *l.get_unchecked(instr.b() as usize) };
-        vm.push(Value::bool(a.lt(b)));
-        OpcodeResult::Next
-    }
-
-    /// Load local and push int constant. Operand `a` = slot, `b` = int.
-    #[opcode(code = 64, arity = 0, stack = "0 -> 2", reads = "a")]
-    fn op_load_local_push_int(
-        vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let v = unsafe { *locals.get_unchecked(instr.a() as usize) };
-        vm.push(v);
-        vm.push(Value::from_i48(instr.b() as i64));
-        OpcodeResult::Next
-    }
-
-    /// Copy local `a` to local `b`. Operand `a` = src, `b` = dest.
-    #[opcode(code = 65, arity = 0, stack = "0 -> 0", reads = "a", writes = "b")]
-    fn op_load_local_store_local(
-        _vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let v = unsafe { *locals.get_unchecked(instr.a() as usize) };
-        unsafe {
-            *locals.get_unchecked_mut(instr.b() as usize) = v;
-        }
-        OpcodeResult::Next
-    }
-
-    /// Increment local by 1. Operand `a` = slot.
-    #[opcode(code = 80, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
-    fn op_inc_local(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let l = &locals;
-        let idx = instr.a() as usize;
-        let v = unsafe { *l.get_unchecked(idx) };
-        if v.tag() == TAG_INT {
-            let r = v.as_i48().checked_add(1).unwrap_or(v.as_i48());
-            unsafe {
-                *l.get_unchecked_mut(idx) = Value::from_i48(r);
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(idx) = v.add(Value::from_i48(1), &vm.arena);
-            }
-        }
-        OpcodeResult::Next
-    }
-
-    /// Decrement local by 1. Operand `a` = slot.
-    #[opcode(code = 81, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
-    fn op_dec_local(_vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let l = &locals;
-        let idx = instr.a() as usize;
-        let v = unsafe { *l.get_unchecked(idx) };
-        if v.tag() == TAG_INT {
-            let r = v.as_i48().checked_sub(1).unwrap_or(v.as_i48());
-            unsafe {
-                *l.get_unchecked_mut(idx) = Value::from_i48(r);
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(idx) = v.sub_(Value::from_i48(1));
-            }
-        }
-        OpcodeResult::Next
-    }
-
-    /// Multiply two locals and push result. Operand `a` = slot1, `b` = slot2.
-    #[opcode(code = 82, arity = 0, stack = "0 -> 1", reads = "a,b")]
-    fn op_mul_local_local(
-        vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let l = &locals;
-        let a = unsafe { *l.get_unchecked(instr.a() as usize) };
-        let b = unsafe { *l.get_unchecked(instr.b() as usize) };
-        vm.push(a.mul(b, &vm.arena));
-        OpcodeResult::Next
-    }
-
-    /// Divide two locals and push result. Operand `a` = slot1, `b` = slot2.
-    #[opcode(code = 83, arity = 0, stack = "0 -> 1", reads = "a,b")]
-    fn op_div_local_local(
-        vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let l = &locals;
-        let a = unsafe { *l.get_unchecked(instr.a() as usize) };
-        let b = unsafe { *l.get_unchecked(instr.b() as usize) };
-        vm.push(a.div_(b));
-        OpcodeResult::Next
-    }
-
-    /// Store local[a] = local[b] + c. Operand `a` = dest, `b` = src, `c` = int constant.
-    #[opcode(code = 84, arity = 0, stack = "0 -> 0", reads = "b", writes = "a")]
-    fn op_add_int_store_local(
-        vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let l = &locals;
-        let dest = instr.a() as usize;
-        let src = instr.b() as usize;
-        let c = instr.c() as i64;
-        let v = unsafe { *l.get_unchecked(src) };
-        if v.is_int() {
-            let r = v.as_i48().checked_add(c).unwrap_or(v.as_i48());
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_i48(r);
-            }
-        } else {
-            let r = v.add(Value::from_i48(c), &vm.arena);
-            unsafe {
-                *l.get_unchecked_mut(dest) = r;
-            }
-        }
-        OpcodeResult::Next
-    }
-
-    /// Increment local by constant. Operand `a` = slot, `b` = int constant.
-    #[opcode(code = 85, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
-    fn op_inc_local_int(
-        vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let l = &locals;
-        let idx = instr.a() as usize;
-        let c = instr.b() as i64;
-        let v = unsafe { *l.get_unchecked(idx) };
-        if v.is_int() {
-            let r = v.as_i48().checked_add(c).unwrap_or(v.as_i48());
-            unsafe {
-                *l.get_unchecked_mut(idx) = Value::from_i48(r);
-            }
-        } else {
-            let r = v.add(Value::from_i48(c), &vm.arena);
-            unsafe {
-                *l.get_unchecked_mut(idx) = r;
-            }
-        }
-        OpcodeResult::Next
-    }
-
-    /// Numeric for-loop (Luau FORNLOOP style). Operand `a` = (var_slot << 16) | start_wide_idx, `b` = end_wide_idx.
-    #[opcode(code = 90, arity = 0, stack = "0 -> 0", branch = "wide")]
-    fn op_for_number_loop(
-        vm: &mut VM,
-        locals: LocalSlice,
-        top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let f = &mut vm.frames[top];
-        let var_slot = (instr.a() >> 16) as usize;
-        let start_wide_idx = (instr.a() & 0xFFFF) as usize;
-        let end_wide_idx = instr.b() as usize;
-
-        // SAFETY: frame at `top` is active during dispatch.
-        let code = f.code();
-        let start = code.wide_operands[start_wide_idx];
-        let end = code.wide_operands[end_wide_idx];
-
-        let cur = unsafe { *locals.get_unchecked(var_slot) };
-        let cur_val = if cur.is_int() { cur.as_i48() } else { start };
-
-        let next_val = cur_val + 1;
-
-        if next_val < end {
-            unsafe {
-                *locals.get_unchecked_mut(var_slot) = Value::from_i48(next_val);
-            }
             OpcodeResult::Next
-        } else {
-            // The compiler records the loop exit address in the wide operand
-            // when it emits the backward jump, so no scan is needed here.
-            // SAFETY: frame at `top` is active during dispatch.
-            OpcodeResult::Jump(f.code().wide_operands[instr.c() as usize] as u32)
         }
     }
 
-    /// Add int constant to local. Operand `a` = slot, `b` = int constant.
-    #[opcode(code = 91, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
-    fn op_add_int_local(
-        vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let l = &locals;
-        let idx = instr.a() as usize;
-        let c = instr.b() as i64;
-        let v = unsafe { *l.get_unchecked(idx) };
-        if v.tag() == TAG_INT {
-            let r = v.as_i48().checked_add(c).unwrap_or(v.as_i48());
-            unsafe {
-                *l.get_unchecked_mut(idx) = Value::from_i48(r);
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(idx) = v.add(Value::from_i48(c), &vm.arena);
-            }
-        }
-        OpcodeResult::Next
-    }
+    mod fused_branch {
+        use super::*;
 
-    /// Store local[a] = local[a] + local[b]. Operand `a` = dest, `b` = src.
-    #[opcode(code = 92, arity = 0, stack = "0 -> 0", reads = "a,b", writes = "a")]
-    fn op_add_local_store(
-        vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let l = &locals;
-        let dest = instr.a() as usize;
-        let src = instr.b() as usize;
-        let a = unsafe { *l.get_unchecked(dest) };
-        let b = unsafe { *l.get_unchecked(src) };
-        if a.tag() == TAG_INT && b.tag() == TAG_INT {
-            let r = a
-                .as_i48()
-                .checked_add(b.as_i48())
-                .unwrap_or_else(|| (a.as_i48() as f64 + b.as_i48() as f64) as i64);
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_i48(r);
-            }
-        } else if a.is_float() && b.is_float() {
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() + b.as_f64());
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(dest) = a.add(b, &vm.arena);
-            }
-        }
-        OpcodeResult::Next
-    }
-
-    /// Subtract int constant from local. Operand `a` = slot, `b` = int constant.
-    #[opcode(code = 93, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
-    fn op_sub_int_local(
-        _vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let l = &locals;
-        let idx = instr.a() as usize;
-        let c = instr.b() as i64;
-        let v = unsafe { *l.get_unchecked(idx) };
-        if v.tag() == TAG_INT {
-            let r = v.as_i48().checked_sub(c).unwrap_or(v.as_i48());
-            unsafe {
-                *l.get_unchecked_mut(idx) = Value::from_i48(r);
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(idx) = v.sub_(Value::from_i48(c));
-            }
-        }
-        OpcodeResult::Next
-    }
-
-    /// Multiply local by int constant. Operand `a` = slot, `b` = int constant.
-    #[opcode(code = 94, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
-    fn op_mul_int_local(
-        vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let l = &locals;
-        let idx = instr.a() as usize;
-        let c = instr.b() as i64;
-        let v = unsafe { *l.get_unchecked(idx) };
-        if v.tag() == TAG_INT {
-            let r = v.as_i48().checked_mul(c).unwrap_or(v.as_i48());
-            unsafe {
-                *l.get_unchecked_mut(idx) = Value::from_i48(r);
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(idx) = v.mul(Value::from_i48(c), &vm.arena);
-            }
-        }
-        OpcodeResult::Next
-    }
-
-    /// Push `local[a] <op> b` for a small integer constant. Operand `a` = slot,
-    /// `b` = constant, `c` = 0 add / 1 sub / 2 mul.
-    ///
-    /// Call arguments are the hot case: `fib($n - 1)` used to be
-    /// `LOAD_LOCAL, PUSH_INT, SUB` (three dispatches) before every call.
-    #[opcode(code = 125, arity = 0, stack = "0 -> 1")]
-    fn op_push_local_int_op(
-        vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let v = unsafe { *locals.get_unchecked(instr.a() as usize) };
-        let c = instr.b() as i64;
-        let r = if v.tag() == TAG_INT {
-            let a = v.as_i48();
-            let folded = match instr.c() {
-                1 => a.checked_sub(c),
-                2 => a.checked_mul(c),
-                _ => a.checked_add(c),
-            };
-            match folded {
-                Some(r) => Value::from_i48(r),
-                None => Value::from_f64(a as f64 + c as f64),
-            }
-        } else {
-            let cv = Value::from_i48(c);
-            match instr.c() {
-                1 => v.sub_(cv),
-                2 => v.mul(cv, &vm.arena),
-                _ => v.add(cv, &vm.arena),
-            }
-        };
-        vm.push(r);
-        OpcodeResult::Next
-    }
-
-    /// If local[a] < b: fall through, else jump to the wide-operand target.
-    ///
-    /// Fuses `if $x < N { ... }` (compare + `JUMP_IF_FALSE`) into one dispatch.
-    /// Operand `a` = slot, `b` = limit, `c` = target wide index.
-    #[opcode(code = 126, arity = 0, stack = "0 -> 0", branch = "wide", reads = "a")]
-    fn op_if_lt_int(vm: &mut VM, locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let slot = instr.a() as usize;
-        let limit = instr.b() as i32 as i64;
-        let v = unsafe { *locals.get_unchecked(slot) };
-        let val = if v.tag() == TAG_INT {
-            v.as_i48()
-        } else {
-            v.as_int()
-        };
-        if val < limit {
-            OpcodeResult::Next
-        } else {
-            // SAFETY: frame at `top` is active during dispatch.
-            OpcodeResult::Jump(vm.frames[top].code().wide_operands[instr.c() as usize] as u32)
-        }
-    }
-
-    /// If local[a] == b: fall through, else jump to the wide-operand target.
-    ///
-    /// Fuses `if $x == N { ... }`, the shape used by base cases in recursive
-    /// benchmarks.
-    #[opcode(code = 104, arity = 0, stack = "0 -> 0", branch = "wide", reads = "a")]
-    fn op_if_eq_int(vm: &mut VM, locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
-        let slot = instr.a() as usize;
-        let limit = instr.b() as i32 as i64;
-        let v = unsafe { *locals.get_unchecked(slot) };
-        let eq = if v.is_int() {
-            v.as_i48() == limit
-        } else {
-            v.eq_(Value::from_i48(limit))
-        };
-        if eq {
-            OpcodeResult::Next
-        } else {
-            // SAFETY: frame at `top` is active during dispatch.
-            OpcodeResult::Jump(vm.frames[top].code().wide_operands[instr.c() as usize] as u32)
-        }
-    }
-
-    /// While local[a] < b: continue, else jump to exit. Operand `a` = slot, `b` = limit, `c` = exit_wide_idx.
-    #[opcode(code = 95, arity = 0, stack = "0 -> 0", branch = "wide", reads = "a")]
-    fn op_while_lt_int(vm: &mut VM, locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let f = &mut vm.frames[top];
-        let slot = instr.a() as usize;
-        let limit = instr.b() as i32 as i64;
-        let exit_wide_idx = instr.c() as usize;
-        let v = unsafe { *locals.get_unchecked(slot) };
-        let val = if v.tag() == TAG_INT {
-            v.as_i48()
-        } else {
-            v.as_int()
-        };
-        if val < limit {
-            OpcodeResult::Next
-        } else {
-            // SAFETY: frame at `top` is active during dispatch.
-            let exit_ip = f.code().wide_operands[exit_wide_idx] as u32;
-            OpcodeResult::Jump(exit_ip)
-        }
-    }
-
-    /// While local[a] < wide_operands[b]: continue, else jump to wide_operands[c].
-    ///
-    /// Same as [`OP_WHILE_LT_INT`] but the limit does not fit in 16 bits; the
-    /// exit target stays in `c` so the branch metadata is unchanged.
-    #[opcode(code = 69, arity = 0, stack = "0 -> 0", branch = "wide", reads = "a")]
-    fn op_while_lt_int_wide(
-        vm: &mut VM,
-        locals: LocalSlice,
-        top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let f = &mut vm.frames[top];
-        let slot = instr.a() as usize;
-        let limit = f.code().wide_operands[instr.b() as usize];
-        let exit_wide_idx = instr.c() as usize;
-        let v = unsafe { *locals.get_unchecked(slot) };
-        let val = if v.tag() == TAG_INT {
-            v.as_i48()
-        } else {
-            v.as_int()
-        };
-        if val < limit {
-            OpcodeResult::Next
-        } else {
-            // SAFETY: frame at `top` is active during dispatch.
-            let exit_ip = f.code().wide_operands[exit_wide_idx] as u32;
-            OpcodeResult::Jump(exit_ip)
-        }
-    }
-
-    /// Store local[a] = local[a] * local[b]. Operand `a` = dest, `b` = src.
-    #[opcode(code = 96, arity = 0, stack = "0 -> 0", reads = "a,b", writes = "a")]
-    fn op_mul_local_store(
-        vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let l = &locals;
-        let dest = instr.a() as usize;
-        let src = instr.b() as usize;
-        let a = unsafe { *l.get_unchecked(dest) };
-        let b = unsafe { *l.get_unchecked(src) };
-        if a.tag() == TAG_INT && b.tag() == TAG_INT {
-            let r = a
-                .as_i48()
-                .checked_mul(b.as_i48())
-                .unwrap_or_else(|| (a.as_i48() as f64 * b.as_i48() as f64) as i64);
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_i48(r);
-            }
-        } else if a.is_float() && b.is_float() {
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() * b.as_f64());
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(dest) = a.mul(b, &vm.arena);
-            }
-        }
-        OpcodeResult::Next
-    }
-
-    /// Store local[a] = local[a] / local[b]. Operand `a` = dest, `b` = src.
-    #[opcode(code = 97, arity = 0, stack = "0 -> 0", reads = "a,b", writes = "a")]
-    fn op_div_local_store(
-        _vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let l = &locals;
-        let dest = instr.a() as usize;
-        let src = instr.b() as usize;
-        let a = unsafe { *l.get_unchecked(dest) };
-        let b = unsafe { *l.get_unchecked(src) };
-        if a.tag() == TAG_INT && b.tag() == TAG_INT {
-            let r = if b.as_i48() != 0 {
-                a.as_i48() / b.as_i48()
+        /// If local[a] < b: fall through, else jump to the wide-operand target.
+        ///
+        /// Fuses `if $x < N { ... }` (compare + `JUMP_IF_FALSE`) into one dispatch.
+        /// Operand `a` = slot, `b` = limit, `c` = target wide index.
+        #[opcode(code = 126, arity = 0, stack = "0 -> 0", branch = "wide", reads = "a")]
+        fn op_if_lt_int(vm: &mut VM, locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let slot = instr.a() as usize;
+            let limit = instr.b() as i32 as i64;
+            let v = unsafe { *locals.get_unchecked(slot) };
+            let val = if v.tag() == TAG_INT {
+                v.as_i48()
             } else {
-                0
+                v.as_int()
             };
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_i48(r);
-            }
-        } else if a.is_float() && b.is_float() {
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() / b.as_f64());
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(dest) = a.div_(b);
-            }
-        }
-        OpcodeResult::Next
-    }
-
-    /// Store local[a] = local[a] - local[b]. Operand `a` = dest, `b` = src.
-    #[opcode(code = 98, arity = 0, stack = "0 -> 0", reads = "a,b", writes = "a")]
-    fn op_sub_local_store(
-        _vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let l = &locals;
-        let dest = instr.a() as usize;
-        let src = instr.b() as usize;
-        let a = unsafe { *l.get_unchecked(dest) };
-        let b = unsafe { *l.get_unchecked(src) };
-        if a.tag() == TAG_INT && b.tag() == TAG_INT {
-            let r = a
-                .as_i48()
-                .checked_sub(b.as_i48())
-                .unwrap_or_else(|| (a.as_i48() as f64 - b.as_i48() as f64) as i64);
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_i48(r);
-            }
-        } else if a.is_float() && b.is_float() {
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() - b.as_f64());
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(dest) = a.sub_(b);
-            }
-        }
-        OpcodeResult::Next
-    }
-
-    /// Store local[a] = local[c] + local[b]. Operand `a` = dest, `b` = src2, `c` = src1.
-    #[opcode(code = 99, arity = 0, stack = "0 -> 0", reads = "b,c", writes = "a")]
-    fn op_add_local_local_store(
-        vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let l = &locals;
-        let dest = instr.a() as usize;
-        let src1 = instr.c() as usize;
-        let src2 = instr.b() as usize;
-        let a = unsafe { *l.get_unchecked(src1) };
-        let b = unsafe { *l.get_unchecked(src2) };
-        if a.tag() == TAG_INT && b.tag() == TAG_INT {
-            let r = a
-                .as_i48()
-                .checked_add(b.as_i48())
-                .unwrap_or_else(|| (a.as_i48() as f64 + b.as_i48() as f64) as i64);
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_i48(r);
-            }
-        } else if a.is_float() && b.is_float() {
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() + b.as_f64());
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(dest) = a.add(b, &vm.arena);
-            }
-        }
-        OpcodeResult::Next
-    }
-
-    /// Store local[a] = local[c] * local[b]. Operand `a` = dest, `b` = src2, `c` = src1.
-    #[opcode(code = 100, arity = 0, stack = "0 -> 0", reads = "b,c", writes = "a")]
-    fn op_mul_local_local_store(
-        vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let l = &locals;
-        let dest = instr.a() as usize;
-        let src1 = instr.c() as usize;
-        let src2 = instr.b() as usize;
-        let a = unsafe { *l.get_unchecked(src1) };
-        let b = unsafe { *l.get_unchecked(src2) };
-        if a.tag() == TAG_INT && b.tag() == TAG_INT {
-            let r = a
-                .as_i48()
-                .checked_mul(b.as_i48())
-                .unwrap_or_else(|| (a.as_i48() as f64 * b.as_i48() as f64) as i64);
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_i48(r);
-            }
-        } else if a.is_float() && b.is_float() {
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() * b.as_f64());
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(dest) = a.mul(b, &vm.arena);
-            }
-        }
-        OpcodeResult::Next
-    }
-
-    /// Store local[a] = local[c] - local[b]. Operand `a` = dest, `b` = src2, `c` = src1.
-    #[opcode(code = 101, arity = 0, stack = "0 -> 0", reads = "b,c", writes = "a")]
-    fn op_sub_local_local_store(
-        _vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let l = &locals;
-        let dest = instr.a() as usize;
-        let src1 = instr.c() as usize;
-        let src2 = instr.b() as usize;
-        let a = unsafe { *l.get_unchecked(src1) };
-        let b = unsafe { *l.get_unchecked(src2) };
-        if a.tag() == TAG_INT && b.tag() == TAG_INT {
-            let r = a
-                .as_i48()
-                .checked_sub(b.as_i48())
-                .unwrap_or_else(|| (a.as_i48() as f64 - b.as_i48() as f64) as i64);
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_i48(r);
-            }
-        } else if a.is_float() && b.is_float() {
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() - b.as_f64());
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(dest) = a.sub_(b);
-            }
-        }
-        OpcodeResult::Next
-    }
-
-    /// Store local[a] = local[c] / local[b]. Operand `a` = dest, `b` = src2, `c` = src1.
-    #[opcode(code = 102, arity = 0, stack = "0 -> 0", reads = "b,c", writes = "a")]
-    fn op_div_local_local_store(
-        _vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let l = &locals;
-        let dest = instr.a() as usize;
-        let src1 = instr.c() as usize;
-        let src2 = instr.b() as usize;
-        let a = unsafe { *l.get_unchecked(src1) };
-        let b = unsafe { *l.get_unchecked(src2) };
-        if a.tag() == TAG_INT && b.tag() == TAG_INT {
-            let r = if b.as_i48() != 0 {
-                a.as_i48() / b.as_i48()
+            if val < limit {
+                OpcodeResult::Next
             } else {
-                0
+                // SAFETY: frame at `top` is active during dispatch.
+                OpcodeResult::Jump(vm.frames[top].code().wide_operands[instr.c() as usize] as u32)
+            }
+        }
+
+        /// If local[a] == b: fall through, else jump to the wide-operand target.
+        ///
+        /// Fuses `if $x == N { ... }`, the shape used by base cases in recursive
+        /// benchmarks.
+        #[opcode(code = 104, arity = 0, stack = "0 -> 0", branch = "wide", reads = "a")]
+        fn op_if_eq_int(vm: &mut VM, locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
+            let slot = instr.a() as usize;
+            let limit = instr.b() as i32 as i64;
+            let v = unsafe { *locals.get_unchecked(slot) };
+            let eq = if v.is_int() {
+                v.as_i48() == limit
+            } else {
+                v.eq_(Value::from_i48(limit))
             };
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_i48(r);
-            }
-        } else if a.is_float() && b.is_float() {
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() / b.as_f64());
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(dest) = a.div_(b);
+            if eq {
+                OpcodeResult::Next
+            } else {
+                // SAFETY: frame at `top` is active during dispatch.
+                OpcodeResult::Jump(vm.frames[top].code().wide_operands[instr.c() as usize] as u32)
             }
         }
-        OpcodeResult::Next
-    }
 
-    /// While local[a] < local[b]: continue, else jump to exit. Operand `a` = left, `b` = right, `c` = exit_wide_idx.
-    #[opcode(
-        code = 103,
-        arity = 0,
-        stack = "0 -> 0",
-        branch = "wide",
-        reads = "a,b"
-    )]
-    fn op_while_lt_local(
-        vm: &mut VM,
-        locals: LocalSlice,
-        top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let f = &mut vm.frames[top];
-        let l = &locals;
-        let left = instr.a() as usize;
-        let right = instr.b() as usize;
-        let exit_wide_idx = instr.c() as usize;
-        let a = unsafe { *l.get_unchecked(left) };
-        let b = unsafe { *l.get_unchecked(right) };
-        let cond = if a.is_int() && b.is_int() {
-            a.as_i48() < b.as_i48()
-        } else if a.is_float() && b.is_float() {
-            a.as_f64() < b.as_f64()
-        } else {
-            false
-        };
-        if cond {
-            OpcodeResult::Next
-        } else {
-            // SAFETY: frame at `top` is active during dispatch.
-            let exit_ip = f.code().wide_operands[exit_wide_idx] as u32;
-            OpcodeResult::Jump(exit_ip)
+        /// While local[a] < b: continue, else jump to exit. Operand `a` = slot, `b` = limit, `c` = exit_wide_idx.
+        #[opcode(code = 95, arity = 0, stack = "0 -> 0", branch = "wide", reads = "a")]
+        fn op_while_lt_int(
+            vm: &mut VM,
+            locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let f = &mut vm.frames[top];
+            let slot = instr.a() as usize;
+            let limit = instr.b() as i32 as i64;
+            let exit_wide_idx = instr.c() as usize;
+            let v = unsafe { *locals.get_unchecked(slot) };
+            let val = if v.tag() == TAG_INT {
+                v.as_i48()
+            } else {
+                v.as_int()
+            };
+            if val < limit {
+                OpcodeResult::Next
+            } else {
+                // SAFETY: frame at `top` is active during dispatch.
+                let exit_ip = f.code().wide_operands[exit_wide_idx] as u32;
+                OpcodeResult::Jump(exit_ip)
+            }
+        }
+
+        /// While local[a] < wide_operands[b]: continue, else jump to wide_operands[c].
+        ///
+        /// Same as [`OP_WHILE_LT_INT`] but the limit does not fit in 16 bits; the
+        /// exit target stays in `c` so the branch metadata is unchanged.
+        #[opcode(code = 69, arity = 0, stack = "0 -> 0", branch = "wide", reads = "a")]
+        fn op_while_lt_int_wide(
+            vm: &mut VM,
+            locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let f = &mut vm.frames[top];
+            let slot = instr.a() as usize;
+            let limit = f.code().wide_operands[instr.b() as usize];
+            let exit_wide_idx = instr.c() as usize;
+            let v = unsafe { *locals.get_unchecked(slot) };
+            let val = if v.tag() == TAG_INT {
+                v.as_i48()
+            } else {
+                v.as_int()
+            };
+            if val < limit {
+                OpcodeResult::Next
+            } else {
+                // SAFETY: frame at `top` is active during dispatch.
+                let exit_ip = f.code().wide_operands[exit_wide_idx] as u32;
+                OpcodeResult::Jump(exit_ip)
+            }
+        }
+        /// While local[a] < local[b]: continue, else jump to exit. Operand `a` = left, `b` = right, `c` = exit_wide_idx.
+        #[opcode(
+            code = 103,
+            arity = 0,
+            stack = "0 -> 0",
+            branch = "wide",
+            reads = "a,b"
+        )]
+        pub(super) fn op_while_lt_local(
+            vm: &mut VM,
+            locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let f = &mut vm.frames[top];
+            let l = &locals;
+            let left = instr.a() as usize;
+            let right = instr.b() as usize;
+            let exit_wide_idx = instr.c() as usize;
+            let a = unsafe { *l.get_unchecked(left) };
+            let b = unsafe { *l.get_unchecked(right) };
+            let cond = if a.is_int() && b.is_int() {
+                a.as_i48() < b.as_i48()
+            } else if a.is_float() && b.is_float() {
+                a.as_f64() < b.as_f64()
+            } else {
+                false
+            };
+            if cond {
+                OpcodeResult::Next
+            } else {
+                // SAFETY: frame at `top` is active during dispatch.
+                let exit_ip = f.code().wide_operands[exit_wide_idx] as u32;
+                OpcodeResult::Jump(exit_ip)
+            }
         }
     }
 
-    /// Store local[a] = local[c][local[b]]. Operand `a` = dest, `b` = idx_slot, `c` = arr_slot.
-    #[opcode(code = 105, arity = 0, stack = "0 -> 0", reads = "b,c", writes = "a")]
-    fn op_get_index_local_local_store(
-        _vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let dest = instr.a() as usize;
-        let idx_slot = instr.b() as usize;
-        let arr_slot = instr.c() as usize;
+    mod fused_container {
+        use super::*;
 
-        // Read locals first (no mutable borrow on vm yet)
-        let target = unsafe { *locals.get_unchecked(arr_slot) };
-        let idx = unsafe { *locals.get_unchecked(idx_slot) };
+        /// Store local[a] = local[c][local[b]]. Operand `a` = dest, `b` = idx_slot, `c` = arr_slot.
+        #[opcode(code = 105, arity = 0, stack = "0 -> 0", reads = "b,c", writes = "a")]
+        fn op_get_index_local_local_store(
+            _vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let dest = instr.a() as usize;
+            let idx_slot = instr.b() as usize;
+            let arr_slot = instr.c() as usize;
 
-        let result = if let Some(arr) = target.as_array() {
-            // Array indexing — never cached
-            let i = idx.as_int();
-            let i = if i < 0 { arr.len() as i64 + i } else { i };
-            arr.get(i as usize).copied().unwrap_or(Value::nil())
-        } else if let Some(map_obj) = target.as_map() {
-            if idx.as_str().is_some() {
-                map_obj.get_fast_value(idx).unwrap_or(Value::nil())
+            // Read locals first (no mutable borrow on vm yet)
+            let target = unsafe { *locals.get_unchecked(arr_slot) };
+            let idx = unsafe { *locals.get_unchecked(idx_slot) };
+
+            let result = if let Some(arr) = target.as_array() {
+                // Array indexing — never cached
+                let i = idx.as_int();
+                let i = if i < 0 { arr.len() as i64 + i } else { i };
+                arr.get(i as usize).copied().unwrap_or(Value::nil())
+            } else if let Some(map_obj) = target.as_map() {
+                if idx.as_str().is_some() {
+                    map_obj.get_fast_value(idx).unwrap_or(Value::nil())
+                } else {
+                    Value::nil()
+                }
             } else {
                 Value::nil()
+            };
+            unsafe {
+                *locals.get_unchecked_mut(dest) = result;
             }
-        } else {
-            Value::nil()
-        };
-        unsafe {
-            *locals.get_unchecked_mut(dest) = result;
+            OpcodeResult::Next
         }
-        OpcodeResult::Next
+
+        /// Store local[a] = local[c].(string_table[b]). Operand `a` = dest, `b` = str_idx, `c` = obj_slot.
+        #[opcode(code = 106, arity = 0, stack = "0 -> 0", reads = "c", writes = "a")]
+        fn op_get_field_local_store(
+            vm: &mut VM,
+            locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let dest = instr.a() as usize;
+            let str_idx = instr.b() as usize;
+            let obj_slot = instr.c() as usize;
+
+            // Read the object and key before borrowing vm mutably
+            let obj = unsafe { *locals.get_unchecked(obj_slot) };
+            // SAFETY: frame at `top` is active during dispatch.
+            let field_val = vm.frames[top].code().string_values[str_idx];
+
+            let result = if let Some(map_obj) = obj.as_map() {
+                map_obj.get_fast_value(field_val).unwrap_or(Value::nil())
+            } else {
+                Value::nil()
+            };
+            unsafe {
+                *locals.get_unchecked_mut(dest) = result;
+            }
+            OpcodeResult::Next
+        }
+
+        /// Store local[a] = local[a] + local[c].field[b]. Operand `a` = dest, `b` = string idx, `c` = object slot.
+        ///
+        /// Fuses `$s = $s + $obj.field` (and `$s = $s + $obj["field"]`, which the
+        /// compiler lowers to the same shape) into a single dispatch.
+        #[opcode(code = 124, arity = 0, stack = "0 -> 0", reads = "a,c", writes = "a")]
+        fn op_add_field_local_store(
+            vm: &mut VM,
+            locals: LocalSlice,
+            top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            use crate::runtime::value::TAG_INT;
+            let dest = instr.a() as usize;
+            let field_idx = instr.b() as usize;
+            let obj_slot = instr.c() as usize;
+
+            // SAFETY: frame at `top` is active during dispatch.
+            let frame = &vm.frames[top];
+            let obj = unsafe { *locals.get_unchecked(obj_slot) };
+            let key = frame.code().string_values[field_idx];
+            let b = if let Some(map_obj) = obj.as_map() {
+                map_obj.get_fast_value(key).unwrap_or(Value::nil())
+            } else {
+                Value::nil()
+            };
+
+            let l = &locals;
+            let a = unsafe { *l.get_unchecked(dest) };
+            if a.tag() == TAG_INT && b.tag() == TAG_INT {
+                let r = a
+                    .as_i48()
+                    .checked_add(b.as_i48())
+                    .unwrap_or_else(|| (a.as_i48() as f64 + b.as_i48() as f64) as i64);
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_i48(r);
+                }
+            } else if a.is_float() && b.is_float() {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() + b.as_f64());
+                }
+            } else {
+                unsafe {
+                    *l.get_unchecked_mut(dest) = a.add(b, &vm.arena);
+                }
+            }
+            OpcodeResult::Next
+        }
+
+        /// Append local[b] to array in local[a]. Operand `a` = arr_slot, `b` = val_slot.
+        #[opcode(code = 109, arity = 0, stack = "0 -> 0", reads = "a,b", writes = "a")]
+        fn op_array_push_local(
+            _vm: &mut VM,
+            locals: LocalSlice,
+            _top: usize,
+            instr: Instr,
+        ) -> OpcodeResult {
+            let l = &locals;
+            let arr_slot = instr.a() as usize;
+            let val_slot = instr.b() as usize;
+            let val = unsafe { *l.get_unchecked(val_slot) };
+            let arr = unsafe { *l.get_unchecked(arr_slot) };
+            if let Some(arr_mut) = arr.as_array_mut() {
+                arr_mut.push(val);
+            }
+            arr.bump_array_version();
+            unsafe {
+                *l.get_unchecked_mut(arr_slot) = arr;
+            }
+            OpcodeResult::Next
+        }
     }
 
-    /// Store local[a] = local[c].(string_table[b]). Operand `a` = dest, `b` = str_idx, `c` = obj_slot.
-    #[opcode(code = 106, arity = 0, stack = "0 -> 0", reads = "c", writes = "a")]
-    fn op_get_field_local_store(
-        vm: &mut VM,
-        locals: LocalSlice,
-        top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let dest = instr.a() as usize;
-        let str_idx = instr.b() as usize;
-        let obj_slot = instr.c() as usize;
+    /// Shared helpers for the opcode groups below.
+    mod helpers {
+        use super::*;
 
-        // Read the object and key before borrowing vm mutably
-        let obj = unsafe { *locals.get_unchecked(obj_slot) };
-        // SAFETY: frame at `top` is active during dispatch.
-        let field_val = vm.frames[top].code().string_values[str_idx];
-
-        let result = if let Some(map_obj) = obj.as_map() {
-            map_obj.get_fast_value(field_val).unwrap_or(Value::nil())
-        } else {
-            Value::nil()
-        };
-        unsafe {
-            *locals.get_unchecked_mut(dest) = result;
+        /// Does any registered record with this name fit the value's shape?
+        ///
+        /// Records are maps and identity is structural, so a value matches a record
+        /// when it carries every declared field. Cost is O(registered types), which
+        /// is why this is only used on the `is` path.
+        pub(super) fn record_named(vm: &VM, value: Value, name: &str) -> bool {
+            let Some(map) = value.as_map() else {
+                return false;
+            };
+            vm.type_entries.iter().any(|desc| {
+                desc.name == name
+                    && desc.kind == crate::runtime::value::TypeKind::Record
+                    && !desc.fields.is_empty()
+                    && desc.fields.iter().all(|f| map.contains_key(f.name))
+            })
         }
-        OpcodeResult::Next
-    }
 
-    /// Store local[a] = local[c] % local[b]. Operand `a` = dest, `b` = src2, `c` = src1.
-    #[opcode(code = 107, arity = 0, stack = "0 -> 0", reads = "b,c", writes = "a")]
-    fn op_mod_local_local_store(
-        _vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let l = &locals;
-        let dest = instr.a() as usize;
-        let src2 = instr.b() as usize;
-        let src1 = instr.c() as usize;
-        let a = unsafe { *l.get_unchecked(src1) };
-        let b = unsafe { *l.get_unchecked(src2) };
-        if a.tag() == TAG_INT && b.tag() == TAG_INT {
-            let bi = b.as_i48();
-            let r = if bi != 0 { a.as_i48() % bi } else { 0 };
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_i48(r);
-            }
-        } else if a.is_float() && b.is_float() {
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() % b.as_f64());
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(dest) = a.mod_(b);
-            }
+        /// Does any registered record fitting the value's shape declare `cap`?
+        ///
+        /// "Any" rather than "the most specific": a value that satisfies two
+        /// records keeps the capabilities of both.
+        pub(super) fn record_has_cap(
+            vm: &VM,
+            value: Value,
+            cap: crate::runtime::primitives::Cap,
+        ) -> bool {
+            let Some(map) = value.as_map() else {
+                return false;
+            };
+            vm.type_entries.iter().any(|desc| {
+                desc.kind == crate::runtime::value::TypeKind::Record
+                    && !desc.fields.is_empty()
+                    && desc.fields.iter().all(|f| map.contains_key(f.name))
+                    && desc.caps.has(cap)
+            })
         }
-        OpcodeResult::Next
-    }
 
-    /// Load constant directly to local slot. Operand `a` = slot, `b` = value/index, `c` = kind.
-    #[opcode(code = 108, arity = 0, stack = "0 -> 0", writes = "a")]
-    fn op_load_const_local(
-        vm: &mut VM,
-        locals: LocalSlice,
-        top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let slot = instr.a() as usize;
-        let b = instr.b();
-        let kind = instr.c();
-        // SAFETY: frame at `top` is active during dispatch.
-        let code = vm.frames[top].code();
-        let val = match kind {
-            0 => Value::from_i48(b as i64),
-            1 => {
-                let bits = code.wide_operands[b as usize];
-                Value::from_f64(f64::from_bits(bits as u64))
+        // ── Batch 1: calls, fields, types, iteration ──
+
+        /// Runs a compiled integer function for a cached call site.
+        ///
+        /// Returns `None` when the cached callee has no native entry, when the
+        /// arity does not match, or when any argument is not an integer; the
+        /// caller then takes the ordinary interpreter path.
+        ///
+        /// The argument values are read and the frame is rebuilt **after** the
+        /// native call, so no borrow of the VM is live across it.
+        #[cfg(feature = "jit")]
+        #[inline(always)]
+        pub(super) fn try_jit_function(
+            vm: &mut VM,
+            slot: usize,
+            arg_start: usize,
+            n: usize,
+        ) -> Option<OpcodeResult> {
+            let f = vm.jit_call_cache[slot]?;
+            if n != f.nparams as usize {
+                return None;
             }
-            2 => {
-                // Interned string constant: reuse the pre-built value instead
-                // of re-allocating the bytes on every execution.
-                code.string_values[b as usize]
+            let end = arg_start.checked_add(n)?;
+            let mut args = [0i64; 4];
+            for (i, v) in vm.stack.get(arg_start..end)?.iter().enumerate() {
+                if v.tag() != crate::runtime::value::TAG_INT {
+                    return None;
+                }
+                args[i] = v.as_i48();
             }
-            3 => Value::nil(),
-            4 => Value::bool(true),
-            5 => Value::bool(false),
-            6 => {
-                let v = code.wide_operands[b as usize];
-                Value::from_i48(v)
-            }
-            _ => Value::nil(),
-        };
-        let l = &locals;
-        unsafe {
-            *l.get_unchecked_mut(slot) = val;
+            // SAFETY: `JitFunction::func` is compiled with signature
+            // `(i64, i64, i64, i64) -> i64` and only integer arguments are passed.
+            let result = unsafe { (f.func)(args[0], args[1], args[2], args[3]) };
+            vm.stack.truncate(arg_start);
+            vm.push(Value::from_i48(result));
+            Some(OpcodeResult::Next)
         }
-        OpcodeResult::Next
-    }
 
-    /// Store local[a] = local[a] + local[c].field[b]. Operand `a` = dest, `b` = string idx, `c` = object slot.
-    ///
-    /// Fuses `$s = $s + $obj.field` (and `$s = $s + $obj["field"]`, which the
-    /// compiler lowers to the same shape) into a single dispatch.
-    #[opcode(code = 124, arity = 0, stack = "0 -> 0", reads = "a,c", writes = "a")]
-    fn op_add_field_local_store(
-        vm: &mut VM,
-        locals: LocalSlice,
-        top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let dest = instr.a() as usize;
-        let field_idx = instr.b() as usize;
-        let obj_slot = instr.c() as usize;
-
-        // SAFETY: frame at `top` is active during dispatch.
-        let frame = &vm.frames[top];
-        let obj = unsafe { *locals.get_unchecked(obj_slot) };
-        let key = frame.code().string_values[field_idx];
-        let b = if let Some(map_obj) = obj.as_map() {
-            map_obj.get_fast_value(key).unwrap_or(Value::nil())
-        } else {
-            Value::nil()
-        };
-
-        let l = &locals;
-        let a = unsafe { *l.get_unchecked(dest) };
-        if a.tag() == TAG_INT && b.tag() == TAG_INT {
-            let r = a
-                .as_i48()
-                .checked_add(b.as_i48())
-                .unwrap_or_else(|| (a.as_i48() as f64 + b.as_i48() as f64) as i64);
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_i48(r);
-            }
-        } else if a.is_float() && b.is_float() {
-            unsafe {
-                *l.get_unchecked_mut(dest) = Value::from_f64(a.as_f64() + b.as_f64());
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(dest) = a.add(b, &vm.arena);
-            }
+        /// Without the JIT feature there is nothing to enter.
+        #[cfg(not(feature = "jit"))]
+        #[inline(always)]
+        pub(super) fn try_jit_function(
+            _vm: &mut VM,
+            _slot: usize,
+            _arg_start: usize,
+            _n: usize,
+        ) -> Option<OpcodeResult> {
+            None
         }
-        OpcodeResult::Next
-    }
 
-    /// Append local[b] to array in local[a]. Operand `a` = arr_slot, `b` = val_slot.
-    #[opcode(code = 109, arity = 0, stack = "0 -> 0", reads = "a,b", writes = "a")]
-    fn op_array_push_local(
-        _vm: &mut VM,
-        locals: LocalSlice,
-        _top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        let l = &locals;
-        let arr_slot = instr.a() as usize;
-        let val_slot = instr.b() as usize;
-        let val = unsafe { *l.get_unchecked(val_slot) };
-        let arr = unsafe { *l.get_unchecked(arr_slot) };
-        if let Some(arr_mut) = arr.as_array_mut() {
-            arr_mut.push(val);
-        }
-        arr.bump_array_version();
-        unsafe {
-            *l.get_unchecked_mut(arr_slot) = arr;
-        }
-        OpcodeResult::Next
-    }
-
-    /// Add float constant to local. Operand `a` = slot, `b` = wide_operands index.
-    #[opcode(code = 110, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
-    fn op_add_float_local(
-        vm: &mut VM,
-        locals: LocalSlice,
-        top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        // SAFETY: frame at `top` is active during dispatch.
-        let frame = &vm.frames[top];
-        let f = f64::from_bits(frame.code().wide_operands[instr.b() as usize] as u64);
-        let l = &locals;
-        let idx = instr.a() as usize;
-        let v = unsafe { *l.get_unchecked(idx) };
-        if v.is_float() {
-            unsafe {
-                *l.get_unchecked_mut(idx) = Value::from_f64(v.as_f64() + f);
+        /// Hot path for named calls: callee and args are on the stack at `base..base+n+1`.
+        /// Returns immediately when the callee resolves to a function (fast path or cache hit).
+        /// Falls through to `call_from_stack_slow` for name resolution.
+        #[inline(always)]
+        pub(super) fn call_from_stack(vm: &mut VM, n: usize, base: usize) -> OpcodeResult {
+            let callee = vm.stack[base];
+            if let Some(f) = callee.as_func() {
+                return vm.enter_call_at(f, base, n);
             }
-        } else if v.tag() == TAG_INT {
-            unsafe {
-                *l.get_unchecked_mut(idx) = Value::from_f64(v.as_i48() as f64 + f);
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(idx) = v.add(Value::from_f64(f), &vm.arena);
-            }
-        }
-        OpcodeResult::Next
-    }
-
-    /// Subtract float constant from local. Operand `a` = slot, `b` = wide_operands index.
-    #[opcode(code = 111, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
-    fn op_sub_float_local(
-        vm: &mut VM,
-        locals: LocalSlice,
-        top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        // SAFETY: frame at `top` is active during dispatch.
-        let frame = &vm.frames[top];
-        let f = f64::from_bits(frame.code().wide_operands[instr.b() as usize] as u64);
-        let l = &locals;
-        let idx = instr.a() as usize;
-        let v = unsafe { *l.get_unchecked(idx) };
-        if v.is_float() {
-            unsafe {
-                *l.get_unchecked_mut(idx) = Value::from_f64(v.as_f64() - f);
-            }
-        } else if v.tag() == TAG_INT {
-            unsafe {
-                *l.get_unchecked_mut(idx) = Value::from_f64(v.as_i48() as f64 - f);
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(idx) = v.sub_(Value::from_f64(f));
-            }
-        }
-        OpcodeResult::Next
-    }
-
-    /// Multiply local by float constant. Operand `a` = slot, `b` = wide_operands index.
-    #[opcode(code = 112, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
-    fn op_mul_float_local(
-        vm: &mut VM,
-        locals: LocalSlice,
-        top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        // SAFETY: frame at `top` is active during dispatch.
-        let frame = &vm.frames[top];
-        let f = f64::from_bits(frame.code().wide_operands[instr.b() as usize] as u64);
-        let l = &locals;
-        let idx = instr.a() as usize;
-        let v = unsafe { *l.get_unchecked(idx) };
-        if v.is_float() {
-            unsafe {
-                *l.get_unchecked_mut(idx) = Value::from_f64(v.as_f64() * f);
-            }
-        } else if v.tag() == TAG_INT {
-            unsafe {
-                *l.get_unchecked_mut(idx) = Value::from_f64(v.as_i48() as f64 * f);
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(idx) = v.mul(Value::from_f64(f), &vm.arena);
-            }
-        }
-        OpcodeResult::Next
-    }
-
-    /// Divide local by float constant. Operand `a` = slot, `b` = wide_operands index.
-    #[opcode(code = 113, arity = 0, stack = "0 -> 0", reads = "a", writes = "a")]
-    fn op_div_float_local(
-        vm: &mut VM,
-        locals: LocalSlice,
-        top: usize,
-        instr: Instr,
-    ) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        // SAFETY: frame at `top` is active during dispatch.
-        let frame = &vm.frames[top];
-        let f = f64::from_bits(frame.code().wide_operands[instr.b() as usize] as u64);
-        let l = &locals;
-        let idx = instr.a() as usize;
-        let v = unsafe { *l.get_unchecked(idx) };
-        if v.is_float() {
-            unsafe {
-                *l.get_unchecked_mut(idx) = Value::from_f64(v.as_f64() / f);
-            }
-        } else if v.tag() == TAG_INT {
-            unsafe {
-                *l.get_unchecked_mut(idx) = Value::from_f64(v.as_i48() as f64 / f);
-            }
-        } else {
-            unsafe {
-                *l.get_unchecked_mut(idx) = v.div_(Value::from_f64(f));
-            }
-        }
-        OpcodeResult::Next
-    }
-
-    /// Test local[a] % b == c. Operand `a` = slot, `b` = divisor, `c` = eq_val.
-    #[opcode(code = 114, arity = 0, stack = "0 -> 1", reads = "a")]
-    fn op_mod_eq_int(vm: &mut VM, locals: LocalSlice, _top: usize, instr: Instr) -> OpcodeResult {
-        use crate::runtime::value::TAG_INT;
-        let l = &locals;
-        let idx = instr.a() as usize;
-        let divisor = instr.b() as i64;
-        let eq_val = instr.c() as i64;
-        let v = unsafe { *l.get_unchecked(idx) };
-        let result = if v.tag() == TAG_INT && divisor != 0 {
-            let val = v.as_i48();
-            let mod_result = val % divisor;
-            Value::bool(mod_result == eq_val)
-        } else {
-            let mod_val = v.mod_(Value::from_i48(divisor));
-            Value::bool(mod_val.eq_(Value::from_i48(eq_val)))
-        };
-        vm.push(result);
-        OpcodeResult::Next
-    }
-
-    /// Resolves `$super`: the parent record of `value`, or `nil`.
-    ///
-    /// XCL records are plain maps, so the type is recovered by finding the most
-    /// specific registered record whose fields are all present. The parent's
-    /// fields are then copied out of the value.
-    fn parent_record(vm: &VM, value: Value) -> Value {
-        use crate::runtime::value::{SUBTYPE_USER_BASE, TypeDescriptor, TypeKind, VARIANT_DEFAULT};
-
-        let Some(map) = value.as_map() else {
-            return Value::nil();
-        };
-
-        let mut best: Option<&TypeDescriptor> = None;
-        let mut best_fields = 0usize;
-        for desc in vm.type_entries.iter() {
-            let desc = *desc;
-            if desc.kind == TypeKind::Record
-                && !desc.fields.is_empty()
-                && desc.fields.len() > best_fields
-                && desc.fields.iter().all(|f| map.contains_key(f.name))
+            let slot = ((callee.0 >> 4) as usize) & crate::runtime::vm::CALL_CACHE_MASK;
+            if callee.0 == vm.call_cache[slot].0.0
+                && let Some(f) = vm.call_cache[slot].1.as_func()
             {
-                best_fields = desc.fields.len();
-                best = Some(desc);
+                return vm.enter_call_at(f, base, n);
             }
+            call_from_stack_slow(vm, n, base, callee, slot)
         }
 
-        let Some(parent_name) = best.and_then(|desc| desc.parent_type) else {
-            return Value::nil();
-        };
-        let Some(parent) = vm.type_entries.iter().find(|desc| desc.name == parent_name) else {
-            return Value::nil();
-        };
-
-        let mut fields = crate::HashMap::new();
-        for field in parent.fields {
-            if let Some(v) = map.get(field.name) {
-                fields.insert(field.name.to_string(), *v);
-            }
+        /// Cold path for `OP_CALL`: the callee is on the stack below the args.
+        #[cold]
+        #[inline(never)]
+        pub(super) fn call_from_stack_slow(
+            vm: &mut VM,
+            n: usize,
+            base: usize,
+            callee: Value,
+            slot: usize,
+        ) -> OpcodeResult {
+            let stack_len = vm.stack.len();
+            let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(n);
+            args.extend_from_slice(&vm.stack[base + 1..stack_len]);
+            vm.stack.truncate(base);
+            resolve_name_slow(vm, callee, &args, slot)
         }
-        Value::from_map_boxed_typed_v(fields, SUBTYPE_USER_BASE, VARIANT_DEFAULT)
-    }
 
-    /// Pushes a read-only special variable.
-    ///
-    /// Operand `a` = positional index (`$1..$N`), operand `c` = kind
-    /// (`runtime::opcode::special_var_kind`).
-    #[opcode(code = 118, arity = 0, stack = "0 -> 1")]
-    fn op_special_var(vm: &mut VM, _locals: LocalSlice, top: usize, instr: Instr) -> OpcodeResult {
-        use crate::runtime::opcode::special_var_kind as sv;
+        /// Cold path for `OP_CALL_NAME`: args start at `arg_start` and there is no
+        /// callee word on the stack to skip.
+        #[cold]
+        #[inline(never)]
+        pub(super) fn call_name_slow(
+            vm: &mut VM,
+            n: usize,
+            arg_start: usize,
+            callee: Value,
+            slot: usize,
+        ) -> OpcodeResult {
+            let stack_len = vm.stack.len();
+            let mut args: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(n);
+            args.extend_from_slice(&vm.stack[arg_start..stack_len]);
+            vm.stack.truncate(arg_start);
+            resolve_name_slow(vm, callee, &args, slot)
+        }
 
-        let index = instr.a() as usize;
-        let value = match instr.c() {
-            sv::SCRIPT_NAME => Value::from_str_boxed(vm.script_name.to_string()),
-            sv::POSITIONAL => {
-                // $1 maps to argv[0], $2 to argv[1], etc.
-                let arr_idx = if index > 0 { index - 1 } else { 0 };
-                vm.frames[top]
-                    .argv
-                    .get(arr_idx)
-                    .copied()
-                    .unwrap_or(Value::nil())
-            }
-            sv::ARG_COUNT => Value::from_i48(vm.frames[top].argv.len() as i64),
-            sv::ARGS_ARRAY => Value::from_array(vm.frames[top].argv.clone(), &vm.arena),
-            sv::ARGS_JOINED => {
-                let mut joined = String::new();
-                for (i, arg) in vm.frames[top].argv.iter().enumerate() {
-                    if i > 0 {
-                        joined.push(' ');
+        /// Resolves a callee name and invokes it. The operand stack is already
+        /// truncated to the slot the result should occupy.
+        #[cold]
+        #[inline(never)]
+        pub(super) fn resolve_name_slow(
+            vm: &mut VM,
+            callee: Value,
+            args: &[Value],
+            slot: usize,
+        ) -> OpcodeResult {
+            if let Some(name) = callee.as_str() {
+                // 1. Check global builtins first
+                if let Some(&idx) = vm.global_index.get(name) {
+                    let gt_len = vm.global_table.len();
+                    if (idx as usize) < gt_len {
+                        // Index points into global_table (builtins)
+                        if let Some(Some(impl_)) = vm.global_table.get(idx as usize) {
+                            let impl_copy = *impl_;
+                            let result = impl_copy.call(vm, &args);
+                            vm.push(result);
+                            return OpcodeResult::Next;
+                        }
                     }
-                    joined.push_str(&arg.as_string());
+                    // Check user-defined globals (indices offset by global_table.len())
+                    if idx >= gt_len as u32 {
+                        let globals_idx = (idx - gt_len as u32) as usize;
+                        if globals_idx < vm.globals.len() {
+                            let func = vm.globals[globals_idx];
+                            if let Some(f) = func.as_func() {
+                                vm.cache_callee(slot, callee, func);
+                                return vm.enter_call_from_op(f, &args);
+                            }
+                        }
+                    }
                 }
-                Value::from_str_boxed(joined)
-            }
-            // `$self` is the receiver. Method calls pass the receiver as the
-            // first argument, so the frame's `argv[0]` is the receiver. The
-            // root frame is not a call and has no receiver.
-            sv::SELF => {
-                if top == 0 {
-                    Value::nil()
-                } else {
-                    vm.frames[top].argv.first().copied().unwrap_or(Value::nil())
+                // 2. Check domain methods (e.g. "io.read") — only for two-part names
+                if name.split('.').count() == 2 {
+                    if let Some(dot_pos) = name.find('.') {
+                        let domain = &name[..dot_pos];
+                        let method = &name[dot_pos + 1..];
+                        if let Some(impl_) = vm.resolve_domain_method(domain, method) {
+                            let impl_copy = *impl_;
+                            let result = impl_copy.call(vm, &args);
+                            vm.push(result);
+                            return OpcodeResult::Next;
+                        }
+                    }
+                }
+                // 2b. Domain expansion
+                if vm.domain_index.contains_key(name) {
+                    if let Some((func_idx, func)) = args
+                        .iter()
+                        .enumerate()
+                        .find_map(|(i, a)| a.as_func().map(|f| (i, f.clone())))
+                    {
+                        let call_args: Vec<Value> = args
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| *i != func_idx)
+                            .map(|(_, v)| *v)
+                            .collect();
+                        let &didx = vm.domain_index.get(name).unwrap();
+                        let slot = &vm.domain_table[didx as usize];
+                        let mut saved: Vec<(Box<str>, Option<u32>)> = Vec::new();
+                        for (method_name, &midx) in slot.index.iter() {
+                            let existing = vm
+                                .global_index
+                                .insert(method_name.clone(), vm.global_table.len() as u32);
+                            saved.push((method_name.clone(), existing));
+                            let impl_ = slot.methods[midx as usize];
+                            vm.global_table.push(impl_);
+                        }
+                        let func_value = Value::from_func(func.clone(), &vm.arena);
+                        let result = vm.call_value(func_value, &call_args);
+                        for (method_name, existing) in saved.into_iter().rev() {
+                            vm.global_table.pop();
+                            if let Some(idx) = existing {
+                                vm.global_index.insert(method_name.clone(), idx);
+                            } else {
+                                vm.global_index.remove(&method_name);
+                            }
+                        }
+                        vm.push(result);
+                        return OpcodeResult::Next;
+                    }
+                    if let Some((_map_idx, map)) = args
+                        .iter()
+                        .enumerate()
+                        .find_map(|(i, a)| a.as_map().map(|m| (i, m)))
+                    {
+                        let &didx = vm.domain_index.get(name).unwrap();
+                        let calls: Vec<(u32, Value)> = vm.domain_table[didx as usize]
+                            .index
+                            .iter()
+                            .filter_map(|(method_name, &midx)| {
+                                map.get(method_name).map(|v| (midx, *v))
+                            })
+                            .collect();
+                        let mut last_result = Value::nil();
+                        for (midx, value) in calls {
+                            let impl_ = vm.domain_table[didx as usize].methods[midx as usize]
+                                .as_ref()
+                                .copied()
+                                .unwrap();
+                            last_result = impl_.call(vm, &[value]);
+                        }
+                        vm.push(last_result);
+                        return OpcodeResult::Next;
+                    }
+                }
+                // 3. Fallback: search all globals by name
+                let found = vm
+                    .globals
+                    .iter()
+                    .find_map(|g| g.as_func().filter(|f| &*f.name == name).map(|_| *g));
+                if let Some(func_val) = found {
+                    vm.cache_callee(slot, callee, func_val);
+                    if let Some(f) = func_val.as_func() {
+                        return vm.enter_call_from_op(f, &args);
+                    }
                 }
             }
-            sv::SUPER => {
-                let this = if top == 0 {
-                    Value::nil()
-                } else {
-                    vm.frames[top].argv.first().copied().unwrap_or(Value::nil())
-                };
-                parent_record(vm, this)
+            vm.push(Value::nil());
+            OpcodeResult::Next
+        }
+
+        /// Resolves `$super`: the parent record of `value`, or `nil`.
+        ///
+        /// XCL records are plain maps, so the type is recovered by finding the most
+        /// specific registered record whose fields are all present. The parent's
+        /// fields are then copied out of the value.
+        pub(super) fn parent_record(vm: &VM, value: Value) -> Value {
+            use crate::runtime::value::{
+                SUBTYPE_USER_BASE, TypeDescriptor, TypeKind, VARIANT_DEFAULT,
+            };
+
+            let Some(map) = value.as_map() else {
+                return Value::nil();
+            };
+
+            let mut best: Option<&TypeDescriptor> = None;
+            let mut best_fields = 0usize;
+            for desc in vm.type_entries.iter() {
+                let desc = *desc;
+                if desc.kind == TypeKind::Record
+                    && !desc.fields.is_empty()
+                    && desc.fields.len() > best_fields
+                    && desc.fields.iter().all(|f| map.contains_key(f.name))
+                {
+                    best_fields = desc.fields.len();
+                    best = Some(desc);
+                }
             }
-            _ => Value::nil(),
-        };
-        vm.push(value);
-        OpcodeResult::Next
+
+            let Some(parent_name) = best.and_then(|desc| desc.parent_type) else {
+                return Value::nil();
+            };
+            let Some(parent) = vm.type_entries.iter().find(|desc| desc.name == parent_name) else {
+                return Value::nil();
+            };
+
+            // Records are small: build the parent inline instead of a `HashMap` plus
+            // one `String` per key (this runs for every `$super` read).
+            let fields = parent.fields;
+            if fields.len() <= crate::runtime::value::SMALL_MAP_MAX {
+                let mut entries: smallvec::SmallVec<
+                    [(Value, Value, u64); crate::runtime::value::SMALL_MAP_MAX],
+                > = smallvec::SmallVec::with_capacity(fields.len());
+                for field in fields {
+                    if let Some(v) = map.get(field.name) {
+                        entries.push((
+                            Value::from_str_ref(field.name, &vm.arena),
+                            *v,
+                            fast_hash(field.name.as_bytes()),
+                        ));
+                    }
+                }
+                return Value::from_small_map_typed(
+                    entries,
+                    SUBTYPE_USER_BASE,
+                    VARIANT_DEFAULT,
+                    &vm.arena,
+                );
+            }
+
+            let mut fields_map = crate::HashMap::with_capacity(fields.len());
+            for field in fields {
+                if let Some(v) = map.get(field.name) {
+                    fields_map.insert(field.name.to_string(), *v);
+                }
+            }
+            Value::from_map_boxed_typed_v(fields_map, SUBTYPE_USER_BASE, VARIANT_DEFAULT)
+        }
     }
 }

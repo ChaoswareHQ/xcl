@@ -74,6 +74,12 @@ use crate::HashMap;
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
 
+/// Script name used by `$0` when none was supplied.
+pub const DEFAULT_SCRIPT_NAME: &str = "<input>";
+
+/// Number of entries in the module-space opcode table.
+const MODULE_COUNT: usize = crate::runtime::opcode::layout::MODULE_COUNT;
+
 // Thread-local bump arena pool for reusing memory across VM instances.
 // Holds at most one `Bump` per thread. When a `VM` is dropped, its arena is
 // reset and returned to this pool (if small enough) so the next `VM::new()`
@@ -83,6 +89,38 @@ std::thread_local! {
     static ARENA_POOL: core::cell::RefCell<Option<bumpalo::Bump>> =
         const { core::cell::RefCell::new(None) };
 }
+
+/// Container buffers recycled with the arena.
+///
+/// A `VM` owns four heap buffers that are empty or near-empty in a short run:
+/// the operand stack, the shared register file, the frame stack, and the
+/// global table. Creating and dropping them costs four allocator round trips
+/// per VM, which dominates programs whose whole run is a handful of calls.
+/// They are returned to a thread-local slot on `Drop` and taken back by the
+/// next `VM::new()` on the same thread, exactly like [`ARENA_POOL`].
+#[cfg(feature = "std")]
+struct VmBuffers {
+    stack: Vec<Value>,
+    regs: Vec<Value>,
+    frames: Vec<Frame>,
+    globals: Vec<Value>,
+}
+
+#[cfg(feature = "std")]
+std::thread_local! {
+    static BUFFER_POOL: core::cell::RefCell<Option<VmBuffers>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+/// Largest register/stack capacity worth keeping alive between VMs.
+///
+/// 8K values is 128 KiB per buffer; a program that needed more is re-allocated
+/// rather than pinning a large block on the thread forever.
+#[cfg(feature = "std")]
+const POOL_MAX_VALUES: usize = 8192;
+/// Largest frame stack worth keeping alive between VMs (`Frame` is ~144 B).
+#[cfg(feature = "std")]
+const POOL_MAX_FRAMES: usize = 256;
 
 use crate::bytecode::*;
 use crate::runtime::value::{
@@ -218,7 +256,14 @@ pub(crate) struct Frame {
     stack_base: u32,
     /// Deferred closures to run when this frame returns (LIFO order).
     defer_stack: Vec<Value>,
+    /// First call argument, always stored: `$self` and `$super` need it even
+    /// when the body never asks for `$1`..`$#`, so those functions no longer
+    /// allocate an `argv` vector per call.
+    arg0: Value,
     /// Positional arguments passed into this frame (`$1`, `$#`, `$@`, `$*`).
+    ///
+    /// Filled only when the body actually uses one of those forms; `$self`,
+    /// `$super`, and `$0` read `arg0` / the script name instead.
     argv: Vec<Value>,
 }
 
@@ -313,219 +358,12 @@ fn frame_code_bounds(frame: &Frame) -> (*const Instr, usize) {
     (code.instructions.as_ptr(), code.instructions.len())
 }
 
-/// A loop compiled to native code (feature `jit`).
-#[cfg(feature = "jit")]
-#[derive(Clone, Copy)]
-struct JitEntry {
-    /// Interpreter ip to resume at after a normal exit.
-    exit_ip: usize,
-    /// Native entry point.
-    func: xcl_jit::LoopFn,
-    /// First index into `JitUnit::accesses`.
-    access_start: u32,
-    /// Number of access plans for this loop.
-    access_len: u32,
-}
-
-/// All native loops compiled for one bytecode unit.
-#[cfg(feature = "jit")]
-struct JitUnit {
-    entries: Vec<JitEntry>,
-    /// `shadow[ip]` is `0` when no loop starts at `ip`, otherwise `index + 1`.
-    /// A flat table keeps the dispatch check to a bounds test and one load.
-    shadow: Vec<u32>,
-    /// Memory-access plans, in entry order.
-    accesses: Vec<xcl_jit::AccessPlan>,
-    /// One runtime cache per compiled loop.
-    caches: Vec<xcl_jit::LoopCache>,
-}
-
 /// The plan passed to the dispatch loop.
 #[cfg(feature = "jit")]
 type JitPlan<'a> = Option<&'a mut JitUnit>;
 /// Without the feature, the dispatch loop has no plan at all.
 #[cfg(not(feature = "jit"))]
 type JitPlan<'a> = Option<&'a mut ()>;
-
-/// The maximum number of compiled loops tracked per unit. The bail-out mask is
-/// a `u64`, one bit per loop.
-#[cfg(feature = "jit")]
-const JIT_MAX_LOOPS: usize = 64;
-
-/// Finds and compiles every hot integer loop of `bc`.
-///
-/// The compiled code is cached by `xcl-jit` for the life of the process, so
-/// repeated `run` calls on the same bytecode pay the compile cost once.
-#[cfg(feature = "jit")]
-fn prepare_jit(bc: &Bytecode) -> Option<JitUnit> {
-    // Cheap rejection first: most units have no fused `while` header at all, so
-    // they must not pay for an instruction copy or a Cranelift lookup.
-    let has_while = bc.instructions.iter().any(|i| {
-        matches!(
-            i.op(),
-            crate::runtime::vm::ops::consts::OP_WHILE_LT_INT
-                | crate::runtime::vm::ops::consts::OP_WHILE_LT_INT_WIDE
-        )
-    });
-    if !has_while {
-        return None;
-    }
-    let code: Vec<u64> = bc.instructions.iter().map(|i| i.0).collect();
-    let specs = xcl_jit::find_loops(&code, &bc.wide_operands);
-    if specs.is_empty() {
-        return None;
-    }
-    let nlocals = bc.local_names.len().max(16);
-    let mut entries = Vec::with_capacity(specs.len().min(JIT_MAX_LOOPS));
-    let mut accesses: Vec<xcl_jit::AccessPlan> = Vec::new();
-    let mut caches: Vec<xcl_jit::LoopCache> = Vec::new();
-    let mut shadow = vec![0u32; code.len()];
-    for spec in specs.iter().take(JIT_MAX_LOOPS) {
-        if let Some(compiled) = xcl_jit::ensure_compiled(&code, &bc.wide_operands, spec, nlocals) {
-            let idx = entries.len();
-            let access_start = accesses.len() as u32;
-            accesses.extend_from_slice(&compiled.accesses);
-            entries.push(JitEntry {
-                exit_ip: compiled.exit_ip,
-                func: compiled.func,
-                access_start,
-                access_len: compiled.accesses.len() as u32,
-            });
-            caches.push(xcl_jit::LoopCache::default());
-            shadow[spec.start] = (idx + 1) as u32;
-        }
-    }
-    if entries.is_empty() {
-        return None;
-    }
-    Some(JitUnit {
-        entries,
-        shadow,
-        accesses,
-        caches,
-    })
-}
-
-/// Compiles integer-only functions (for example `fib`) into native entries.
-///
-/// The eligible set is small and strict: parameter-only locals, forward
-/// branches, integer arithmetic, and exact-arity calls to other compiled
-/// functions. Everything else stays on the interpreter.
-#[cfg(feature = "jit")]
-fn prepare_jit_functions(bc: &Bytecode) -> HashMap<Box<str>, xcl_jit::JitFunction> {
-    let mut owned: Vec<(&str, Vec<u64>, Vec<i64>, &[Box<str>], usize, usize)> = Vec::new();
-    for (name, func) in bc.user_functions.iter() {
-        let Some(fb) = &func.bytecode else {
-            continue;
-        };
-        let code: Vec<u64> = fb.instructions.iter().map(|i| i.0).collect();
-        let wide: Vec<i64> = fb.wide_operands.to_vec();
-        owned.push((
-            name.as_ref(),
-            code,
-            wide,
-            &fb.string_table[..],
-            func.params.len(),
-            fb.local_names.len().max(func.params.len()),
-        ));
-    }
-    let inputs: Vec<xcl_jit::FunctionInput<'_>> = owned
-        .iter()
-        .map(
-            |(name, code, wide, strings, params, locals)| xcl_jit::FunctionInput {
-                name,
-                code,
-                wide,
-                strings,
-                params: *params,
-                locals: *locals,
-            },
-        )
-        .collect();
-    xcl_jit::ensure_functions(&inputs).unwrap_or_default()
-}
-
-/// Largest array the JIT will scan to prove every element is an integer.
-/// Above this, the loop stays interpreted rather than paying an O(n) scan.
-#[cfg(feature = "jit")]
-const JIT_ARRAY_SCAN_MAX: usize = 4096;
-
-/// Fills a loop's access cache from the current frame registers.
-///
-/// Returns `false` when a container is not the expected type (for example a
-/// map where the loop expects an array); the caller then leaves the loop to
-/// the interpreter.
-#[cfg(feature = "jit")]
-fn fill_loop_cache(
-    regs: &[Value],
-    bc: &Bytecode,
-    unit: &mut JitUnit,
-    idx: usize,
-    base: usize,
-) -> bool {
-    use crate::runtime::value::TAG_INT;
-
-    let entry = unit.entries[idx];
-    let start = entry.access_start as usize;
-    let end = start + entry.access_len as usize;
-    let plans = match unit.accesses.get(start..end) {
-        Some(p) => p,
-        None => return false,
-    };
-    let cache = match unit.caches.get_mut(idx) {
-        Some(c) => c,
-        None => return false,
-    };
-    for (plan, slot) in plans.iter().zip(cache.accesses.iter_mut()) {
-        let Some(&container) = regs.get(base + plan.object_slot as usize) else {
-            return false;
-        };
-        match plan.kind {
-            xcl_jit::AccessKind::ArrayIndex => {
-                let Some(arr) = container.as_array() else {
-                    return false;
-                };
-                // Re-validate only when the array's version (or length)
-                // changed. A short loop entered many times therefore scans
-                // the elements once, not once per entry.
-                let version = container.array_version().unwrap_or(0).wrapping_add(1);
-                let mut stamp = slot.value;
-                let same_object = slot.object == container.0;
-                let validated = same_object && stamp == version && slot.len == arr.len();
-                if !validated {
-                    if arr.len() > JIT_ARRAY_SCAN_MAX || !arr.iter().all(|v| v.tag() == TAG_INT) {
-                        return false;
-                    }
-                    stamp = version;
-                }
-                *slot = xcl_jit::AccessCache {
-                    object: container.0,
-                    data: arr.as_ptr().cast::<u64>(),
-                    len: arr.len(),
-                    value: stamp,
-                };
-            }
-            xcl_jit::AccessKind::MapField => {
-                let Some(&key) = bc.string_values.get(plan.key_slot as usize) else {
-                    return false;
-                };
-                let Some(field) = container.as_map().and_then(|m| m.get_fast_value(key)) else {
-                    return false;
-                };
-                if field.tag() != TAG_INT {
-                    return false;
-                }
-                *slot = xcl_jit::AccessCache {
-                    object: container.0,
-                    data: core::ptr::null(),
-                    len: 0,
-                    value: field.0,
-                };
-            }
-        }
-    }
-    true
-}
 
 /// A dispatch table slot containing all methods registered for a specific domain namespace.
 #[derive(Clone)]
@@ -576,12 +414,19 @@ pub struct VM {
     /// Fast bump allocator arena for temporary heap objects created during execution.
     pub arena: Bump,
     pub(crate) frames: Vec<Frame>,
-    closures: Arc<[crate::runtime::value::FuncValue]>,
     /// Stack-based context for domain blocks (e.g., `browser "brave" { ... }`).
     /// Each key maps to a stack of values, enabling nested domain contexts.
     pub(crate) context_stack: HashMap<String, Vec<Value>>,
-    /// Dispatch table for extension opcodes (codes 128..=255).
-    opcode_table: [Option<super::opcode::OpcodeFn>; 256],
+    /// Dispatch table for extension opcodes (module slots `128..=255`),
+    /// allocated on the first [`VM::register_opcodes`] call.
+    ///
+    /// `None` means "no plugin opcodes registered", which is the case for every
+    /// core-only program. Keeping the 1 KiB table out of the `VM` value matters:
+    /// a VM that allocates one still has to be zeroed and moved, and runtimes
+    /// that create a VM per script end up paying for it on every run.
+    opcode_table: Option<
+        Box<[Option<super::opcode::OpcodeFn>; crate::runtime::opcode::layout::MODULE_COUNT]>,
+    >,
     /// Cold plugin modules reachable through `OP_EXT`, sorted by id.
     cold_modules: Vec<(u32, &'static super::opcode::ColdModule)>,
     #[cfg(feature = "opcode-stats")]
@@ -594,12 +439,27 @@ pub struct VM {
     #[cfg(feature = "trace")]
     trace: Vec<(u32, u8, u8)>,
     /// Name of the currently running script (`$0`).
-    script_name: Box<str>,
+    ///
+    /// `None` means the default `"<input>"`; storing it lazily avoids one boxed
+    /// allocation per VM.
+    script_name: Option<Box<str>>,
+    /// Cached `$0` value for the current run (arena-backed).
+    ///
+    /// Built on the first `$0` read and reset to nil by `run`, so a program
+    /// that never mentions `$0` leaves the arena untouched.
+    script_name_value: Value,
     /// Top-level positional script arguments.
     script_args: Vec<Value>,
     /// Direct-mapped [`CALL_CACHE_SLOTS`]-entry callee cache for fast
     /// recursive call dispatch.
     call_cache: [(Value, Value); CALL_CACHE_SLOTS],
+    /// Bitmask of [`call_cache`](Self::call_cache) slots written since the last
+    /// `run`.
+    ///
+    /// Only the used slots are cleared at the start of a run. The cache is 256
+    /// bytes, and a fresh VM's is already all-nil, so clearing it
+    /// unconditionally was pure per-run memory traffic.
+    call_cache_dirty: u32,
     /// Compiled integer functions for this run (name → native entry).
     #[cfg(feature = "jit")]
     jit_functions: HashMap<Box<str>, xcl_jit::JitFunction>,
@@ -641,7 +501,7 @@ impl VM {
     /// assert!(vm.stack.is_empty());
     /// ```
     pub fn new() -> Self {
-        // Item 1: Try to reuse a pooled arena from a previous VM.
+        // Reuse the previous VM's arena on this thread, if one is pooled.
         let arena = {
             #[cfg(feature = "std")]
             {
@@ -652,10 +512,29 @@ impl VM {
                 Bump::new()
             }
         };
+        // Reuse the previous VM's containers when one is available.
+        #[cfg(feature = "std")]
+        let (stack, regs, frames, globals) =
+            BUFFER_POOL.with(|pool| match pool.borrow_mut().take() {
+                Some(buffers) => (buffers.stack, buffers.regs, buffers.frames, buffers.globals),
+                None => (
+                    Vec::with_capacity(16),
+                    Vec::with_capacity(16),
+                    Vec::with_capacity(16),
+                    Vec::new(),
+                ),
+            });
+        #[cfg(not(feature = "std"))]
+        let (stack, regs, frames, globals) = (
+            Vec::with_capacity(16),
+            Vec::with_capacity(16),
+            Vec::with_capacity(16),
+            Vec::new(),
+        );
         Self {
-            stack: Vec::with_capacity(64),
-            regs: Vec::with_capacity(64),
-            globals: Vec::new(),
+            stack,
+            regs,
+            globals,
             global_index: Default::default(),
             global_table: Vec::new(),
             domain_index: Default::default(),
@@ -666,18 +545,19 @@ impl VM {
             native_entries: Vec::new(),
             type_entries: Vec::new(),
             arena,
-            frames: Vec::with_capacity(16),
-            closures: Arc::new([]),
+            frames,
             context_stack: HashMap::new(),
-            opcode_table: [None; 256],
+            opcode_table: None,
             cold_modules: Vec::new(),
             #[cfg(feature = "opcode-stats")]
             opcode_counter: OpcodeCounter::new(),
             #[cfg(feature = "trace")]
             trace: Vec::new(),
-            script_name: "<input>".into(),
+            script_name: None,
+            script_name_value: Value::nil(),
             script_args: Vec::new(),
             call_cache: [(Value::nil(), Value::nil()); CALL_CACHE_SLOTS],
+            call_cache_dirty: 0,
             #[cfg(feature = "jit")]
             jit_functions: HashMap::new(),
             #[cfg(feature = "jit")]
@@ -693,8 +573,14 @@ impl VM {
     /// Call this before [`VM::run`]. Script arguments apply to the root frame;
     /// function frames use their own call arguments.
     pub fn set_script_args(&mut self, name: &str, args: Vec<Value>) {
-        self.script_name = name.into();
+        self.script_name = Some(name.into());
         self.script_args = args;
+    }
+
+    /// Script name reported by `$0` (`"<input>"` until [`VM::set_script_args`]).
+    #[inline]
+    pub fn script_name(&self) -> &str {
+        self.script_name.as_deref().unwrap_or(DEFAULT_SCRIPT_NAME)
     }
 
     /// Registers native functions from a static slice.
@@ -789,6 +675,9 @@ impl VM {
     /// are caught earlier, in `xcl_plugins::register_all`, which knows the std and
     /// plugin slices separately.
     pub fn register_opcodes(&mut self, entries: &'static [super::opcode::OpcodeEntry]) {
+        let table = self
+            .opcode_table
+            .get_or_insert_with(|| Box::new([None; MODULE_COUNT]));
         for entry in entries.iter() {
             assert!(
                 crate::runtime::opcode::layout::is_module_slot(entry.code),
@@ -797,7 +686,8 @@ impl VM {
                 entry.name,
                 entry.code
             );
-            self.opcode_table[entry.code as usize] = Some(entry.handler);
+            table[crate::runtime::opcode::layout::module_index(entry.code) as usize] =
+                Some(entry.handler);
         }
     }
 
@@ -860,26 +750,6 @@ impl VM {
             None => Action::Next,
         }
     }
-
-    /// Runs the top frame's deferred closures in LIFO order.
-    ///
-    /// Returns immediately when there is nothing deferred, which is the common
-    /// case; every function return goes through here.
-    #[inline(always)]
-    fn run_defers(&mut self) {
-        let Some(frame) = self.top_frame_mut() else {
-            return;
-        };
-        if frame.defer_stack.is_empty() {
-            return;
-        }
-        let mut stack = core::mem::take(&mut frame.defer_stack);
-        stack.reverse();
-        for closure in stack {
-            let _ = self.call_value(closure, &[]);
-        }
-    }
-
     /// Pops a value from the operand stack.
     pub fn pop_value(&mut self) -> Value {
         self.stack.pop().unwrap_or(Value::nil())
@@ -889,228 +759,6 @@ impl VM {
     pub fn push_value(&mut self, value: Value) {
         self.stack.push(value);
     }
-
-    /// Number of live call frames.
-    #[inline(always)]
-    fn frame_count(&self) -> usize {
-        self.frame_depth
-    }
-
-    /// The live frame at the top of the call stack, if any.
-    #[inline(always)]
-    fn top_frame(&self) -> Option<&Frame> {
-        match self.frame_depth {
-            0 => None,
-            n => Some(unsafe { self.frames.get_unchecked(n - 1) }),
-        }
-    }
-
-    /// Mutable access to the live frame at the top of the call stack.
-    #[inline(always)]
-    fn top_frame_mut(&mut self) -> Option<&mut Frame> {
-        match self.frame_depth {
-            0 => None,
-            n => Some(unsafe { self.frames.get_unchecked_mut(n - 1) }),
-        }
-    }
-
-    /// Acquires the frame slot for a new call and returns its index.
-    ///
-    /// The slot is reset in place, so no `Frame` is ever moved. Callers then
-    /// fill in `stack_base`, `locals` and `argv` through `self.frames[idx]`.
-    #[inline]
-    fn acquire_frame(&mut self, bc: &Bytecode) -> usize {
-        let idx = self.frame_depth;
-        if idx == self.frames.len() {
-            self.frames.push(Frame {
-                code_ptr: bc as *const Bytecode,
-                locals: LocalSlice::EMPTY,
-                local_base: 0,
-                ip: 0,
-                iter: Vec::new(),
-                iter_idx: 0,
-                iter_is_range: false,
-                range_cur: 0,
-                range_end: 0,
-                stack_base: 0,
-                defer_stack: Vec::new(),
-                argv: Vec::new(),
-            });
-        }
-        self.frame_depth = idx + 1;
-
-        let frame = unsafe { self.frames.get_unchecked_mut(idx) };
-        frame.code_ptr = bc as *const Bytecode;
-        frame.ip = 0;
-        // Item 3: only clear when non-empty — avoids writing length on every call.
-        if !frame.iter.is_empty() {
-            frame.iter.clear();
-        }
-        frame.iter_idx = 0;
-        frame.iter_is_range = false;
-        frame.range_cur = 0;
-        frame.range_end = 0;
-        if !frame.defer_stack.is_empty() {
-            frame.defer_stack.clear();
-        }
-        if !frame.argv.is_empty() {
-            frame.argv.clear();
-        }
-        // `locals`/`local_base` are set by `bind_registers`, which every caller
-        // runs next.
-        idx
-    }
-
-    /// Allocates `n` registers for frame `idx` at the top of the register file
-    /// and binds the frame to them.
-    ///
-    /// `copied_params` is the number of slots the caller writes immediately
-    /// after this call (parameters taken from the operand stack). Those slots
-    /// are not written here, which removes one store per parameter from the
-    /// call path. The remaining `[copied_params..n)` slots are nil-filled.
-    /// A count of `0` (the root frame) nil-fills everything.
-    #[inline(always)]
-    // Clippy cannot see that every element is written before it is read; the
-    // SAFETY comment below is the proof. `Value` is `Copy` and has no `Drop`.
-    #[allow(clippy::uninit_vec)]
-    fn bind_registers(&mut self, idx: usize, n: usize, copied_params: usize) -> usize {
-        let base = self.regs.len();
-        let old_ptr = self.regs.as_ptr();
-        self.regs.reserve(n);
-        // Active frames cache a raw pointer into the register file. If the
-        // store grew, every cached pointer now dangles and must be rebased
-        // before any of those frames runs again (e.g. after a callee returns).
-        if self.regs.as_ptr() != old_ptr {
-            self.rebase_frames(idx);
-        }
-        // SAFETY: `Value` is `Copy` and has no `Drop`. `reserve` guarantees
-        // capacity for `base + n`. Every slot in `[base, base + n)` is written
-        // before it can be read: the caller writes
-        // `[0, copied_params)` right after this call, and the loop below
-        // writes the rest. `write` does not read the old (possibly
-        // uninitialised) contents.
-        unsafe {
-            self.regs.set_len(base + n);
-            let start = self.regs.as_mut_ptr().add(base + copied_params.min(n));
-            let end = self.regs.as_mut_ptr().add(base + n);
-            let mut p = start;
-            while p < end {
-                p.write(Value::nil());
-                p = p.add(1);
-            }
-        }
-        let frame = unsafe { self.frames.get_unchecked_mut(idx) };
-        frame.local_base = base as u32;
-        frame.locals = LocalSlice {
-            ptr: unsafe { self.regs.as_mut_ptr().add(base) },
-            len: n as u32,
-        };
-        base
-    }
-
-    /// Rebinds every frame below `active` to the current register allocation.
-    ///
-    /// Called only when growing `regs` moved the buffer; `LocalSlice` stores a
-    /// raw pointer, so stale pointers make a returning frame read or write the
-    /// freed block (the hanoi benchmark crosses the initial 64-slot capacity).
-    #[inline]
-    fn rebase_frames(&mut self, active: usize) {
-        let base_ptr = self.regs.as_mut_ptr();
-        for i in 0..active {
-            let frame = unsafe { self.frames.get_unchecked_mut(i) };
-            frame.locals = LocalSlice {
-                ptr: unsafe { base_ptr.add(frame.local_base as usize) },
-                len: frame.locals.len,
-            };
-        }
-    }
-
-    /// Drops the registers of a frame that is returning.
-    #[inline(always)]
-    fn release_registers(&mut self, idx: usize) {
-        let base = unsafe { self.frames.get_unchecked(idx) }.local_base as usize;
-        self.regs.truncate(base);
-    }
-
-    /// Rebinds frame `idx` to `n` registers at `base`, growing the file if the
-    /// (tail-called) function needs more slots than the current one.
-    ///
-    /// `copied_params` slots are overwritten by the caller; the tail is
-    /// nil-filled.
-    #[inline(always)]
-    #[allow(clippy::uninit_vec)]
-    fn rebind_registers(&mut self, idx: usize, base: usize, n: usize, copied_params: usize) {
-        self.regs.truncate(base);
-        let old_ptr = self.regs.as_ptr();
-        self.regs.reserve(n);
-        if self.regs.as_ptr() != old_ptr {
-            self.rebase_frames(idx);
-        }
-        // SAFETY: same argument as `bind_registers`: `Value` has no `Drop`, the
-        // capacity is reserved, and every slot is written before it is read.
-        unsafe {
-            self.regs.set_len(base + n);
-            let start = self.regs.as_mut_ptr().add(base + copied_params.min(n));
-            let end = self.regs.as_mut_ptr().add(base + n);
-            let mut p = start;
-            while p < end {
-                p.write(Value::nil());
-                p = p.add(1);
-            }
-        }
-        let frame = unsafe { self.frames.get_unchecked_mut(idx) };
-        frame.local_base = base as u32;
-        frame.locals = LocalSlice {
-            ptr: unsafe { self.regs.as_mut_ptr().add(base) },
-            len: n as u32,
-        };
-    }
-
-    /// Writes a closure's captured values into the callee frame's capture
-    /// slots, which sit immediately after its parameters.
-    #[inline]
-    fn install_captures(
-        &mut self,
-        reg_base: usize,
-        n: usize,
-        func: &crate::runtime::value::FuncValue,
-    ) {
-        if func.closure_env.is_empty() {
-            return;
-        }
-        let start = reg_base + func.params.len();
-        let limit = reg_base + n;
-        for (i, (_, value)) in func.closure_env.iter().enumerate() {
-            let slot = start + i;
-            if slot < limit {
-                self.regs[slot] = *value;
-            }
-        }
-    }
-
-    /// Reads a local variable from the current frame.
-    pub fn local_get(&self, top: usize, slot: usize) -> Value {
-        self.frames[top].locals[slot]
-    }
-
-    /// Writes a local variable in the current frame.
-    pub fn local_set(&mut self, top: usize, slot: usize, value: Value) {
-        self.frames[top].locals[slot] = value;
-    }
-
-    /// Returns a slice of local variables in the current frame.
-    pub fn frame_locals(&self, top: usize) -> &[Value] {
-        self.frames[top].locals.as_slice()
-    }
-
-    /// Returns a mutable slice of local variables in the current frame.
-    #[allow(clippy::mut_from_ref)]
-    pub fn frame_locals_mut(&mut self, top: usize) -> &mut [Value] {
-        let frame = &self.frames[top];
-        let len = frame.locals.len();
-        unsafe { core::slice::from_raw_parts_mut(frame.locals.ptr, len) }
-    }
-
     /// Looks up a globally registered builtin or native function by name.
     ///
     /// # Arguments
@@ -1239,6 +887,7 @@ impl VM {
     #[inline]
     pub(crate) fn cache_callee(&mut self, slot: usize, callee: Value, func: Value) {
         self.call_cache[slot] = (callee, func);
+        self.call_cache_dirty |= 1 << slot;
         self.jit_call_cache[slot] = func
             .as_func()
             .and_then(|f| self.jit_functions.get(&*f.name).copied());
@@ -1249,268 +898,17 @@ impl VM {
     #[inline(always)]
     pub(crate) fn cache_callee(&mut self, slot: usize, callee: Value, func: Value) {
         self.call_cache[slot] = (callee, func);
+        self.call_cache_dirty |= 1 << slot;
     }
 
     /// Upper bound on recorded instructions, so a runaway program cannot grow
     /// the trace without limit. The playground is the only consumer.
     #[cfg(feature = "trace")]
     const TRACE_CAP: usize = 200_000;
-
-    /// Dispatch loop, monomorphised on whether a native loop is installed.
-    ///
-    /// `JIT == false` contains no JIT code at all, so interpreted programs pay
-    /// nothing for the feature being compiled in.
-    fn run_inner<const JIT: bool>(&mut self, bc: &Bytecode, jit: JitPlan<'_>) -> Value {
-        #[cfg(feature = "jit")]
-        let mut jit = jit;
-        #[cfg(not(feature = "jit"))]
-        let _ = jit;
-        self.stack.clear();
-        self.frame_depth = 0;
-        #[cfg(feature = "trace")]
-        self.trace.clear();
-        if self.frames.len() > 4096 {
-            self.frames.truncate(4096);
-        }
-        // Item 2: clear growing state so repeated runs leave nothing behind.
-        self.context_stack.clear();
-        self.call_cache = [(Value::nil(), Value::nil()); CALL_CACHE_SLOTS];
-        #[cfg(feature = "jit")]
-        {
-            self.jit_call_cache = [None; CALL_CACHE_SLOTS];
-        }
-        self.arena.reset();
-        self.closures = Arc::clone(&bc.closures);
-
-        // Install (or refresh) the bytecode's top-level functions.
-        //
-        // Function values live in the arena, so they must be rebuilt after the
-        // arena reset above. They are not inserted into `global_index`: a named
-        // call resolves through `Bytecode::function_by_name`, which is one array
-        // load, and the slots are the contiguous range starting at `function_base`.
-        let current_code = bc.instructions.clone();
-        let is_same_bytecode = self
-            .installed_code
-            .as_ref()
-            .map(|prev| Arc::ptr_eq(prev, &current_code))
-            .unwrap_or(false);
-
-        if !is_same_bytecode {
-            // Drop the previous bytecode's function values.
-            self.globals.truncate(self.function_base as usize);
-        }
-
-        // Compiler globals (enum variants, type names) occupy slots
-        // `0..global_names.len()` and come before the function values.
-        let compiler_globals = bc.global_names.len();
-        if self.globals.len() < compiler_globals {
-            self.globals.resize(compiler_globals, Value::nil());
-        }
-
-        if !is_same_bytecode {
-            let function_base = self.globals.len() as u32;
-            self.globals.reserve(bc.user_functions.len());
-            for (_name, func) in bc.user_functions.iter() {
-                self.globals
-                    .push(Value::from_func_shared(Arc::clone(func), &self.arena));
-            }
-            self.function_base = function_base;
-            self.installed_code = Some(current_code);
-        } else {
-            // Same bytecode — rewrite each slot with a fresh Value (arena was reset).
-            let base = self.function_base as usize;
-            for (i, (_name, func)) in bc.user_functions.iter().enumerate() {
-                self.globals[base + i] = Value::from_func_shared(Arc::clone(func), &self.arena);
-            }
-        }
-
-        let n = bc.local_names.len().max(16);
-        self.regs.clear();
-        // SAFETY: bc is borrowed by run() and lives for the entire call.
-        let root = self.acquire_frame(bc);
-        // Item 3: root frame has no parameters, so nil-fill every slot.
-        self.bind_registers(root, n, 0);
-        {
-            let frame = &mut self.frames[root];
-            frame.stack_base = 0;
-            frame.argv.extend_from_slice(&self.script_args);
-        }
-
-        // Dispatch state kept in locals instead of behind `frames[top]`.
-        //
-        // The instruction pointer and the current code slice are the two things
-        // every instruction needs. The previous loop reloaded `frames[top]`,
-        // `frame.ip` and `frame.code.instructions` (three dependent loads) and
-        // wrote `ip` back through the frame for every single instruction.
-        // Now `ip` lives in a register and is only written to the frame when a
-        // call is entered (the return address), which is the only time another
-        // frame needs it.
-        let mut top = self.frame_count() - 1;
-        let mut ip: usize = 0;
-        let (mut code_ptr, mut code_len) = frame_code_bounds(&self.frames[top]);
-        let mut locals = self.frames[top].locals;
-
-        // Native loop state. The shadow table maps an instruction to its
-        // compiled loop; `jit_disabled` remembers loops that bailed out during
-        // this run. It applies only to the root frame's own bytecode. With
-        // `JIT == false` every use of these is eliminated.
-        #[cfg(feature = "jit")]
-        let (jit_shadow_ptr, jit_shadow_len) = match jit.as_deref() {
-            Some(u) => (u.shadow.as_ptr(), u.shadow.len()),
-            None => (core::ptr::null(), 0),
-        };
-        #[cfg(feature = "jit")]
-        let mut jit_disabled: u64 = 0;
-        #[cfg(feature = "jit")]
-        let root_code_ptr = bc.instructions.as_ptr();
-
-        loop {
-            if ip >= code_len {
-                // Run deferred closures before returning
-                self.run_defers();
-                let r = self.stack.pop().unwrap_or(Value::nil());
-                let frame = unsafe { self.frames.get_unchecked(top) };
-                let returning_base = frame.stack_base;
-                let local_base = frame.local_base as usize;
-                self.regs.truncate(local_base);
-                self.frame_depth -= 1;
-                debug_assert_eq!(self.frame_depth, top);
-                if self.frame_depth == 0 {
-                    return Value::escape(r);
-                }
-                top -= 1;
-                let caller = unsafe { self.frames.get_unchecked(top) };
-                let base = returning_base;
-                ip = caller.ip as usize;
-                (code_ptr, code_len) = frame_code_bounds(caller);
-                locals = caller.locals;
-                self.stack.truncate(base as usize);
-                self.stack.push(r);
-                continue;
-            }
-
-            let instr = unsafe { *code_ptr.add(ip) };
-
-            // Trace hook: record which instruction this frame is about to run.
-            // Compiled out entirely without the `trace` feature.
-            #[cfg(feature = "trace")]
-            if self.trace.len() < Self::TRACE_CAP {
-                self.trace.push((ip as u32, top as u8, instr.op()));
-            }
-
-            // Enter a native loop when the root frame reaches a compiled
-            // header. The check is gated on the loop-header opcode, so
-            // interpreted instructions pay one compare rather than a shadow
-            // load. A bailout (non-integer local, multiply overflow, division
-            // by zero) leaves the register file untouched, so the interpreter
-            // re-executes the loop; that loop is disabled for the rest of this
-            // run. In the `JIT == false` instantiation this block is gone.
-            #[cfg(feature = "jit")]
-            if JIT && top == 0 && code_ptr == root_code_ptr && jit_shadow_len != 0 {
-                let op = instr.op();
-                if op == ops::consts::OP_WHILE_LT_INT || op == ops::consts::OP_WHILE_LT_INT_WIDE {
-                    // SAFETY: `ip < code_len`, and the shadow belongs to the
-                    // root bytecode, so its length is `code_len`.
-                    let slot = unsafe { *jit_shadow_ptr.add(ip) };
-                    let idx = slot.wrapping_sub(1) as usize;
-                    if slot != 0 && idx < JIT_MAX_LOOPS && jit_disabled & (1u64 << idx) == 0 {
-                        if let Some(unit) = jit.as_deref_mut() {
-                            let entry = unit.entries[idx];
-                            let base = self.frames[top].local_base as usize;
-                            if !fill_loop_cache(&self.regs, bc, unit, idx, base) {
-                                jit_disabled |= 1u64 << idx;
-                            } else {
-                                let ptr = unsafe { self.regs.as_mut_ptr().add(base) }.cast::<u64>();
-                                // SAFETY: `ptr` addresses the root frame's registers,
-                                // the frame is active, and the JIT only touches its locals.
-                                let cache_ptr: *mut xcl_jit::LoopCache = &raw mut unit.caches[idx];
-                                let rc = unsafe { (entry.func)(ptr, cache_ptr) };
-                                if rc == 0 {
-                                    ip = entry.exit_ip;
-                                    continue;
-                                }
-                                jit_disabled |= 1u64 << idx;
-                            }
-                        }
-                    }
-                }
-            }
-
-            let action = self.dispatch(locals, top, instr);
-            match action {
-                Action::Next => ip += 1,
-                Action::Jump(to) => ip = to as usize,
-                Action::TailCall => {
-                    // The frame rebound to another function's bytecode.
-                    ip = 0;
-                    let frame = unsafe { self.frames.get_unchecked(top) };
-                    (code_ptr, code_len) = frame_code_bounds(frame);
-                    locals = frame.locals;
-                }
-                Action::Return => {
-                    // Run deferred closures before returning
-                    self.run_defers();
-                    let r = self.stack.pop().unwrap_or(Value::nil());
-                    let frame = unsafe { self.frames.get_unchecked(top) };
-                    let returning_base = frame.stack_base;
-                    let local_base = frame.local_base as usize;
-                    self.regs.truncate(local_base);
-                    self.frame_depth -= 1;
-                    if self.frame_depth == 0 {
-                        return Value::escape(r);
-                    }
-                    top -= 1;
-                    let caller = unsafe { self.frames.get_unchecked(top) };
-                    let base = returning_base;
-                    ip = caller.ip as usize;
-                    (code_ptr, code_len) = frame_code_bounds(caller);
-                    locals = caller.locals;
-                    self.stack.truncate(base as usize);
-                    self.stack.push(r);
-                }
-                Action::PushFrame => {
-                    // The callee frame is already on the stack. Record where the
-                    // caller resumes; nothing else needs the caller's ip.
-                    unsafe { self.frames.get_unchecked_mut(top) }.ip = (ip + 1) as u32;
-                    top += 1;
-                    ip = 0;
-                    let frame = unsafe { self.frames.get_unchecked(top) };
-                    (code_ptr, code_len) = frame_code_bounds(frame);
-                    locals = frame.locals;
-                }
-            }
-        }
-    }
-
-    #[inline(always)]
-    fn dispatch(&mut self, locals: LocalSlice, top: usize, i: Instr) -> Action {
-        #[cfg(feature = "opcode-stats")]
-        self.opcode_counter.record(i.op());
-
-        let op = i.op();
-        // The space is partitioned by one bit (`opcode::layout`), so a module-space
-        // instruction goes straight to its handler instead of paying a call into
-        // `dispatch_core` that can only return `None`. Core-only programs never
-        // take this branch, so the check costs a predicted-not-taken test.
-        if op & crate::runtime::opcode::layout::MODULE_SPACE_MASK != 0 {
-            return match self.opcode_table[op as usize] {
-                Some(handler) => handler(self, top, i),
-                None => Action::Next,
-            };
-        }
-
-        // Core opcode dispatch. Only module-space codes can own a handler (see
-        // `register_opcodes`), so an unhandled code here is `OP_EXT` — reserved,
-        // not implemented — or an unclaimed growth slot.
-        match ops::dispatch_core(self, locals, top, i) {
-            Some(result) => result,
-            None => Action::Next,
-        }
-    }
 }
 
-/// Item 1: Return the bump arena to the thread-local pool so the next VM
-/// reuses the same pages instead of faulting in fresh memory.
+/// Return the bump arena and the container buffers to the thread-local
+/// pools so the next VM reuses the same pages and allocations.
 impl Drop for VM {
     fn drop(&mut self) {
         #[cfg(feature = "std")]
@@ -1524,6 +922,42 @@ impl Drop for VM {
                     pool.borrow_mut().replace(arena);
                 });
             }
+
+            // Recycle the containers too. Oversized buffers are dropped so one
+            // huge run cannot pin memory for the life of the thread.
+            if self.stack.capacity() <= POOL_MAX_VALUES
+                && self.regs.capacity() <= POOL_MAX_VALUES
+                && self.globals.capacity() <= POOL_MAX_VALUES
+                && self.frames.capacity() <= POOL_MAX_FRAMES
+            {
+                let mut stack = core::mem::take(&mut self.stack);
+                let mut regs = core::mem::take(&mut self.regs);
+                let mut globals = core::mem::take(&mut self.globals);
+                let mut frames = core::mem::take(&mut self.frames);
+                stack.clear();
+                regs.clear();
+                globals.clear();
+                for frame in frames.iter_mut() {
+                    // `iter` snapshots an array, so it can be as large as the
+                    // array. Keep the small per-depth buffer that `for` reuses,
+                    // drop anything that looks like a real payload.
+                    if frame.iter.capacity() > 1024 {
+                        frame.iter = Vec::new();
+                    } else {
+                        frame.iter.clear();
+                    }
+                    frame.defer_stack = Vec::new();
+                    frame.argv = Vec::new();
+                }
+                BUFFER_POOL.with(|pool| {
+                    pool.borrow_mut().replace(VmBuffers {
+                        stack,
+                        regs,
+                        frames,
+                        globals,
+                    });
+                });
+            }
         }
         #[cfg(not(feature = "std"))]
         {
@@ -1534,325 +968,6 @@ impl Drop for VM {
 }
 
 impl VM {
-    fn enter_call(&mut self, func: &crate::runtime::value::FuncValue, args: &[Value]) -> Action {
-        let Some(bc) = &func.bytecode else {
-            self.push(Value::nil());
-            return Action::Next;
-        };
-
-        let n = bc.local_names.len().max(func.params.len());
-        let base = self.stack.len() as u32;
-
-        let idx = self.acquire_frame(bc);
-        let copy = func.params.len().min(args.len());
-        let reg_base = self.bind_registers(idx, n, copy);
-        self.regs[reg_base..reg_base + copy].copy_from_slice(&args[..copy]);
-        self.install_captures(reg_base, n, func);
-
-        let frame = &mut self.frames[idx];
-        frame.ip = 0;
-        frame.stack_base = base;
-
-        // Prepare argv (only if function uses special vars)
-        if func.uses_special_vars {
-            frame.argv.extend_from_slice(args);
-        }
-
-        // Return PushFrame so the dispatch loop doesn't advance ip
-        Action::PushFrame
-    }
-
-    /// Enters a call whose callee and arguments are still on the operand stack.
-    ///
-    /// `arg_base` is the callee's slot; the arguments occupy
-    /// `arg_base + 1 .. arg_base + 1 + nargs`. The operand stack is truncated to
-    /// `arg_base` so the return value lands exactly where the callee was.
-    ///
-    /// This avoids materializing an intermediate argument buffer for the common
-    /// case of calling a script function.
-    fn enter_call_at(
-        &mut self,
-        func: &crate::runtime::value::FuncValue,
-        arg_base: usize,
-        nargs: usize,
-    ) -> crate::runtime::opcode::OpcodeResult {
-        let Some(bc) = &func.bytecode else {
-            self.stack.truncate(arg_base);
-            self.push(Value::nil());
-            return crate::runtime::opcode::OpcodeResult::Next;
-        };
-
-        let n = bc.local_names.len().max(func.params.len());
-        let arg_start = arg_base + 1;
-
-        let idx = self.acquire_frame(bc);
-        let copy = func.params.len().min(nargs);
-        let reg_base = self.bind_registers(idx, n, copy);
-        self.regs[reg_base..reg_base + copy]
-            .copy_from_slice(&self.stack[arg_start..arg_start + copy]);
-        self.install_captures(reg_base, n, func);
-
-        {
-            let frame = &mut self.frames[idx];
-            frame.ip = 0;
-            frame.stack_base = arg_start as u32;
-
-            if func.uses_special_vars {
-                frame
-                    .argv
-                    .extend_from_slice(&self.stack[arg_start..arg_start + nargs]);
-            }
-        }
-
-        self.stack.truncate(arg_base);
-        crate::runtime::opcode::OpcodeResult::PushFrame
-    }
-
-    /// Enters a call whose arguments are on the operand stack but whose callee
-    /// is **not** (fused named calls embed it in the instruction).
-    ///
-    /// `arg_start` is the first argument; the result replaces it on return.
-    fn enter_call_args_at(
-        &mut self,
-        func: &crate::runtime::value::FuncValue,
-        arg_start: usize,
-        nargs: usize,
-    ) -> crate::runtime::opcode::OpcodeResult {
-        let Some(bc) = &func.bytecode else {
-            self.stack.truncate(arg_start);
-            self.push(Value::nil());
-            return crate::runtime::opcode::OpcodeResult::Next;
-        };
-
-        let n = bc.local_names.len().max(func.params.len());
-        let copy = func.params.len().min(nargs);
-
-        let idx = self.acquire_frame(bc);
-        let reg_base = self.bind_registers(idx, n, copy);
-        self.regs[reg_base..reg_base + copy]
-            .copy_from_slice(&self.stack[arg_start..arg_start + copy]);
-        self.install_captures(reg_base, n, func);
-
-        {
-            let frame = &mut self.frames[idx];
-            frame.ip = 0;
-            frame.stack_base = arg_start as u32;
-
-            if func.uses_special_vars {
-                frame
-                    .argv
-                    .extend_from_slice(&self.stack[arg_start..arg_start + nargs]);
-            }
-        }
-
-        self.stack.truncate(arg_start);
-        crate::runtime::opcode::OpcodeResult::PushFrame
-    }
-
-    /// Same as `enter_call` but returns [`OpcodeResult`] for use from opcode handlers.
-    fn enter_call_from_op(
-        &mut self,
-        func: &crate::runtime::value::FuncValue,
-        args: &[Value],
-    ) -> crate::runtime::opcode::OpcodeResult {
-        match self.enter_call(func, args) {
-            Action::PushFrame => crate::runtime::opcode::OpcodeResult::PushFrame,
-            Action::Next => crate::runtime::opcode::OpcodeResult::Next,
-            _ => crate::runtime::opcode::OpcodeResult::Next,
-        }
-    }
-
-    /// Tail-call entry: reuses the current frame instead of pushing a new one.
-    fn enter_tail_call(
-        &mut self,
-        func: &crate::runtime::value::FuncValue,
-        args: &[Value],
-    ) -> crate::runtime::opcode::OpcodeResult {
-        let Some(bc) = &func.bytecode else {
-            if let Some(frame) = self.top_frame() {
-                self.stack.truncate(frame.stack_base as usize);
-            }
-            self.push(Value::nil());
-            return crate::runtime::opcode::OpcodeResult::Next;
-        };
-
-        let n = bc.local_names.len().max(func.params.len());
-
-        // Reuse the current frame instead of pushing a new one
-        let top = match self.frame_depth.checked_sub(1) {
-            Some(i) => i,
-            None => return crate::runtime::opcode::OpcodeResult::Next,
-        };
-        let frame = &mut self.frames[top];
-
-        // SAFETY: this frame is active (index < frame_depth) during run().
-        frame.code_ptr = Arc::as_ptr(bc);
-        frame.ip = 0;
-        frame.iter.clear();
-        frame.iter_idx = 0;
-        frame.iter_is_range = false;
-        frame.range_cur = 0;
-        frame.range_end = 0;
-        frame.defer_stack.clear();
-
-        // Rebind the frame's registers (the tail-called function may have a
-        // different local count) and write the new arguments.
-        let base = frame.local_base as usize;
-        let copy = func.params.len().min(args.len());
-        self.rebind_registers(top, base, n, copy);
-        self.regs[base..base + copy].copy_from_slice(&args[..copy]);
-        self.install_captures(base, n, func);
-
-        // Prepare argv (only if function uses special vars)
-        let frame = &mut self.frames[top];
-        frame.argv.clear();
-        if func.uses_special_vars {
-            frame.argv.extend_from_slice(args);
-        }
-
-        // Truncate operand stack to this frame's base
-        self.stack.truncate(frame.stack_base as usize);
-
-        // Jump to ip=0 so the dispatch loop starts the new code from the beginning
-        crate::runtime::opcode::OpcodeResult::TailCall
-    }
-
-    /// Reentrantly invokes an XCL function or closure value with the given arguments.
-    ///
-    /// Runs the VM dispatch loop until the called function's frame returns, then returns its result.
-    ///
-    /// # Arguments
-    ///
-    /// * `func` - The [`Value`] representing the function or closure to invoke.
-    /// * `args` - Positional and named arguments passed to the function.
-    ///
-    /// # Returns
-    ///
-    /// The [`Value`] returned by the invoked function, or `nil` if `func` is not callable.
-    pub fn call_value(&mut self, func: Value, args: &[Value]) -> Value {
-        let func_ref = match func.as_func() {
-            Some(f) => f,
-            None => return Value::nil(),
-        };
-
-        let bc = match &func_ref.bytecode {
-            Some(b) => Arc::clone(b),
-            None => return Value::nil(),
-        };
-
-        // Save and replace closures table so OP_LOAD_LAMBDA works for nested closures
-        let saved_closures = core::mem::replace(&mut self.closures, Arc::clone(&bc.closures));
-
-        // Prepare locals: params first (matching how enter_call does it)
-        let n = bc.local_names.len().max(func_ref.params.len());
-
-        let initial_depth = self.frame_depth;
-        let initial_regs = self.regs.len();
-        let stack_base = self.stack.len() as u32;
-
-        let idx = self.acquire_frame(&bc);
-        let copy = func_ref.params.len().min(args.len());
-        let reg_base = self.bind_registers(idx, n, copy);
-        self.regs[reg_base..reg_base + copy].copy_from_slice(&args[..copy]);
-        self.install_captures(reg_base, n, func_ref);
-        {
-            let frame = &mut self.frames[idx];
-            frame.stack_base = stack_base;
-            frame.argv.extend_from_slice(args);
-        }
-
-        // Run the VM dispatch loop until the frame we just pushed returns
-        loop {
-            // Recalculate top every iteration because PushFrame/Return change frame count
-            let top = match self.frame_depth.checked_sub(1) {
-                Some(i) => i,
-                None => {
-                    self.closures = saved_closures;
-                    self.frame_depth = initial_depth;
-                    self.regs.truncate(initial_regs);
-                    return Value::nil();
-                }
-            };
-
-            // If we've returned to the caller depth, the closure is done
-            if self.frame_depth <= initial_depth {
-                break;
-            }
-
-            let frame = &self.frames[top];
-            // SAFETY: frame is active (index < frame_depth) during call_value().
-            if frame.ip as usize >= frame.code().instructions.len() {
-                // Run deferred closures before returning
-                self.run_defers();
-                // Frame ran off the end — treat top of stack as return value
-                let result = self.stack.pop().unwrap_or(Value::nil());
-                let returning_base = self.top_frame().map(|f| f.stack_base);
-                self.release_registers(top);
-                self.frame_depth -= 1;
-                if self.frame_depth <= initial_depth {
-                    self.stack
-                        .truncate(returning_base.unwrap_or(stack_base) as usize);
-                    self.closures = saved_closures;
-                    return Value::escape(result);
-                }
-                // Nested call returned; hand the value to the outer frame
-                let caller = &mut self.frames[self.frame_depth - 1];
-                caller.ip += 1;
-                let base = returning_base.unwrap_or(caller.stack_base);
-                self.stack.truncate(base as usize);
-                self.stack.push(result);
-                continue;
-            }
-
-            // SAFETY: frame is active (index < frame_depth) during call_value().
-            let instr = unsafe { *frame.code().instructions.get_unchecked(frame.ip as usize) };
-            let action = self.dispatch(frame.locals, top, instr);
-            match action {
-                Action::Next => {
-                    let top = self.frame_depth.checked_sub(1).unwrap_or(top);
-                    self.frames[top].ip += 1;
-                }
-                Action::Jump(to) => {
-                    let top = self.frame_depth.checked_sub(1).unwrap_or(top);
-                    self.frames[top].ip = to;
-                }
-                Action::TailCall => {
-                    let top = self.frame_depth.checked_sub(1).unwrap_or(top);
-                    self.frames[top].ip = 0;
-                }
-                Action::Return => {
-                    // Run deferred closures before returning
-                    self.run_defers();
-                    let result = self.stack.pop().unwrap_or(Value::nil());
-                    let returning_base = self.top_frame().map(|f| f.stack_base);
-                    self.release_registers(top);
-                    self.frame_depth -= 1;
-                    if self.frame_depth <= initial_depth {
-                        self.stack
-                            .truncate(returning_base.unwrap_or(stack_base) as usize);
-                        self.closures = saved_closures;
-                        return Value::escape(result);
-                    }
-                    if let Some(caller) = self.frames.get_mut(self.frame_depth - 1) {
-                        caller.ip += 1;
-                    }
-                    let caller_base = self.frames[self.frame_depth - 1].stack_base;
-                    self.stack
-                        .truncate(returning_base.unwrap_or(caller_base) as usize);
-                    self.stack.push(result);
-                }
-                Action::PushFrame => {
-                    // Frame already pushed by enter_call; just continue
-                    continue;
-                }
-            }
-        }
-
-        self.closures = saved_closures;
-        self.regs.truncate(initial_regs);
-        Value::nil()
-    }
-
     /// Returns the opcode dispatch counts as a `HashMap<opcode, count>`.
     ///
     /// Only available when the `opcode-stats` feature is enabled.
@@ -1918,866 +1033,13 @@ fn opcode_name(op: u8) -> String {
         .unwrap_or_else(|| format!("0x{:02X}", op))
 }
 
+#[cfg(feature = "jit")]
+mod jit;
+#[cfg(feature = "jit")]
+use self::jit::{prepare_jit, prepare_jit_functions, JitUnit};
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::bytecode::compile;
-    use crate::compiler::lexer::lex;
-    use crate::compiler::parser::parse;
-
-    fn eval_with_args(src: &str, name: &str, args: &[&str]) -> Value {
-        let tokens = lex(src, "<test>");
-        let ast = parse(&tokens, src);
-        let bc = compile(&ast);
-        let mut vm = VM::new();
-        let vals: Vec<Value> = args
-            .iter()
-            .map(|s| Value::from_str_boxed((*s).to_string()))
-            .collect();
-        vm.set_script_args(name, vals);
-        let result = vm.run(&bc);
-        // Tests may inspect heap values (strings/maps) backed by the VM arena.
-        // Keep the arena alive for the duration of the test process.
-        core::mem::forget(vm);
-        result
-    }
-
-    #[test]
-    fn test_arg_count() {
-        let result = eval_with_args("$#", "script.xcl", &["a", "b", "c"]);
-        assert_eq!(result.as_i48(), 3);
-    }
-
-    #[test]
-    fn test_positional_arg() {
-        let result = eval_with_args("$1", "script.xcl", &["a"]);
-        assert!(
-            result.is_ptr(),
-            "expected pointer, got tag={:016X}",
-            result.0
-        );
-        assert_eq!(result.as_str(), Some("a"));
-    }
-
-    #[test]
-    fn test_positional_arg_out_of_range() {
-        let result = eval_with_args("$10", "script.xcl", &["a"]);
-        assert!(result.is_nil());
-    }
-
-    #[test]
-    fn test_script_name() {
-        let result = eval_with_args("$0", "script.xcl", &[]);
-        assert_eq!(result.as_str(), Some("script.xcl"));
-    }
-
-    #[test]
-    fn test_args_array() {
-        // Keep the VM alive: `$@` allocates its array in the VM arena.
-        let src = "$@";
-        let tokens = lex(src, "<test>");
-        let ast = parse(&tokens, src);
-        let bc = compile(&ast);
-        let mut vm = VM::new();
-        let vals: Vec<Value> = ["a", "b"]
-            .iter()
-            .map(|s| Value::from_str_boxed((*s).to_string()))
-            .collect();
-        vm.set_script_args("script.xcl", vals);
-        let result = vm.run(&bc);
-        let arr = result.as_array().expect("$@ should return an array");
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0].as_str(), Some("a"));
-        assert_eq!(arr[1].as_str(), Some("b"));
-    }
-
-    #[test]
-    fn test_args_joined() {
-        let result = eval_with_args("$*", "script.xcl", &["a", "b", "c d"]);
-        assert_eq!(result.as_str(), Some("a b c d"));
-    }
-
-    #[test]
-    #[should_panic(expected = "not supported")]
-    fn test_unsupported_dollar_dollar() {
-        eval_with_args("$$", "script.xcl", &[]);
-    }
-
-    #[test]
-    #[should_panic(expected = "not supported")]
-    fn test_unsupported_dollar_question() {
-        eval_with_args("$?", "script.xcl", &[]);
-    }
-
-    #[test]
-    #[should_panic(expected = "not supported")]
-    fn test_unsupported_dollar_bang() {
-        eval_with_args("$!", "script.xcl", &[]);
-    }
-
-    #[test]
-    #[should_panic(expected = "not supported")]
-    fn test_unsupported_dollar_dash() {
-        eval_with_args("$-", "script.xcl", &[]);
-    }
-
-    #[test]
-    #[should_panic(expected = "read-only")]
-    fn test_assignment_read_only() {
-        eval_with_args("$1 = 5", "script.xcl", &[]);
-    }
-
-    #[test]
-    fn test_special_var_as_bare_call_arg() {
-        let src = r#"
-            id($x) { return $x }
-            id $1
-        "#;
-        let result = eval_with_args(src, "script.xcl", &["hello"]);
-        assert_eq!(result.as_str(), Some("hello"));
-    }
-
-    #[test]
-    fn test_special_vars_in_function_scope() {
-        let src = r#"
-            f($a, $b) {
-                if $# == 3 { return $3 }
-                return "bad"
-            }
-            f "x" "y" "z"
-        "#;
-        let result = eval_with_args(src, "script.xcl", &[]);
-        assert_eq!(result.as_str(), Some("z"));
-    }
-
-    #[test]
-    fn test_script_name_inside_function() {
-        let src = r#"
-            f() { return $0 }
-            f
-        "#;
-        let result = eval_with_args(src, "script.xcl", &[]);
-        assert_eq!(result.as_str(), Some("script.xcl"));
-    }
-
-    #[test]
-    fn test_bare_calls_do_not_merge_across_newlines() {
-        let src = "f \"a\"\nf \"b\"\n";
-        let tokens = crate::compiler::lexer::lex(src, "<test>");
-        let ast = crate::compiler::parser::parse(&tokens, src);
-        assert_eq!(ast.len(), 2, "expected two statements, got {:?}", ast);
-    }
-
-    #[test]
-    fn test_nested_call_argument_does_not_swallow_next_line() {
-        let src = r#"
-            f($x) { return $x }
-            g($x) { return $x }
-            h($x, $y) { return $y }
-            h (f "a") (g "b")
-            f "c"
-        "#;
-        let tokens = crate::compiler::lexer::lex(src, "<test>");
-        let ast = crate::compiler::parser::parse(&tokens, src);
-        // 3 function definitions + 2 call statements
-        assert_eq!(ast.len(), 5, "unexpected statement count: {:?}", ast);
-    }
-
-    // ── Bitwise OR/XOR/NOT, exponentiation, ternary tests ──
-
-    #[test]
-    fn test_bitor() {
-        let result = eval_with_args("1 | 2", "script.xcl", &[]);
-        assert_eq!(result.as_i48(), 3);
-    }
-
-    #[test]
-    fn test_bitxor() {
-        let result = eval_with_args("6 ^ 3", "script.xcl", &[]);
-        assert_eq!(result.as_i48(), 5);
-    }
-
-    #[test]
-    fn test_bitnot() {
-        let result = eval_with_args("~0", "script.xcl", &[]);
-        assert_eq!(result.as_i48(), -1);
-    }
-
-    #[test]
-    fn test_pow_basic() {
-        let result = eval_with_args("2 ** 10", "script.xcl", &[]);
-        assert_eq!(result.as_i48(), 1024);
-    }
-
-    #[test]
-    fn test_pow_negative_exp() {
-        let result = eval_with_args("2 ** -1", "script.xcl", &[]);
-        assert!((result.as_f64() - 0.5).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_pow_right_associative() {
-        // 2 ** 3 ** 2 = 2 ** 9 = 512
-        let result = eval_with_args("2 ** 3 ** 2", "script.xcl", &[]);
-        assert_eq!(result.as_i48(), 512);
-    }
-
-    #[test]
-    fn test_pow_mixed_float_operands() {
-        let result = eval_with_args("2.0 ** 3", "script.xcl", &[]);
-        assert!(result.is_float());
-        assert!((result.as_f64() - 8.0).abs() < f64::EPSILON);
-
-        let result = eval_with_args("2 ** 3.0", "script.xcl", &[]);
-        assert!(result.is_float());
-        assert!((result.as_f64() - 8.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_pow_i48_boundary() {
-        // 2^40 fits in the 48-bit signed payload.
-        let result = eval_with_args("2 ** 40", "script.xcl", &[]);
-        assert_eq!(result.as_i48(), 1_099_511_627_776);
-
-        // 2^47 does not fit; it must fall back to float.
-        let result = eval_with_args("2 ** 47", "script.xcl", &[]);
-        assert!(result.is_float());
-        assert!((result.as_f64() - 140_737_488_355_328.0).abs() < 1.0);
-    }
-
-    #[test]
-    fn test_precedence_bitor_bitand() {
-        // 1 | 2 & 3 → 1 | (2 & 3) → 1 | 2 → 3
-        let result = eval_with_args("1 | 2 & 3", "script.xcl", &[]);
-        assert_eq!(result.as_i48(), 3);
-    }
-
-    #[test]
-    fn test_precedence_bitxor_bitand() {
-        // 1 ^ 2 & 3 → 1 ^ (2 & 3) → 1 ^ 2 → 3
-        let result = eval_with_args("1 ^ 2 & 3", "script.xcl", &[]);
-        assert_eq!(result.as_i48(), 3);
-    }
-
-    #[test]
-    fn test_precedence_bitor_bitxor() {
-        // 1 | 2 ^ 3 → (1 | 2) ^ 3 → 3 ^ 3 → 0... wait, task says 1
-        // Actually: | binds looser than ^, so 1 | 2 ^ 3 → 1 | (2 ^ 3) → 1 | 1 → 1
-        let result = eval_with_args("1 | 2 ^ 3", "script.xcl", &[]);
-        assert_eq!(result.as_i48(), 1);
-    }
-
-    #[test]
-    fn test_compound_bitor() {
-        let result = eval_with_args("$x = 5; $x |= 3; $x", "script.xcl", &[]);
-        assert_eq!(result.as_i48(), 7);
-    }
-
-    #[test]
-    fn test_compound_bitxor() {
-        let result = eval_with_args("$x = 5; $x ^= 3; $x", "script.xcl", &[]);
-        assert_eq!(result.as_i48(), 6);
-    }
-
-    #[test]
-    fn test_compound_pow() {
-        let result = eval_with_args("$x = 3; $x **= 2; $x", "script.xcl", &[]);
-        assert_eq!(result.as_i48(), 9);
-    }
-
-    #[test]
-    fn test_conditional_true() {
-        let result = eval_with_args("1 if true else 2", "script.xcl", &[]);
-        assert_eq!(result.as_i48(), 1);
-    }
-
-    #[test]
-    fn test_conditional_false() {
-        let result = eval_with_args("1 if false else 2", "script.xcl", &[]);
-        assert_eq!(result.as_i48(), 2);
-    }
-
-    #[test]
-    fn test_conditional_right_associative() {
-        let result = eval_with_args("1 if false else 2 if true else 3", "script.xcl", &[]);
-        assert_eq!(result.as_i48(), 2);
-    }
-
-    #[test]
-    fn test_conditional_string_example() {
-        let result = eval_with_args(
-            r#"$num = 6; $label = "WEEKEND!" if $num > 5 else "Workday"; $label"#,
-            "script.xcl",
-            &[],
-        );
-        assert_eq!(result.as_str(), Some("WEEKEND!"));
-    }
-
-    #[test]
-    fn test_if_statement_not_swallowed_by_conditional() {
-        // The newline before `if` must keep it as a statement, not a ternary.
-        let src = "$x = 1\nif true { $x = 2 }\n$x";
-        let result = eval_with_args(src, "script.xcl", &[]);
-        assert_eq!(result.as_i48(), 2);
-    }
-
-    #[test]
-    fn test_lambda_body_bitor() {
-        // $f = |$x| $x | 1; $f 2 → 3
-        let result = eval_with_args("$f = |$x| $x | 1; $f 2", "script.xcl", &[]);
-        assert_eq!(result.as_i48(), 3);
-    }
-
-    #[test]
-    fn test_logical_or_still_works() {
-        let result = eval_with_args("false || true", "script.xcl", &[]);
-        assert!(result.as_bool());
-    }
-
-    #[test]
-    fn test_sum_type_parsing() {
-        // Shape = A | B should produce a TypeDef, not a binary expression
-        let src = "Shape = A | B";
-        let tokens = lex(src, "<test>");
-        let ast = parse(&tokens, src);
-        assert_eq!(ast.len(), 1);
-        match &ast[0] {
-            crate::compiler::ast::AstNode::TypeDef { name, .. } => {
-                assert_eq!(name, "Shape");
-            }
-            other => panic!("Expected TypeDef, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_while_loop_sum() {
-        let result = eval_with_args(
-            "$s = 0; $i = 0; while $i < 5 { $s = $s + $i; $i = $i + 1 }; $s",
-            "script.xcl",
-            &[],
-        );
-        assert_eq!(result.as_i48(), 10);
-    }
-
-    #[test]
-    fn test_for_number_loop() {
-        let result = eval_with_args(
-            "$s = 0; for $i in 0..10 { $s = $s + $i }; $s",
-            "script.xcl",
-            &[],
-        );
-        assert_eq!(result.as_i48(), 45);
-    }
-
-    #[test]
-    fn test_named_call_in_while() {
-        let result = eval_with_args(
-            "inc($x) { return $x + 1 }; $i = 0; $r = 0; while $i < 5 { $r = inc $r; $i = $i + 1 }; $r",
-            "script.xcl",
-            &[],
-        );
-        assert_eq!(result.as_i48(), 5);
-    }
-
-    #[test]
-    fn test_parenthesized_lambda_arg() {
-        // f (|$x| $x) should parse as a call with a lambda argument
-        let src = "f (|$x| $x)";
-        let tokens = lex(src, "<test>");
-        let ast = parse(&tokens, src);
-        assert_eq!(ast.len(), 1);
-        match &ast[0] {
-            crate::compiler::ast::AstNode::Call { callee, args, .. } => {
-                match callee.as_ref() {
-                    crate::compiler::ast::AstNode::Ident { name, .. } => {
-                        assert_eq!(name, "f");
-                    }
-                    other => panic!("Expected Ident callee, got {:?}", other),
-                }
-                assert_eq!(args.len(), 1);
-                match &args[0].value {
-                    crate::compiler::ast::AstNode::Lambda { .. } => {}
-                    other => panic!("Expected Lambda arg, got {:?}", other),
-                }
-            }
-            other => panic!("Expected Call, got {:?}", other),
-        }
-    }
-
-    // ── String concat fast path tests ──
-
-    #[test]
-    fn test_string_concat_two_strings() {
-        let result = eval_with_args(r#""hello" + "world""#, "script.xcl", &[]);
-        assert_eq!(result.as_str(), Some("helloworld"));
-    }
-
-    #[test]
-    fn test_string_concat_int_and_string() {
-        let result = eval_with_args(r#"1 + "x""#, "script.xcl", &[]);
-        assert_eq!(result.as_str(), Some("1x"));
-    }
-
-    #[test]
-    fn test_string_concat_string_and_int() {
-        let result = eval_with_args(r#""x" + 1"#, "script.xcl", &[]);
-        assert_eq!(result.as_str(), Some("x1"));
-    }
-
-    #[test]
-    fn test_string_concat_loop() {
-        // Concatenate in a loop to exercise the fast path repeatedly
-        let result = eval_with_args(
-            "$s = \"\"; for $i in 0..100 { $s = $s + \"a\" }; $s",
-            "script.xcl",
-            &[],
-        );
-        let s = result.as_str().expect("concat loop should return string");
-        assert_eq!(s.len(), 100);
-        assert!(s.chars().all(|c| c == 'a'));
-    }
-
-    // ── Map lookup fast path tests ──
-
-    #[test]
-    fn test_map_field_read() {
-        let result = eval_with_args(
-            r#"$m = {name: "Alice", age: 30}; $m.name"#,
-            "script.xcl",
-            &[],
-        );
-        assert_eq!(result.as_str(), Some("Alice"));
-    }
-
-    #[test]
-    fn test_map_index_read() {
-        let result = eval_with_args(
-            r#"$m = {name: "Bob", age: 25}; $m["name"]"#,
-            "script.xcl",
-            &[],
-        );
-        assert_eq!(result.as_str(), Some("Bob"));
-    }
-
-    #[test]
-    fn test_map_field_read_loop() {
-        // Read a field in a loop to exercise the fast path
-        let result = eval_with_args(
-            r#"$m = {x: 42}; $s = 0; for $i in 0..1000 { $s = $s + $m.x }; $s"#,
-            "script.xcl",
-            &[],
-        );
-        assert_eq!(result.as_i48(), 42000);
-    }
-
-    #[test]
-    fn test_map_create_and_read() {
-        let result = eval_with_args(
-            r#"$m = {a: 1, b: 2, c: 3}; $m.a + $m.b + $m.c"#,
-            "script.xcl",
-            &[],
-        );
-        assert_eq!(result.as_i48(), 6);
-    }
-
-    // ── String representation tests (arena bytes, cached hash) ──
-
-    #[test]
-    fn test_string_equality_across_constructions() {
-        // Strings built via from_str, from_str_boxed, and concatenation
-        // with the same bytes should compare equal.
-        let boxed = Value::from_str_boxed("hello".to_string());
-        let arena = bumpalo::Bump::new();
-        let arena_str = Value::from_str("hello".to_string(), &arena);
-        assert_eq!(boxed.as_str(), Some("hello"));
-        assert_eq!(arena_str.as_str(), Some("hello"));
-        // Equality via Value::eq_
-        assert!(Value::eq_(boxed, boxed));
-        assert!(Value::eq_(arena_str, arena_str));
-        // Cross-construction: same bytes, different pointers
-        assert_eq!(boxed.as_str(), arena_str.as_str());
-        core::mem::forget(arena);
-    }
-
-    #[test]
-    fn test_str_hash_consistency() {
-        let boxed = Value::from_str_boxed("test-key".to_string());
-        let arena = bumpalo::Bump::new();
-        let arena_str = Value::from_str("test-key".to_string(), &arena);
-
-        // Both should have the same cached hash
-        let h1 = boxed.str_hash().expect("boxed string should have hash");
-        let h2 = arena_str.str_hash().expect("arena string should have hash");
-        assert_eq!(h1, h2, "same bytes must produce same cached hash");
-
-        // Non-string values return None
-        assert!(Value::from_i48(42).str_hash().is_none());
-        assert!(Value::nil().str_hash().is_none());
-        assert!(Value::bool(true).str_hash().is_none());
-        core::mem::forget(arena);
-    }
-
-    #[test]
-    fn test_concatenation_produces_correct_value() {
-        let result = eval_with_args(r#""hello" + " world""#, "script.xcl", &[]);
-        assert_eq!(result.as_str(), Some("hello world"));
-    }
-
-    #[test]
-    fn test_concatenation_loop_correctness() {
-        // 3-part concatenation in a loop stays correct
-        let result = eval_with_args(
-            r#"$s = ""; for $i in 0..50 { $s = $s + "a" + "b" }; $s"#,
-            "script.xcl",
-            &[],
-        );
-        let s = result.as_str().expect("concat loop should return string");
-        assert_eq!(s.len(), 100);
-        for c in s.chars() {
-            assert!(c == 'a' || c == 'b');
-        }
-    }
-
-    #[test]
-    fn test_map_with_runtime_key() {
-        // A map keyed by a string built at runtime exercises the cached-hash
-        // path with a key that is not the compiler's interned constant.
-        // We build the key via concatenation, then use it for lookup.
-        let result = eval_with_args(
-            r#"$k = "x" + "y"; $m = {xy: 42}; $m[$k]"#,
-            "script.xcl",
-            &[],
-        );
-        assert_eq!(result.as_i48(), 42);
-    }
-
-    // ── Item 2 + Item 6: Memory-stability test ──
-
-    #[test]
-    fn test_memory_stability_500_runs() {
-        // Run the same compiled program 500 times on one VM and assert that
-        // globals.len(), global_index.len(), and frames.len() after run 500
-        // equal their values after run 2.
-        let src = r#"
-            f($n) {
-                if $n <= 0 { return 0 }
-                return f ($n - 1) + 1
-            }
-            $a = [1, 2, 3]
-            $a = $a + [4]
-            f 10
-        "#;
-        let tokens = lex(src, "<test>");
-        let ast = parse(&tokens, src);
-        let bc = compile(&ast);
-        let mut vm = VM::new();
-
-        // Sample the state after the second run on the *same* VM. Anything that
-        // grows per run (globals, function registrations, frames) shows up here.
-        let mut after_second: Option<(usize, usize, usize)> = None;
-        for run in 1..=500 {
-            let _ = vm.run(&bc);
-            if run == 2 {
-                after_second = Some((vm.globals.len(), vm.global_index.len(), vm.frames.len()));
-            }
-        }
-        let (globals_2, global_index_2, frames_2) = after_second.expect("two runs");
-
-        assert_eq!(
-            vm.globals.len(),
-            globals_2,
-            "globals.len() after 500 runs ({}) must equal after 2 runs ({})",
-            vm.globals.len(),
-            globals_2
-        );
-        assert_eq!(
-            vm.global_index.len(),
-            global_index_2,
-            "global_index.len() after 500 runs ({}) must equal after 2 runs ({})",
-            vm.global_index.len(),
-            global_index_2
-        );
-        assert_eq!(
-            vm.frames.len(),
-            frames_2,
-            "frames.len() after 500 runs ({}) must equal after 2 runs ({})",
-            vm.frames.len(),
-            frames_2
-        );
-        assert!(
-            vm.context_stack.is_empty(),
-            "context_stack must be empty after repeated runs"
-        );
-    }
-
-    // ── Tier 2: frame code pointer tests ──
-
-    #[test]
-    fn frame_code_pointer_survives_repeated_runs() {
-        // Compile three different programs and run them round-robin 50 times
-        // each on one VM to catch stale pointer issues.
-        let src_recursion = "f($n) { if $n <= 0 { return 1 } return f ($n - 1) * 2 }; f 10";
-        let src_closure = "$f = |$x| $x * 3; $f 7";
-        let src_tail = "ping($n) { if $n <= 0 { return 7 } return pong ($n - 1) }; pong($n) { if $n <= 0 { return 9 } return ping ($n - 1) }; ping 5";
-
-        let tokens1 = lex(src_recursion, "<test>");
-        let ast1 = parse(&tokens1, src_recursion);
-        let bc1 = compile(&ast1);
-
-        let tokens2 = lex(src_closure, "<test>");
-        let ast2 = parse(&tokens2, src_closure);
-        let bc2 = compile(&ast2);
-
-        let tokens3 = lex(src_tail, "<test>");
-        let ast3 = parse(&tokens3, src_tail);
-        let bc3 = compile(&ast3);
-
-        let mut vm = VM::new();
-        for _ in 0..50 {
-            assert_eq!(vm.run(&bc1).as_i48(), 1024, "recursion failed");
-            assert_eq!(vm.run(&bc2).as_i48(), 21, "closure failed");
-            assert_eq!(vm.run(&bc3).as_i48(), 9, "tail call failed");
-        }
-    }
-
-    #[test]
-    fn tail_call_across_bytecodes_after_run() {
-        // Run a tail-call program, then a different program, then the tail-call
-        // program again on the same VM.
-        let src_tail = "ping($n) { if $n <= 0 { return 7 } return pong ($n - 1) }; pong($n) { if $n <= 0 { return 9 } return ping ($n - 1) }; ping 4";
-        let src_other = "$x = 100; $x + 1";
-
-        let tokens1 = lex(src_tail, "<test>");
-        let ast1 = parse(&tokens1, src_tail);
-        let bc1 = compile(&ast1);
-
-        let tokens2 = lex(src_other, "<test>");
-        let ast2 = parse(&tokens2, src_other);
-        let bc2 = compile(&ast2);
-
-        let mut vm = VM::new();
-        assert_eq!(vm.run(&bc1).as_i48(), 7, "first tail call");
-        assert_eq!(vm.run(&bc2).as_i48(), 101, "other program");
-        assert_eq!(vm.run(&bc1).as_i48(), 7, "tail call again");
-    }
-
-    #[test]
-    fn call_value_after_run() {
-        // Keep a function Value returned by run, call it via call_value after
-        // the VM has run a different program.
-        let src1 = "mk($n) { return |$x| $x + $n }; mk 10";
-        let src2 = "42 * 2";
-
-        let tokens1 = lex(src1, "<test>");
-        let ast1 = parse(&tokens1, src1);
-        let bc1 = compile(&ast1);
-
-        let tokens2 = lex(src2, "<test>");
-        let ast2 = parse(&tokens2, src2);
-        let bc2 = compile(&ast2);
-
-        let mut vm = VM::new();
-        let func = vm.run(&bc1);
-        assert!(func.as_func().is_some(), "expected function from first run");
-
-        // Run a different program
-        assert_eq!(vm.run(&bc2).as_i48(), 84, "different program");
-
-        // Call the saved function via call_value
-        let result = vm.call_value(func, &[Value::from_i48(5)]);
-        assert_eq!(result.as_i48(), 15, "call_value after run");
-    }
-
-    #[test]
-    fn vm_is_send() {
-        fn assert_send<T: Send>() {}
-        assert_send::<VM>();
-    }
-
-    // ── JIT (feature `jit`) ──
-
-    #[cfg(feature = "jit")]
-    #[test]
-    fn jit_compiles_integer_loops_and_matches_an_oracle() {
-        // Counting loop: the JIT must produce the same value as the oracle.
-        let src = "$i = 0\n$s = 0\nwhile $i < 1000 {\n    $s = $s + $i\n    $i = $i + 1\n}\n$s";
-        let tokens = lex(src, "<test>");
-        let ast = parse(&tokens, src);
-        let bc = compile(&ast);
-        assert!(prepare_jit(&bc).is_some(), "counting loop should compile");
-        let mut vm = VM::new();
-        assert_eq!(vm.run(&bc).as_i48(), 499_500);
-
-        // Mock LCG: compiler output checked against a Rust oracle.
-        let src = "$x = 42\n$i = 0\nwhile $i < 100000 {\n    $x = ($x * 37 + 12345) % 1000003\n    $i = $i + 1\n}\n$x";
-        let tokens = lex(src, "<test>");
-        let ast = parse(&tokens, src);
-        let bc = compile(&ast);
-        assert!(prepare_jit(&bc).is_some(), "lcg loop should compile");
-        let mut expect = 42i64;
-        for _ in 0..100_000 {
-            expect = (expect * 37 + 12_345) % 1_000_003;
-        }
-        let mut vm = VM::new();
-        assert_eq!(vm.run(&bc).as_i48(), expect);
-
-        // Bitwise loop: shifts, or, and.
-        let src = "$x = 12345\n$i = 0\nwhile $i < 200000 {\n    $x = (($x << 5) | ($x >> 3)) & 16777215\n    $x = ($x + $i) & 16777215\n    $i = $i + 1\n}\n$x";
-        let tokens = lex(src, "<test>");
-        let ast = parse(&tokens, src);
-        let bc = compile(&ast);
-        assert!(prepare_jit(&bc).is_some(), "bitwise loop should compile");
-        let mut x = 12345i64;
-        let mut i = 0i64;
-        while i < 200_000 {
-            x = ((x << 5) | (x >> 3)) & 16_777_215;
-            x = (x + i) & 16_777_215;
-            i += 1;
-        }
-        let mut vm = VM::new();
-        assert_eq!(vm.run(&bc).as_i48(), x);
-    }
-
-    #[cfg(feature = "jit")]
-    #[test]
-    fn jit_compiles_every_loop_in_a_unit() {
-        let src = "$a = 0\n$i = 0\nwhile $i < 100 {\n    $a = $a + $i\n    $i = $i + 1\n}\n$b = 0\n$j = 0\nwhile $j < 100 {\n    $b = $b + 1\n    $j = $j + 1\n}\n$a + $b";
-        let tokens = lex(src, "<test>");
-        let ast = parse(&tokens, src);
-        let bc = compile(&ast);
-        let unit = prepare_jit(&bc).expect("both loops compile");
-        assert_eq!(unit.entries.len(), 2, "expected two compiled loops");
-        assert_eq!(
-            unit.shadow.iter().filter(|&&s| s != 0).count(),
-            2,
-            "both headers must be in the shadow table"
-        );
-        let mut vm = VM::new();
-        assert_eq!(vm.run(&bc).as_i48(), 4950 + 100);
-    }
-
-    #[cfg(feature = "jit")]
-    #[test]
-    fn jit_compiles_array_index_loops() {
-        let src = "$a = [10,20,30,40,50]\n$i = 0\n$s = 0\nwhile $i < 5 {\n    $s = $s + $a[$i]\n    $i = $i + 1\n}\n$s";
-        let tokens = lex(src, "<test>");
-        let ast = parse(&tokens, src);
-        let bc = compile(&ast);
-        let unit = prepare_jit(&bc).expect("array loop compiles");
-        assert_eq!(unit.entries.len(), 1);
-        assert_eq!(unit.entries[0].access_len, 1, "one array access site");
-        let mut vm = VM::new();
-        assert_eq!(vm.run(&bc).as_i48(), 150);
-
-        // Negative indices are normalised exactly like the interpreter.
-        let src = "$a = [10,20,30]\n$i = -3\n$s = 0\nwhile $i < 0 {\n    $s = $s + $a[$i]\n    $i = $i + 1\n}\n$s";
-        let tokens = lex(src, "<test>");
-        let ast = parse(&tokens, src);
-        let bc = compile(&ast);
-        let mut vm = VM::new();
-        assert_eq!(vm.run(&bc).as_i48(), 60);
-    }
-
-    #[cfg(feature = "jit")]
-    #[test]
-    fn jit_falls_back_when_the_container_is_not_an_array() {
-        // The loop is structurally compilable, but the local is a map. The
-        // cache fill must fail and the interpreter must produce the result.
-        let src = "$m = { a: 1, b: 2 }\n$i = 0\n$s = 0\nwhile $i < 10 {\n    $s = $s + $m[\"a\"]\n    $i = $i + 1\n}\n$s";
-        let tokens = lex(src, "<test>");
-        let ast = parse(&tokens, src);
-        let bc = compile(&ast);
-        let mut vm = VM::new();
-        assert_eq!(vm.run(&bc).as_i48(), 10);
-    }
-
-    #[cfg(feature = "jit")]
-    #[test]
-    fn jit_compiles_map_field_loops() {
-        let src = "$m = { a: 1, b: 2, c: 3 }\n$i = 0\n$s = 0\nwhile $i < 10 {\n    $s = $s + $m.a\n    $s = $s + $m.b\n    $s = $s + $m.c\n    $i = $i + 1\n}\n$s";
-        let tokens = lex(src, "<test>");
-        let ast = parse(&tokens, src);
-        let bc = compile(&ast);
-        let unit = prepare_jit(&bc).expect("map loop compiles");
-        assert_eq!(unit.entries.len(), 1);
-        assert_eq!(unit.entries[0].access_len, 3, "three field reads");
-        let mut vm = VM::new();
-        assert_eq!(vm.run(&bc).as_i48(), 60);
-
-        // A non-integer field makes the cache fill fail; the interpreter must
-        // still produce the right value.
-        let src = "$m = { a: 1.5 }\n$i = 0\n$s = 0\nwhile $i < 10 {\n    $s = $s + $m.a\n    $i = $i + 1\n}\n$s";
-        let tokens = lex(src, "<test>");
-        let ast = parse(&tokens, src);
-        let bc = compile(&ast);
-        let mut vm = VM::new();
-        assert_eq!(vm.run(&bc).as_f64(), 15.0);
-    }
-
-    #[cfg(feature = "jit")]
-    #[test]
-    fn jit_rejects_non_integer_loops() {
-        // A float multiplication inside the body: outside the integer subset.
-        let src = "$x = 1\n$i = 0\nwhile $i < 100 {\n    $x = $x * 1.5\n    $i = $i + 1\n}\n$x";
-        let tokens = lex(src, "<test>");
-        let ast = parse(&tokens, src);
-        let bc = compile(&ast);
-        assert!(prepare_jit(&bc).is_none(), "float loop must not compile");
-        let mut vm = VM::new();
-        assert!(vm.run(&bc).is_float());
-
-        // A `for` loop is not a `while` header.
-        let src = "$s = 0\nfor $i in 0..100 {\n    $s = $s + $i\n}\n$s";
-        let tokens = lex(src, "<test>");
-        let ast = parse(&tokens, src);
-        let bc = compile(&ast);
-        assert!(prepare_jit(&bc).is_none(), "range loop must not compile");
-        let mut vm = VM::new();
-        assert_eq!(vm.run(&bc).as_i48(), 4950);
-    }
-
-    #[cfg(feature = "jit")]
-    #[test]
-    fn jit_bails_out_without_committing_state() {
-        // The counter starts as a float: the entry guard must bail and leave
-        // the register file untouched for the interpreter.
-        let src = "$i = 1.5\n$s = 0\nwhile $i < 5 {\n    $s = $s + 1\n    $i = $i + 1\n}\n$s";
-        let tokens = lex(src, "<test>");
-        let ast = parse(&tokens, src);
-        let bc = compile(&ast);
-        assert!(
-            prepare_jit(&bc).is_some(),
-            "loop is compilable; guard decides"
-        );
-        let mut vm = VM::new();
-        assert_eq!(vm.run(&bc).as_i48(), 4);
-    }
-
-    #[test]
-    fn growing_the_register_file_rebases_active_frame_pointers() {
-        // Each frame caches a raw pointer into `regs`. Growing the file moves
-        // the buffer, so every live frame must be rebased; otherwise a caller
-        // resumed after a deep callee reads and writes the freed block.
-        let src = "1";
-        let tokens = lex(src, "<test>");
-        let ast = parse(&tokens, src);
-        let bc = compile(&ast);
-
-        let mut vm = VM::new();
-        assert_eq!(vm.regs.capacity(), 64, "initial capacity assumption");
-        let first = vm.acquire_frame(&bc);
-        let base = vm.bind_registers(first, 40, 0);
-        vm.regs[base] = Value::from_i48(7);
-
-        // 40 + 40 exceeds the initial capacity, so this reallocates `regs`.
-        let second = vm.acquire_frame(&bc);
-        let _ = vm.bind_registers(second, 40, 0);
-
-        assert_eq!(
-            vm.frames[first].locals.ptr as usize,
-            vm.regs.as_ptr() as usize,
-            "a live frame must point at the current register file"
-        );
-        assert_eq!(vm.frames[first].locals[0].as_i48(), 7);
-    }
-}
+mod tests;
+
+mod call;
+mod registers;
+mod run;

@@ -235,6 +235,9 @@ use alloc::vec::Vec;
 
 /// Bytecode compiler and instruction set for the XCL VM.
 pub mod bytecode;
+/// Development-only helpers (language-name mirror); its tables are compiled
+/// out of release builds.
+pub(crate) mod debug;
 /// Bytecode optimization passes: dead store elimination, constant propagation, LICM.
 pub mod optimizer;
 

@@ -56,7 +56,7 @@ use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 #[cfg(feature = "std")]
 use std::sync::Arc;
 
-mod compiler;
+mod codegen;
 mod instr;
 mod peephole;
 
@@ -65,8 +65,8 @@ pub mod opcodes {
 
     pub use crate::runtime::vm::ops::consts::*;
 }
-pub use compiler::compile;
-pub use compiler::compile_unoptimized;
+pub use codegen::compile;
+pub use codegen::compile_unoptimized;
 pub use instr::Instr;
 pub use opcodes::*;
 

@@ -130,8 +130,9 @@ pub mod special_var_kind {
 ///
 /// # Module space (`128..=255`)
 ///
-/// A module-space byte *is* the instruction: dispatch indexes `opcode_table`
-/// directly by it, with no second lookup, and `a`/`b`/`c` stay available as the
+/// A module-space byte *is* the instruction: dispatch masks it with
+/// [`layout::MODULE_INDEX_MASK`] and indexes the 128-entry `opcode_table`
+/// directly, with no second lookup, and `a`/`b`/`c` stay available as the
 /// handler's operands. The range is shared by every linked crate, so codes must
 /// be unique across the whole program — `xcl_plugins::register_all` rejects
 /// duplicates and names both owners.
