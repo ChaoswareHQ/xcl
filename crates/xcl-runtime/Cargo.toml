@@ -1,0 +1,29 @@
+[package]
+name = "xcl-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "xcl_rt"
+# `cdylib` is the loadable interpreter; `rlib` keeps the host API testable and
+# lets a Rust host link it directly instead of loading the DLL.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Compile the Cranelift JIT into the loadable runtime. The launcher cannot
+# enable this for you: build the runtime with this feature.
+jit = ["xcl-vm/jit"]
+
+[dependencies]
+mimalloc.workspace = true
+xcl-vm.workspace = true
+xcl-plugins.workspace = true
+xcl-analysis.workspace = true
+xcl-debug.workspace = true

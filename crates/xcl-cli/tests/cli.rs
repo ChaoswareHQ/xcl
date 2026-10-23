@@ -8,8 +8,52 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 
 const BIN: &str = env!("CARGO_BIN_EXE_xcl");
+
+/// Locates the interpreter DLL, building it when the test binary runs alone.
+fn runtime_path() -> &'static PathBuf {
+    static RUNTIME: OnceLock<PathBuf> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        let exe = std::env::current_exe().expect("test executable");
+        let dir = exe
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("target/debug");
+        let name = if cfg!(windows) {
+            "xcl_rt.dll"
+        } else if cfg!(target_os = "macos") {
+            "libxcl_rt.dylib"
+        } else {
+            "libxcl_rt.so"
+        };
+        let path = dir.join(name);
+        if !path.exists() {
+            let profile = dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("debug");
+            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            let mut build = Command::new(cargo);
+            build.args(["build", "-p", "xcl-runtime"]);
+            match profile {
+                // Cargo's `dev` profile writes to `target/debug`.
+                "debug" => {}
+                "release" => {
+                    build.arg("--release");
+                }
+                other => {
+                    build.args(["--profile", other]);
+                }
+            }
+            let status = build.status().expect("build xcl-runtime");
+            assert!(status.success(), "cargo build -p xcl-runtime failed");
+        }
+        assert!(path.exists(), "runtime not found at {}", path.display());
+        path
+    })
+}
 
 /// A script file in the temp directory, removed when the test ends.
 struct TempScript {
@@ -36,7 +80,11 @@ impl Drop for TempScript {
 }
 
 fn run(args: &[&str]) -> Output {
-    Command::new(BIN).args(args).output().expect("run xcl")
+    Command::new(BIN)
+        .args(args)
+        .env("XCL_RUNTIME", runtime_path())
+        .output()
+        .expect("run xcl")
 }
 
 fn stdout(output: &Output) -> String {
@@ -192,4 +240,43 @@ fn running_a_clean_program_still_prints_its_value() {
         "running is not linting: {}",
         stderr(&output)
     );
+}
+
+#[test]
+fn list_features_reports_the_compiled_std() {
+    let output = run(&["--list-features"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("std"), "{out}");
+    assert!(out.contains("std_util"), "{out}");
+}
+
+#[test]
+fn feature_alias_installs_the_standard_library() {
+    let output = run(&["--features", "std_util", "-e", "print \"hi\""]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("hi"), "{}", stdout(&output));
+}
+
+#[test]
+fn no_default_features_leaves_a_core_only_runtime() {
+    let output = run(&["--no-default-features", "-e", "1 + 2"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output).trim(), "3");
+
+    // `print` comes from the `std` feature, so it must be absent here.
+    let output = run(&["--no-default-features", "-e", "print \"hi\""]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!stdout(&output).contains("hi"), "{}", stdout(&output));
+}
+
+#[test]
+fn an_unknown_feature_fails_before_running() {
+    let output = run(&["--features", "nope", "-e", "1"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let err = stderr(&output);
+    assert!(err.contains("unknown feature `nope`"), "{err}");
 }

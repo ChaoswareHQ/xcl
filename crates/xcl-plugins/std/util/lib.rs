@@ -35,9 +35,9 @@ pub use errors::{Group, is_known_kind};
 pub use metadata::Metadata;
 pub(crate) use metadata::install as install_metadata;
 pub use registry::{
-    COLD_MODULE_REGISTRY, IMPL_REGISTRY, NATIVE_REGISTRY, OPCODE_REGISTRY, OpcodeEntry, OpcodeFn,
-    PLUGIN_REGISTRY, STD_OPCODE_REGISTRY, TRAIT_REGISTRY, TYPE_REGISTRY, register_all,
-    registered_opcode_name,
+    COLD_MODULE_REGISTRY, FEATURE_REGISTRY, FeatureDescriptor, IMPL_REGISTRY, NATIVE_REGISTRY,
+    OPCODE_REGISTRY, OpcodeEntry, OpcodeFn, PLUGIN_REGISTRY, STD_OPCODE_REGISTRY, TRAIT_REGISTRY,
+    TYPE_REGISTRY, register_all, register_domains, registered_opcode_name,
 };
 pub use result::Result;
 pub use rule::Rule;
@@ -108,6 +108,17 @@ pub fn evaluate_recover(
 ) -> core::result::Result<Value, Vec<xcl_vm::ParseError>> {
     install_metadata(source);
     xcl_vm::evaluate_recover(name, source, vm)
+}
+
+/// Evaluates an already-parsed AST.
+///
+/// Hosts use this after assembling a program from several files, such as
+/// resolving `binding = module.symbol` imports. `header_source` supplies the
+/// `# key: value` metadata header, exactly as [`evaluate`] does.
+pub fn evaluate_ast(ast: &[xcl_vm::AstNode], header_source: &str, vm: &mut VM) -> Value {
+    install_metadata(header_source);
+    let bytecode = xcl_vm::bytecode::compile_hot(ast, vm.hot_table());
+    vm.run(&bytecode)
 }
 
 /// Evaluate XCL source code in a fresh VM.

@@ -14,9 +14,9 @@ pub use primitives::{
     is_primitive_of, primitive_of_name, primitive_of_value,
 };
 pub use value::{
-    BuiltinImpl, DomainCtx, FuncValue, GlobalOverrideGuard, HandleKind, ImplDescriptor, ImplMethod,
-    IntoValue, NamedParam, NativeArg, NativeEntry, NativeKind, RawPtr, SUBTYPE_ERROR,
-    SUBTYPE_HANDLE, SUBTYPE_NONE, SUBTYPE_RANGE, SUBTYPE_RESULT, SUBTYPE_USER_BASE,
+    BuiltinImpl, DomainCtx, FeatureDescriptor, FuncValue, GlobalOverrideGuard, HandleKind,
+    ImplDescriptor, ImplMethod, IntoValue, NamedParam, NativeArg, NativeEntry, NativeKind, RawPtr,
+    SUBTYPE_ERROR, SUBTYPE_HANDLE, SUBTYPE_NONE, SUBTYPE_RANGE, SUBTYPE_RESULT, SUBTYPE_USER_BASE,
     TraitDescriptor, TraitMethod, TypeDescriptor, TypeField, TypeKind, TypeVariant,
     VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK, Value, XclType, extract_arg,
 };

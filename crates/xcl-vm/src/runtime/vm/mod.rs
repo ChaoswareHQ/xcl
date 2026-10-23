@@ -631,47 +631,65 @@ impl VM {
     /// once the slice has been added, so the compiler can emit `OP_CALL_HOT` for
     /// its call sites.
     pub fn register_natives(&mut self, entries: &'static [NativeEntry]) {
+        self.register_natives_filtered(entries, |_| true);
+    }
+
+    /// Registers only the native entries accepted by `keep`.
+    ///
+    /// Feature installation uses this to expose a subset of the compiled
+    /// standard library without changing the static registries.
+    pub fn register_natives_filtered(
+        &mut self,
+        entries: &'static [NativeEntry],
+        keep: impl Fn(&NativeEntry) -> bool,
+    ) {
         for entry in entries {
-            let impl_ = native_impl(entry);
-
-            if let Some(domain) = entry.domain {
-                let full_name = format!("{}.{}", domain, entry.method);
-
-                let didx = *self.domain_index.entry(domain.into()).or_insert_with(|| {
-                    let idx = self.domain_table.len() as u32;
-                    self.domain_table.push(DomainSlot {
-                        name: domain.into(),
-                        methods: Vec::new(),
-                        index: HashMap::new(),
-                        auto_import: false,
-                    });
-                    idx
-                });
-                let slot = &mut self.domain_table[didx as usize];
-                if entry.auto_import {
-                    slot.auto_import = true;
-                }
-                let midx = slot.methods.len() as u32;
-                slot.methods.push(Some(impl_));
-                slot.index.insert(entry.method.into(), midx);
-
-                if entry.auto_import {
-                    let idx = self.global_table.len() as u32;
-                    self.global_table.push(Some(impl_));
-                    self.global_index.entry(entry.method.into()).or_insert(idx);
-                }
-
-                let idx = self.global_table.len() as u32;
-                self.global_table.push(Some(impl_));
-                self.global_index.insert(full_name.into(), idx);
-            } else {
-                let idx = self.global_table.len() as u32;
-                self.global_table.push(Some(impl_));
-                self.global_index.insert(entry.method.into(), idx);
+            if keep(entry) {
+                self.register_native(entry);
             }
-            self.native_entries.push(entry);
         }
         self.rebuild_hot_table();
+    }
+
+    fn register_native(&mut self, entry: &'static NativeEntry) {
+        let impl_ = native_impl(entry);
+
+        if let Some(domain) = entry.domain {
+            let full_name = format!("{}.{}", domain, entry.method);
+
+            let didx = *self.domain_index.entry(domain.into()).or_insert_with(|| {
+                let idx = self.domain_table.len() as u32;
+                self.domain_table.push(DomainSlot {
+                    name: domain.into(),
+                    methods: Vec::new(),
+                    index: HashMap::new(),
+                    auto_import: false,
+                });
+                idx
+            });
+            let slot = &mut self.domain_table[didx as usize];
+            if entry.auto_import {
+                slot.auto_import = true;
+            }
+            let midx = slot.methods.len() as u32;
+            slot.methods.push(Some(impl_));
+            slot.index.insert(entry.method.into(), midx);
+
+            if entry.auto_import {
+                let idx = self.global_table.len() as u32;
+                self.global_table.push(Some(impl_));
+                self.global_index.entry(entry.method.into()).or_insert(idx);
+            }
+
+            let idx = self.global_table.len() as u32;
+            self.global_table.push(Some(impl_));
+            self.global_index.insert(full_name.into(), idx);
+        } else {
+            let idx = self.global_table.len() as u32;
+            self.global_table.push(Some(impl_));
+            self.global_index.insert(entry.method.into(), idx);
+        }
+        self.native_entries.push(entry);
     }
 
     /// Registers plugin descriptors from a static slice.
@@ -680,7 +698,26 @@ impl VM {
     /// path they are published (`std.util` → `util`). `register_natives` builds
     /// the dispatch slots from the flat keys, so either call order works.
     pub fn register_plugins(&mut self, entries: &'static [PluginDescriptor]) {
+        self.register_plugins_filtered(entries, |_| true);
+    }
+
+    /// Registers only the plugin descriptors accepted by `keep`.
+    pub fn register_plugins_filtered(
+        &mut self,
+        entries: &'static [PluginDescriptor],
+        keep: impl Fn(&PluginDescriptor) -> bool,
+    ) {
         for plugin in entries {
+            if !keep(plugin) {
+                continue;
+            }
+            if self
+                .plugin_table
+                .iter()
+                .any(|existing| existing.name == plugin.name)
+            {
+                continue;
+            }
             for alias in plugin.domains {
                 self.domain_alias.insert(alias.path, alias.domain);
             }
@@ -704,7 +741,19 @@ impl VM {
 
     /// Registers type descriptors from a static slice.
     pub fn register_types(&mut self, entries: &'static [TypeDescriptor]) {
+        self.register_types_filtered(entries, |_| true);
+    }
+
+    /// Registers only the type descriptors accepted by `keep`.
+    pub fn register_types_filtered(
+        &mut self,
+        entries: &'static [TypeDescriptor],
+        keep: impl Fn(&TypeDescriptor) -> bool,
+    ) {
         for desc in entries {
+            if !keep(desc) {
+                continue;
+            }
             self.type_index.insert(desc.name.into(), desc);
             self.type_entries.push(desc);
         }
@@ -712,7 +761,19 @@ impl VM {
 
     /// Registers trait descriptors from a static slice.
     pub fn register_traits(&mut self, entries: &'static [TraitDescriptor]) {
+        self.register_traits_filtered(entries, |_| true);
+    }
+
+    /// Registers only the trait descriptors accepted by `keep`.
+    pub fn register_traits_filtered(
+        &mut self,
+        entries: &'static [TraitDescriptor],
+        keep: impl Fn(&TraitDescriptor) -> bool,
+    ) {
         for desc in entries {
+            if !keep(desc) {
+                continue;
+            }
             self.trait_index.insert(desc.name.into(), desc);
         }
     }

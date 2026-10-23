@@ -116,7 +116,7 @@ pub struct ParseOutput {
     pub errors: Vec<ParseError>,
 }
 
-/// Canonical list of parse error codes and their short summaries.
+/// Canonical list of parse and import-load error codes and their short summaries.
 ///
 /// Documentation and analysis tooling can enumerate this slice to produce
 /// error-code reference pages.
@@ -130,6 +130,7 @@ pub static PARSE_ERROR_CODES: &[(&str, &str)] = &[
     ("E0007", "invalid positional argument"),
     ("E0008", "unexpected -> in expression"),
     ("E0009", "invalid assignment target"),
+    ("E0010", "import could not be resolved"),
 ];
 
 mod expr;

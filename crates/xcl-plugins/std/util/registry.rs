@@ -13,13 +13,15 @@
 //! * [`TRAIT_REGISTRY`] - Static list of trait interface definitions.
 //! * [`IMPL_REGISTRY`] - Static list of trait implementation blocks.
 //! * [`OPCODE_REGISTRY`] - Static list of extension opcodes.
+//! * [`FEATURE_REGISTRY`] - Static list of optional features the host can install.
 //!
 //! When a [`xcl_vm::VM`] starts up, calling [`register_all`] scans these slices
-//! and populates the VM's internal dispatch tables.
+//! and populates the VM's internal dispatch tables. [`register_domains`] does
+//! the same for a selected subset, which is what feature installation uses.
 
 use xcl_vm::{ImplDescriptor, NativeEntry, TraitDescriptor, TypeDescriptor, VM};
 
-pub use xcl_vm::{OpcodeEntry, OpcodeFn};
+pub use xcl_vm::{FeatureDescriptor, OpcodeEntry, OpcodeFn};
 
 use linkme::distributed_slice;
 
@@ -68,6 +70,15 @@ pub static PLUGIN_REGISTRY: [xcl_vm::PluginDescriptor] = [..];
 /// hot bytes. Prefer the `cold_module!` macro to writing entries by hand.
 #[distributed_slice]
 pub static COLD_MODULE_REGISTRY: [xcl_vm::ColdModule] = [..];
+
+/// Compile-time distributed registry of optional runtime features.
+///
+/// Each entry names one installable piece of the compiled library. The runtime
+/// exposes the list to the host, which selects a subset at run time. A future
+/// plugin crate adds a feature by declaring a static in this slice; no change to
+/// the runtime or the launcher is needed.
+#[distributed_slice]
+pub static FEATURE_REGISTRY: [FeatureDescriptor] = [..];
 
 /// Looks up the registered name for an extension opcode, std first.
 pub fn registered_opcode_name(op: u8) -> Option<&'static str> {
@@ -128,6 +139,54 @@ pub fn register_all(vm: &mut VM) {
     vm.register_traits(&TRAIT_REGISTRY);
     vm.register_impls(&IMPL_REGISTRY);
 }
+
+/// Registers only the parts of the compiled registry that belong to `domains`.
+///
+/// This is the building block for feature installation. `include_globals`
+/// controls entries without a domain (the global `defer` function, for example).
+/// Opcodes and impls are always registered: an unused opcode is harmless, and
+/// impl blocks may be shared by several domains.
+pub fn register_domains(vm: &mut VM, domains: &[&str], include_globals: bool) {
+    let selected = |domain: Option<&'static str>| match domain {
+        Some(domain) => domains.contains(&domain),
+        None => include_globals,
+    };
+
+    vm.register_plugins_filtered(&PLUGIN_REGISTRY, |plugin| {
+        plugin
+            .domains
+            .iter()
+            .any(|alias| domains.contains(&alias.domain))
+    });
+    validate_opcode_space(&STD_OPCODE_REGISTRY, &OPCODE_REGISTRY);
+    vm.register_opcodes(&STD_OPCODE_REGISTRY);
+    vm.register_opcodes(&OPCODE_REGISTRY);
+    vm.register_cold_modules(&COLD_MODULE_REGISTRY);
+    vm.register_natives_filtered(&NATIVE_REGISTRY, |entry| selected(entry.domain));
+    vm.register_types_filtered(&TYPE_REGISTRY, |entry| selected(entry.domain));
+    vm.register_traits_filtered(&TRAIT_REGISTRY, |entry| selected(entry.domain));
+    vm.register_impls(&IMPL_REGISTRY);
+}
+
+/// Installs the minimal standard library: `std.util` and its sibling domains.
+fn install_std(vm: &mut VM) {
+    register_domains(vm, &["util", "result", "metadata", "rule"], true);
+}
+
+/// The first compiled feature: the minimal standard library.
+///
+/// `std_util` is accepted as an alias so scripts and hosts can use either
+/// spelling. Future domain groups add their own `FeatureDescriptor` here.
+#[distributed_slice(FEATURE_REGISTRY)]
+#[allow(non_upper_case_globals)]
+static STD_FEATURE: FeatureDescriptor = FeatureDescriptor {
+    name: "std",
+    aliases: &["std_util"],
+    summary: "std.util — print, input, defer, panic, Result, metadata, rule",
+    requires: &[],
+    default: true,
+    install: install_std,
+};
 
 /// Declares a cold plugin module and registers it in [`COLD_MODULE_REGISTRY`].
 ///

@@ -16,11 +16,14 @@ greet "world"
 ## Quick Start
 
 ```bash
+# Build the launcher and the loadable interpreter library
+cargo build
+
 # Run a script file
-cargo run -p xcl-cli -- script.xcl
+./target/debug/xcl script.xcl
 
 # Evaluate an expression inline
-cargo run -p xcl-cli -- -e 'print "Hello, world!"'
+./target/debug/xcl -e 'print "Hello, world!"'
 
 # Inspect tokens and the AST
 cargo run -p xcl-debug --bin xcl-debug -- --tree script.xcl
@@ -476,6 +479,27 @@ $int_value = $raw as i32
 
 `is` tests the `tag` of a map (how sum-type values are represented); it does not test primitive types.
 
+### Imports
+
+A top-level line binds a definition from another file:
+
+```xcl
+hello = test.hello
+
+hello
+```
+
+This loads `test.xcl` next to the importing file and binds its top-level
+function `hello`. The part after `=` is a dotted path: every segment but the
+last names the module file, and the last is the symbol. Nested paths such as
+`add = lib.math.add` load `lib/math.xcl`.
+
+The local name may differ from the symbol: `greeting = test.hello` binds the
+function as `greeting`. Types keep their declared name (`Point = shape.Point`).
+Imported files may import others; each module is included once, and a circular
+import is reported as an error. Import lines must be top-level statements on
+their own line.
+
 ### Domains
 
 The standard library is organized into **domains** (namespaces). `xcl-plugins`
@@ -651,6 +675,102 @@ Source → Lexer → Parser → Compiler → Bytecode → VM → Output
 3. **Compilation** — the AST becomes 64-bit instructions, then peephole and dataflow passes run (constant folding, dead-store elimination, LICM, superinstruction fusion).
 4. **Execution** — a register-file VM with a shared operand stack and `LocalSlice` frames.
 
+### Loadable Runtime
+
+`xcl` is a thin launcher. The interpreter is built as a shared library and
+loaded at run time:
+
+- Windows — `xcl_rt.dll`
+- Linux — `libxcl_rt.so`
+- macOS — `libxcl_rt.dylib`
+
+The library contains the VM, the standard plugins, the import loader, the
+linter/disassembler, and mimalloc. The launcher looks for it in `XCL_RUNTIME`,
+then next to `xcl`, then in that directory's `deps` folder. The ABI is versioned
+with `xcl_rt_abi_version`; no allocated value crosses the boundary — the
+host passes UTF-8 paths/source and receives process exit codes.
+
+| Export | Purpose |
+|---|---|
+| `xcl_rt_abi_version` | ABI version, checked by the launcher |
+| `xcl_rt_new` / `xcl_rt_free` | Runtime context |
+| `xcl_rt_set_quiet` / `set_format` | Output configuration |
+| `xcl_rt_add_level` | `-A/-W/-D/-F` lint overrides |
+| `xcl_rt_set_script_args` | `$1`, `$2`, ... |
+| `xcl_rt_set_features` | Select compiled features |
+| `xcl_rt_list_features` | List compiled features |
+| `xcl_rt_run_file` / `run_source` | Resolve imports, compile, run |
+| `xcl_rt_decompile_file` / `decompile_source` | Disassemble |
+| `xcl_rt_lint_file` / `lint_source` | Lint |
+| `xcl_rt_list_lints` / `explain` | Rule catalogue |
+
+A C host embeds it the same way it would embed Luau:
+
+```c
+#include <windows.h>
+
+typedef void *(*xcl_new_fn)(void);
+typedef void (*xcl_free_fn)(void *);
+typedef int (*xcl_run_file_fn)(void *, const char *);
+
+HMODULE lib = LoadLibraryA("xcl_rt.dll");
+xcl_new_fn new = (xcl_new_fn)GetProcAddress(lib, "xcl_rt_new");
+xcl_run_file_fn run_file =
+    (xcl_run_file_fn)GetProcAddress(lib, "xcl_rt_run_file");
+xcl_free_fn free = (xcl_free_fn)GetProcAddress(lib, "xcl_rt_free");
+
+void *ctx = new();
+int status = run_file(ctx, "test.xcl");
+free(ctx);
+/* Keep `lib` loaded: Rust thread-local destructors must stay valid. */
+```
+
+Build both pieces together with `cargo build`; `cargo build -p xcl-runtime`
+builds only the library.
+
+### Features
+
+Optional standard-library plugins are compiled into the runtime and selected at
+run time. They live in `xcl_plugins::FEATURE_REGISTRY`, a
+`linkme::distributed_slice`, so a new plugin crate adds a feature without
+changing the runtime or the launcher.
+
+The first feature is `std` (alias `std_util`): the `util`, `result`, `metadata`,
+and `rule` domains, including `print`, `input`, `defer`, `panic`, and `Result`.
+
+```bash
+xcl --list-features
+xcl --features std_util -e 'print "hi"'
+xcl --no-default-features -e '1 + 2'   # core language, no plugins
+xcl --all-features -e 'print "hi"'
+```
+
+A host selects features with `xcl_rt_set_features(ctx, csv, mode)`: mode `0` is
+defaults, `1` defaults plus `csv`, `2` only `csv` (plus dependencies), and `3`
+every compiled feature. Dependencies are installed first, and a feature's
+`install` function registers only the domains it owns. A context starts with the
+default features, so an embedding host that does nothing gets `std`.
+
+A plugin crate adds a feature by declaring one static; it is embedded in the
+runtime at build time and appears in `--list-features` automatically:
+
+```rust
+#[::linkme::distributed_slice(xcl_plugins::FEATURE_REGISTRY)]
+static MY_FEATURE: xcl_vm::FeatureDescriptor = xcl_vm::FeatureDescriptor {
+    name: "my_plugin",
+    aliases: &[],
+    summary: "my_plugin — example domain",
+    requires: &[],          // names of features installed first
+    default: false,
+    install: |vm| xcl_plugins::register_domains(vm, &["my_domain"], true),
+};
+```
+
+`register_domains` installs only the natives, types, traits, and plugin
+descriptors whose domain is listed; `true` also includes domain-less globals
+such as `defer`. Opcodes and impl blocks are always registered because unused
+opcodes are harmless and impls may be shared by several domains.
+
 ### Memory Model
 
 - **NaN-boxing** — every value is one 64-bit word; heap objects are pointers in the low bits.
@@ -659,10 +779,11 @@ Source → Lexer → Parser → Compiler → Bytecode → VM → Output
 
 ### JIT
 
-`xcl-jit` compiles hot loops to native code with Cranelift. It is optional:
+`xcl-jit` compiles hot loops to native code with Cranelift. It is optional and
+must be compiled into the loadable runtime:
 
 ```bash
-cargo build --release -p xcl-cli --features jit
+cargo build --release -p xcl-runtime --features jit
 ```
 
 The JIT covers integer loops, comparisons, arithmetic, array indexing, and map field reads. Anything it cannot compile falls back to the interpreter, so semantics are identical.
@@ -692,7 +813,8 @@ The code space is `0..=126` for core instructions, `127` for `OP_EXT` (a 32-bit 
 | `xcl-jit` | Optional Cranelift JIT backend (`jit` feature) |
 | `xcl-macros` | Procedural macros: `#[xcl_fn]`, `#[xcl_impl]`, `#[xcl_trait]`, `#[derive(Xcl)]`, `#[opcode]` |
 | `xcl-plugins` | Standard library domains: `util`, `fs`, `io`, `math`, `json`, `https`, `metadata`, `rule` |
-| `xcl-cli` | `xcl` command-line runner |
+| `xcl-cli` | Thin launcher: loads the runtime library and forwards commands |
+| `xcl-runtime` | Loadable interpreter (`cdylib`): VM, plugins, imports, diagnostics, mimalloc, C ABI |
 | `xcl-debug` | `xcl-debug` (tokens/AST) and `xcl-bytecode` (disassemble/trace/profile/stats) |
 | `xcl-doc` | Documentation generator that reads macro metadata and produces an HTML site |
 | `xcl-analysis` | Linter: rustc-style diagnostics, rule catalogue, `--lint` JSON contract |
@@ -819,17 +941,18 @@ xcl -A style --lint script.xcl            # silence a whole group
 xcl --explain W0001                       # what the rule means and how to fix it
 ```
 
-The linter is a `lint` feature, on by default; `--no-default-features` drops it
-for a size-constrained build, the same way `-d` needs `--features debug`.
+The linter and disassembler live in `xcl-runtime` and are always available.
+The launcher's `lint`/`debug` features are accepted for compatibility but no
+longer change the build.
 
 ## Building and Benchmarking
 
 ```bash
-# Interpreter (~1.3 MB release binary)
-cargo build --release -p xcl-cli
+# Launcher + loadable interpreter runtime
+cargo build --release
 
-# Interpreter + JIT (~3.0 MB)
-cargo build --release -p xcl-cli --features jit
+# Interpreter runtime + Cranelift JIT
+cargo build --release -p xcl-runtime --features jit
 
 # Tests and lints
 cargo test --workspace
@@ -847,9 +970,13 @@ cargo bench -p xcl-vm --bench vm_core --bench vm_data \
 Cross-language comparison against Luau, LuaJIT, and CPython:
 
 ```bash
-cargo build --release -p xcl-cli --features jit
-cp target/release/xcl.exe target/release/xcl-jit.exe
-cargo build --release -p xcl-cli
+# Keep a JIT runtime next to a copy of the launcher, then rebuild the default
+# runtime for the interpreter column.
+cargo build --release -p xcl-runtime --features jit
+mkdir -p target/release/jit
+cp target/release/xcl target/release/jit/xcl
+cp target/release/xcl_rt.dll target/release/jit/   # libxcl_rt.so on Unix
+cargo build --release -p xcl-runtime
 CROSSLANG_REPS=9 python crates/xcl-benchmark/crosslang/run.py
 python crates/xcl-benchmark/crosslang/usage.py
 ```

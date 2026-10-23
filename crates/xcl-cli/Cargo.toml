@@ -13,21 +13,18 @@ homepage.workspace = true
 name = "xcl"
 path = "src/main.rs"
 
-[dependencies]
-mimalloc.workspace = true
-# The linter: `xcl --lint`, `--explain`, `--list-lints`, `-A/-W/-D/-F`.
-# Optional so a size-constrained build can drop it (`--no-default-features`).
-xcl-analysis = { workspace = true, optional = true }
-xcl-debug = { workspace = true, optional = true }
-xcl-plugins.workspace = true
-xcl-vm.workspace = true
+# The launcher deliberately has no link-time dependency on the interpreter.
+# It loads `xcl_rt.dll` (or the platform equivalent) at run time; see
+# `src/loader.rs`. Only the dynamic loader itself is platform-specific.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [features]
-# On by default: an offline tool that cannot lint is missing its main job.
+# Kept so existing build scripts (`--features lint`, `--features debug`) keep
+# working. The interpreter loaded at run time always contains both. The JIT is
+# compiled into the runtime, not the launcher:
+# `cargo build -p xcl-runtime --features jit`.
 default = ["lint"]
-lint = ["dep:xcl-analysis"]
-# Enable the Cranelift JIT in the VM (`cargo build -p xcl-cli --features jit`).
-jit = ["xcl-vm/jit"]
-# Enable bytecode disassembly (`xcl -d`). Off by default so the shipping binary
-# does not carry the disassembler.
-debug = ["dep:xcl-debug"]
+lint = []
+debug = []
+jit = []

@@ -10,12 +10,14 @@ start-up-adjusted times.
     cargo build --release --manifest-path crates/xcl-benchmark/runners/luajit-runner/Cargo.toml
     python crates/xcl-benchmark/crosslang/run.py
 
-Optional: benchmark the JIT build next to the interpreter. Build the JIT first,
-copy it aside, then rebuild the interpreter, so both binaries stay available:
+Optional: benchmark the JIT build next to the interpreter. Keep a JIT runtime
+beside a copy of the launcher, then rebuild the default runtime:
 
-    cargo build --release -p xcl-cli --features jit
-    cp target/release/xcl.exe target/release/xcl-jit.exe
-    cargo build --release -p xcl-cli
+    cargo build --release -p xcl-runtime --features jit
+    mkdir -p target/release/jit
+    cp target/release/xcl target/release/jit/xcl
+    cp target/release/xcl_rt.dll target/release/jit/
+    cargo build --release -p xcl-runtime
     CROSSLANG_REPS=7 python crates/xcl-benchmark/crosslang/run.py
 
 `CROSSLANG_REPS` controls the measured repetitions (default 5; one extra run is
@@ -48,7 +50,7 @@ def exe(path: Path) -> Path:
 
 
 XCL = exe(ROOT / "target/release/xcl")
-XCL_JIT = exe(ROOT / "target/release/xcl-jit")
+XCL_JIT = exe(ROOT / "target/release/jit/xcl")
 LUAU = exe(RUNNERS / "luau-runner/target/release/luau-runner")
 LUAJIT = exe(RUNNERS / "luajit-runner/target/release/luajit-runner")
 

@@ -252,9 +252,9 @@ pub use compiler::parser;
 pub use compiler::span::Span;
 pub use compiler::{PARSE_ERROR_CODES, ParseError, ParseOutput, parse_recover};
 pub use runtime::{
-    BuiltinImpl, Cap, CapSet, ColdModule, DomainAlias, DomainCtx, DomainSlot, FuncValue,
-    GlobalOverrideGuard, HandleKind, HotNative, HotTable, ImplDescriptor, ImplMethod, IntoValue,
-    NamedParam, NativeArg, NativeEntry, NativeKind, OpcodeEntry, OpcodeFn, OpcodeResult,
+    BuiltinImpl, Cap, CapSet, ColdModule, DomainAlias, DomainCtx, DomainSlot, FeatureDescriptor,
+    FuncValue, GlobalOverrideGuard, HandleKind, HotNative, HotTable, ImplDescriptor, ImplMethod,
+    IntoValue, NamedParam, NativeArg, NativeEntry, NativeKind, OpcodeEntry, OpcodeFn, OpcodeResult,
     PluginDescriptor, PrimKind, Primitive, RawPtr, SUBTYPE_ERROR, SUBTYPE_HANDLE, SUBTYPE_NONE,
     SUBTYPE_RANGE, SUBTYPE_RESULT, SUBTYPE_USER_BASE, TraitDescriptor, TraitMethod, TypeDescriptor,
     TypeField, TypeKind, TypeVariant, VARIANT_DEFAULT, VARIANT_ERR, VARIANT_OK, VM, Value, XclType,

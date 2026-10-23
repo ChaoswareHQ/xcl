@@ -26,7 +26,7 @@ they must stay out of the xcl workspace.
 ## Running
 
 ```sh
-cargo build --release -p xcl-cli
+cargo build --release
 cargo build --release --manifest-path crates/xcl-benchmark/runners/luau-runner/Cargo.toml
 cargo build --release --manifest-path crates/xcl-benchmark/runners/luajit-runner/Cargo.toml
 
@@ -40,9 +40,11 @@ The JIT tier is measured by copying the JIT build aside first, so both binaries
 exist:
 
 ```sh
-cargo build --release -p xcl-cli --features jit
-cp target/release/xcl.exe target/release/xcl-jit.exe
-cargo build --release -p xcl-cli
+cargo build --release -p xcl-runtime --features jit
+mkdir -p target/release/jit
+cp target/release/xcl target/release/jit/xcl
+cp target/release/xcl_rt.dll target/release/jit/
+cargo build --release -p xcl-runtime
 ```
 
 ## Adding a workload
