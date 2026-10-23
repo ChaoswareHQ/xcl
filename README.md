@@ -418,9 +418,11 @@ Point = {
     y: f64
 }
 
-$p = { x: 1.0, y: 2.0 }
+$p = Point { x: 1.0, y: 2.0 }
 print $p.x
 ```
+
+A plain map literal still works when no type is involved: `$p = { x: 1.0, y: 2.0 }`.
 
 **Sum types** (tagged unions) use `|`:
 
@@ -432,9 +434,11 @@ Message = Text { content: str } | Image { url: str } | Empty
 Sum-type values carry a `tag` field, which is what `is` tests:
 
 ```xcl
-$msg = { tag: "Text", content: "hi" }
+$msg = Message.Text { content: "hi" }
 if $msg is Text { print $msg.content }
 ```
+
+The same value can be written as a map literal: `{ tag: "Text", content: "hi" }`.
 
 **Traits** are types containing only method signatures, implemented with `is`:
 

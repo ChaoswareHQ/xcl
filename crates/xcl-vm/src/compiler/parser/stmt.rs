@@ -221,6 +221,8 @@ impl<'a> Parser<'a> {
                     self.consume();
                 }
             }
+            let variant_names: HashSet<String> = variants.iter().map(|v| v.name.clone()).collect();
+            self.sum_types.insert(name.clone(), variant_names);
             AstNode::TypeDef {
                 span,
                 name,
@@ -276,6 +278,9 @@ impl<'a> Parser<'a> {
             } else {
                 TypeKind::Record
             };
+            if matches!(kind, TypeKind::Record) {
+                self.record_types.insert(name.clone());
+            }
             AstNode::TypeDef {
                 span,
                 name,

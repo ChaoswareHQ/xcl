@@ -1172,6 +1172,21 @@ mod core_ops {
                 return vm.enter_call_from_op(f, &[target]);
             }
 
+            // A function body is compiled as its own unit, so its
+            // `function_by_name` table has no entry for the program's
+            // functions. Fall back to a name search over the globals so a
+            // method call from inside another method still resolves.
+            let method_name = field_val.as_str().unwrap_or("");
+            let found = vm
+                .globals
+                .iter()
+                .find_map(|g| g.as_func().filter(|f| &*f.name == method_name).map(|_| *g));
+            if let Some(func_val) = found
+                && let Some(f) = func_val.as_func()
+            {
+                return vm.enter_call_from_op(f, &[target]);
+            }
+
             vm.push(Value::nil());
             OpcodeResult::Next
         }
@@ -1467,9 +1482,7 @@ mod core_ops {
                 let rhs = match step.kind {
                     0 => Value::from_i48(step.operand as i32 as i64),
                     1 => unsafe { *locals.get_unchecked(step.operand as usize) },
-                    _ => map
-                        .get_fast_value(step.rhs_key)
-                        .unwrap_or_else(Value::nil),
+                    _ => map.get_fast_value(step.rhs_key).unwrap_or_else(Value::nil),
                 };
                 map.update_fast_value(step.key, |old| combine(old, rhs, step.op, arena));
             }
@@ -1506,9 +1519,7 @@ mod core_ops {
                 let rhs = match step.kind {
                     0 => Value::from_i48(step.operand as i32 as i64),
                     1 => unsafe { *locals.get_unchecked(step.operand as usize) },
-                    _ => map
-                        .get_fast_value(step.rhs_key)
-                        .unwrap_or_else(Value::nil),
+                    _ => map.get_fast_value(step.rhs_key).unwrap_or_else(Value::nil),
                 };
                 map.update_fast_value(step.key, |old| combine(old, rhs, step.op, arena));
             }
@@ -2060,6 +2071,19 @@ mod core_ops {
                     .globals
                     .get((vm.function_base + ord - 1) as usize)
                     .copied()
+                && let Some(f) = func_val.as_func()
+            {
+                return vm.enter_call_args_at(f, arg_start, nargs + 1);
+            }
+
+            // Function bodies have their own `function_by_name` table, which
+            // does not contain the program's functions. Fall back to a global
+            // name search so `$self.other x` works inside a method.
+            let found = vm
+                .globals
+                .iter()
+                .find_map(|g| g.as_func().filter(|f| &*f.name == method_name).map(|_| *g));
+            if let Some(func_val) = found
                 && let Some(f) = func_val.as_func()
             {
                 return vm.enter_call_args_at(f, arg_start, nargs + 1);

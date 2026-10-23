@@ -1140,6 +1140,125 @@ f 41"
     );
 }
 
+// ── Type construction ──
+
+#[test]
+fn a_record_type_name_constructs_a_map() {
+    // `Point { ... }` names a declared type, so it builds the value instead of
+    // calling the (non-callable) type global.
+    let v = eval("Point = { x: f64\n y: f64 }\nPoint { x: 3, y: 4 }");
+    let map = v.as_map().expect("map");
+    assert_eq!(map.get("x").map(|v| v.as_i48()), Some(3));
+    assert_eq!(map.get("y").map(|v| v.as_i48()), Some(4));
+}
+
+#[test]
+fn a_constructor_result_accepts_method_calls() {
+    // The constructor is an atom, so `.sum` applies to the value, not to the
+    // map literal that was written as its argument.
+    assert_eq!(
+        eval_i64(
+            "Point = { x: i64\n y: i64\n sum() { return $self.x + $self.y } }\n\
+             Point { x: 1, y: 2 }.sum"
+        ),
+        3
+    );
+}
+
+#[test]
+fn constructors_in_an_array_are_separate_elements() {
+    // A comma inside an array must end the constructor, not extend its args.
+    let v = eval(
+        "Point = { x: i64, y: i64 }\n\
+         [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]",
+    );
+    let elements = v.as_array().expect("array");
+    assert_eq!(elements.len(), 2);
+    assert_eq!(
+        elements[1]
+            .as_map()
+            .and_then(|m| m.get("x"))
+            .map(|v| v.as_i48()),
+        Some(3)
+    );
+}
+
+#[test]
+fn a_function_can_return_a_constructed_value_with_methods() {
+    // The type is declared after the function: the compiler pre-pass still
+    // recognises the constructor, and the return does not become a tail call.
+    assert_eq!(
+        eval_i64(
+            "make($n) { return Point { x: $n, y: $n } }\n\
+             Point = { x: i64, y: i64, sum() { return $self.x + $self.y } }\n\
+             $p = make 4\n$p.sum"
+        ),
+        8
+    );
+}
+
+#[test]
+fn methods_can_call_other_methods_by_name() {
+    assert_eq!(
+        eval_i64(
+            "Point = { x: i64\n get() { return $self.x }\n twice() { return $self.get * 2 } }\n\
+             $p = Point { x: 5 }\n$p.twice"
+        ),
+        10
+    );
+}
+
+#[test]
+fn method_results_work_in_assignment_and_arithmetic() {
+    // These shapes used to take field-only fused opcodes and read nil.
+    assert_eq!(
+        eval_i64(
+            "Point = { x: i64\n sum() { return $self.x + 1 } }\n\
+             $p = Point { x: 4 }\n$t = $p.sum\n$acc = 0\n$acc += $p.sum\n$t + $acc"
+        ),
+        10
+    );
+}
+
+#[test]
+fn a_field_with_the_same_name_as_a_method_wins() {
+    assert_eq!(
+        eval_i64(
+            "total() { return 99 }\nLabeled = { total: i64 }\n$l = Labeled { total: 7 }\n$l.total"
+        ),
+        7
+    );
+}
+
+#[test]
+fn named_arguments_construct_a_record_too() {
+    let v = eval("Point = { x: f64, y: f64 }\nPoint x: 3, y: 4");
+    let map = v.as_map().expect("map");
+    assert_eq!(map.get("x").map(|v| v.as_i48()), Some(3));
+}
+
+#[test]
+fn a_call_with_a_map_argument_is_not_a_constructor() {
+    // `pick` is a function, not a declared type, so the braces stay a map
+    // argument (the `$self` test relies on this shape).
+    let v = eval("pick($v) { return $v }\npick { x: 3 }");
+    assert_eq!(
+        v.as_map().and_then(|m| m.get("x")).map(|v| v.as_i48()),
+        Some(3)
+    );
+}
+
+#[test]
+fn a_sum_variant_construction_carries_its_tag() {
+    let v = eval(
+        "Message = Text { content: str } | Image { url: str };\n\
+         $m = Message.Text { content: \"hi\" }\n$m",
+    );
+    let map = v.as_map().expect("map");
+    assert_eq!(map.get("tag").and_then(|v| v.as_str()), Some("Text"));
+    assert_eq!(map.get("content").and_then(|v| v.as_str()), Some("hi"));
+}
+
 // ── Fused named call / tail call regression tests (vm-tier1-call-dispatch) ──
 
 #[test]

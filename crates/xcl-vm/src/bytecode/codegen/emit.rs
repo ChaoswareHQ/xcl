@@ -191,8 +191,15 @@ impl Compiler<'_> {
                 let t_slot = self.emit_expr_to_slot(target, temp_depth);
                 let field_idx = self.intern(field);
                 let dst = self.temp_slot(temp_depth);
-                // Fall back to unfused sequence when operands overflow.
-                if let (Ok(fi16), Ok(t8)) = (u16::try_from(field_idx), u8::try_from(t_slot)) {
+                // A name that is also a function may be a zero-argument method
+                // call; only `OP_GET_FIELD` falls back to dispatch.
+                if self.field_may_be_method(field) {
+                    self.emit(Instr::a1(OP_LOAD_LOCAL, t_slot));
+                    self.emit(Instr::a1(OP_GET_FIELD, field_idx));
+                    self.emit(Instr::a1(OP_STORE_LOCAL, dst));
+                } else if let (Ok(fi16), Ok(t8)) = (u16::try_from(field_idx), u8::try_from(t_slot))
+                {
+                    // Fall back to unfused sequence when operands overflow.
                     self.emit(Instr::make(OP_GET_FIELD_LOCAL_STORE, dst, fi16, t8));
                 } else {
                     self.emit(Instr::a1(OP_LOAD_LOCAL, t_slot));

@@ -67,6 +67,7 @@ use crate::compiler::ast::{
 };
 use crate::compiler::lexer::{Token, TokenWithText, extract_string};
 use crate::compiler::span::Span;
+use crate::{HashMap, HashSet};
 
 /// Maximum number of parse errors before stopping recovery.
 const ERROR_CAP: usize = 10;
@@ -154,6 +155,12 @@ struct Parser<'a> {
     error_cap_reached: bool,
     /// Recursion depth guard — prevents unbounded nesting on pathological input.
     recursion_depth: usize,
+    /// Record types declared so far. `Point { ... }` is a constructor atom,
+    /// not a call with a map argument.
+    record_types: HashSet<String>,
+    /// Sum types declared so far, mapped to their variant names. A variant
+    /// constructor is `Message.Text { ... }`.
+    sum_types: HashMap<String, HashSet<String>>,
     /// Address of a local in the frame that created this parser.
     ///
     /// Used to measure how much stack the recursive descent has consumed. A
@@ -178,6 +185,8 @@ impl<'a> Parser<'a> {
             errors: Vec::new(),
             error_cap_reached: false,
             recursion_depth: 0,
+            record_types: HashSet::new(),
+            sum_types: HashMap::new(),
             stack_base,
         }
     }

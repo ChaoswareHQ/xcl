@@ -30,7 +30,7 @@ use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 #[cfg(not(feature = "std"))]
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 #[cfg(not(feature = "std"))]
 use alloc::format;
 #[cfg(not(feature = "std"))]
@@ -38,7 +38,7 @@ use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 #[cfg(feature = "std")]
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "std")]
 use std::sync::Arc;
 
@@ -66,7 +66,9 @@ mod fuse;
 mod inline;
 mod opcode_map;
 
-use self::inline::{collect_inlineable, collect_top_level_vars};
+use self::inline::{
+    collect_declared_types, collect_function_names, collect_inlineable, collect_top_level_vars,
+};
 
 /// Body of an inlineable function.
 #[derive(Clone)]
@@ -109,6 +111,17 @@ struct Compiler<'h> {
     uses_argv: bool,
     /// Map of function name -> inlineable function info (pre-pass result).
     inline_map: BTreeMap<String, InlineFn>,
+    /// Record and sum types declared in the program (pre-pass result).
+    ///
+    /// A call whose callee is one of these names is a constructor, not a
+    /// function call: `Point { x: 1, y: 2 }` builds the map and
+    /// `Message.Text { content: "hi" }` builds a tagged map.
+    declared_types: BTreeMap<String, TypeKind>,
+    /// Every function and method declared in the program (pre-pass result).
+    ///
+    /// A field read with one of these names may actually be a zero-argument
+    /// method call, so the field-only fused opcodes cannot be used for it.
+    declared_functions: BTreeSet<String>,
     /// Counter for generating fresh inline-local names.
     inline_counter: u64,
     /// Stack of function names currently being inlined (recursion guard).
@@ -168,6 +181,8 @@ impl<'h> Compiler<'h> {
             hot: None,
             uses_argv: false,
             inline_map: BTreeMap::new(),
+            declared_types: BTreeMap::new(),
+            declared_functions: BTreeSet::new(),
             inline_counter: 0,
             inline_stack: Vec::new(),
             pipeline_depth: 0,
@@ -185,6 +200,20 @@ impl<'h> Compiler<'h> {
 
     fn with_inline_map(mut self, map: BTreeMap<String, InlineFn>) -> Self {
         self.inline_map = map;
+        self
+    }
+
+    /// Supplies the program's declared types so constructor syntax can be
+    /// compiled from any body, including one defined before the type.
+    fn with_declared_types(mut self, map: BTreeMap<String, TypeKind>) -> Self {
+        self.declared_types = map;
+        self
+    }
+
+    /// Supplies every declared function/method name, so a field read that may
+    /// be a method call avoids the field-only fused opcodes.
+    fn with_declared_functions(mut self, names: BTreeSet<String>) -> Self {
+        self.declared_functions = names;
         self
     }
 
@@ -220,6 +249,8 @@ impl<'h> Compiler<'h> {
     fn body_compiler(&self) -> Self {
         let mut c = Compiler::new();
         c.root_slots = self.root_slots.clone();
+        c.declared_types = self.declared_types.clone();
+        c.declared_functions = self.declared_functions.clone();
         c.hot = self.hot;
         c
     }
@@ -331,6 +362,14 @@ impl<'h> Compiler<'h> {
         self.global_index.contains_key(name)
     }
 
+    /// True when `field` names a function or method, so reading it may mean a
+    /// zero-argument method call. Those reads must use `OP_GET_FIELD` (which
+    /// falls back to dispatch), not the field-only fused opcodes.
+    #[inline]
+    fn field_may_be_method(&self, field: &str) -> bool {
+        self.declared_functions.contains(field)
+    }
+
     /// Returns the full dotted name when `node` is a field-access chain rooted
     /// at a plain identifier that is not a local, global, or type name. Such a
     /// chain is a zero-argument domain call (`metadata.all`, `fs.cwd`), not a
@@ -427,7 +466,6 @@ impl<'h> Compiler<'h> {
             );
         }
 
-
         // Callee lookup for `OP_CALL_NAME`: one array load instead of a hash.
         // Function names are interned by their call sites, so a function that is
         // never called simply stays absent.
@@ -496,9 +534,13 @@ pub(super) fn collect_dotted_name(node: &AstNode) -> Option<String> {
 pub fn compile(ast: &[AstNode]) -> Bytecode {
     let inline_map = collect_inlineable(ast);
     let root_vars = collect_top_level_vars(ast);
+    let declared_types = collect_declared_types(ast);
+    let declared_functions = collect_function_names(ast);
     let mut c = Compiler::new()
         .with_root_vars(&root_vars)
-        .with_inline_map(inline_map);
+        .with_inline_map(inline_map)
+        .with_declared_types(declared_types)
+        .with_declared_functions(declared_functions);
     c.compile(ast)
 }
 
@@ -513,9 +555,13 @@ pub fn compile(ast: &[AstNode]) -> Bytecode {
 pub fn compile_hot(ast: &[AstNode], hot: &HotTable) -> Bytecode {
     let inline_map = collect_inlineable(ast);
     let root_vars = collect_top_level_vars(ast);
+    let declared_types = collect_declared_types(ast);
+    let declared_functions = collect_function_names(ast);
     let mut c = Compiler::new()
         .with_root_vars(&root_vars)
         .with_inline_map(inline_map)
+        .with_declared_types(declared_types)
+        .with_declared_functions(declared_functions)
         .with_hot_table(Some(hot));
     c.compile(ast)
 }
@@ -530,9 +576,13 @@ pub fn compile_hot(ast: &[AstNode], hot: &HotTable) -> Bytecode {
 pub fn compile_unoptimized(ast: &[AstNode]) -> (Bytecode, Vec<(u32, u32)>) {
     let inline_map = collect_inlineable(ast);
     let root_vars = collect_top_level_vars(ast);
+    let declared_types = collect_declared_types(ast);
+    let declared_functions = collect_function_names(ast);
     let mut c = Compiler::new()
         .with_root_vars(&root_vars)
-        .with_inline_map(inline_map);
+        .with_inline_map(inline_map)
+        .with_declared_types(declared_types)
+        .with_declared_functions(declared_functions);
     let mut ranges = Vec::new();
     let bytecode = c.compile_with(ast, false, &mut ranges);
     (bytecode, ranges)

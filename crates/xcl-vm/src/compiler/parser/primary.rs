@@ -114,6 +114,36 @@ impl<'a> Parser<'a> {
                         return AstNode::Ident { span, name };
                     }
                 }
+                // A declared type followed by a map literal is a constructor
+                // atom. Consuming the braces here (instead of as a call
+                // argument) makes `Point { x: 1 }.field` apply `.field` to the
+                // value and makes `,` end the constructor inside an array.
+                if let Some(value) = self.try_parse_record_constructor(&name) {
+                    return AstNode::Call {
+                        span: span.clone(),
+                        callee: Box::new(AstNode::Ident {
+                            span: span.clone(),
+                            name,
+                        }),
+                        args: vec![CallArg { value, name: None }],
+                    };
+                }
+                // `Message.Text { content: "hi" }` is the same atom for a
+                // declared sum-type variant.
+                if let Some((variant, value)) = self.try_parse_variant_constructor(&name) {
+                    return AstNode::Call {
+                        span: span.clone(),
+                        callee: Box::new(AstNode::FieldAccess {
+                            span: span.clone(),
+                            target: Box::new(AstNode::Ident {
+                                span: span.clone(),
+                                name,
+                            }),
+                            field: variant,
+                        }),
+                        args: vec![CallArg { value, name: None }],
+                    };
+                }
                 // Space-separated domain-style call: `domain func arg`
                 let mut args = Vec::new();
                 while self.looks_like_arg() {
@@ -427,5 +457,47 @@ impl<'a> Parser<'a> {
                     | Token::SpecialVar
             ),
         }
+    }
+
+    /// Parses the map argument of `Point { x: 1 }` when `Point` is a declared
+    /// record type. Returns `None` for any other call.
+    fn try_parse_record_constructor(&mut self, name: &str) -> Option<AstNode> {
+        if self.record_types.contains(name)
+            && self.at(Token::LBrace)
+            && self.lookahead_dict_at(self.pos + 1)
+        {
+            return Some(self.primary());
+        }
+        None
+    }
+
+    /// Parses `Message.Text { content: "hi" }` when `Message` is a declared
+    /// sum type and `Text` is one of its variants. Consumes the dot and the
+    /// variant name, returning both the variant and its map argument.
+    fn try_parse_variant_constructor(&mut self, name: &str) -> Option<(String, AstNode)> {
+        if !self.at(Token::Dot) {
+            return None;
+        }
+        let variant = match self.tokens.get(self.pos + 1) {
+            Some(t) if t.token == Token::IdentPlain => t.text.clone(),
+            _ => return None,
+        };
+        let known = self
+            .sum_types
+            .get(name)
+            .is_some_and(|variants| variants.contains(&variant));
+        if !known
+            || !matches!(
+                self.tokens.get(self.pos + 2).map(|t| &t.token),
+                Some(Token::LBrace)
+            )
+            || !self.lookahead_dict_at(self.pos + 3)
+        {
+            return None;
+        }
+        self.consume(); // dot
+        self.consume(); // variant name
+        let value = self.primary();
+        Some((variant, value))
     }
 }

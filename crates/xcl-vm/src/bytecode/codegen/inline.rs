@@ -186,6 +186,78 @@ pub(super) fn collect_top_level_vars(ast: &[AstNode]) -> Vec<String> {
     writes
 }
 
+/// Collects the program's top-level record and sum definitions.
+///
+/// The compiler uses this to tell constructor syntax from a call: after
+/// `Point = { x: f64 }`, `Point { x: 1 }` builds a map, while `pick { x: 1 }`
+/// is still a call taking a map argument. Traits are excluded because they
+/// declare no values to construct.
+pub(super) fn collect_declared_types(ast: &[AstNode]) -> BTreeMap<String, TypeKind> {
+    let mut map = BTreeMap::new();
+    for node in ast {
+        if let AstNode::TypeDef { name, kind, .. } = node
+            && !matches!(kind, TypeKind::Trait)
+        {
+            map.insert(name.clone(), kind.clone());
+        }
+    }
+    map
+}
+
+/// Collects every named function and method in the program, including those
+/// declared inside type and implementation bodies.
+///
+/// The compiler uses this to avoid field-only fused opcodes for a name that
+/// may be a zero-argument method call (`$p.total`).
+pub(super) fn collect_function_names(ast: &[AstNode]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for node in ast {
+        collect_function_names_in(node, &mut names);
+    }
+    names
+}
+
+fn collect_function_names_in(node: &AstNode, names: &mut BTreeSet<String>) {
+    match node {
+        AstNode::FunctionDef { name, body, .. } => {
+            names.insert(name.clone());
+            for s in body {
+                collect_function_names_in(s, names);
+            }
+        }
+        AstNode::TypeDef { body, .. } | AstNode::ImplDef { body, .. } => {
+            for s in body {
+                collect_function_names_in(s, names);
+            }
+        }
+        AstNode::Block { statements, .. } => {
+            for s in statements {
+                collect_function_names_in(s, names);
+            }
+        }
+        AstNode::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            for s in then_branch {
+                collect_function_names_in(s, names);
+            }
+            if let Some(branch) = else_branch {
+                for s in branch {
+                    collect_function_names_in(s, names);
+                }
+            }
+        }
+        AstNode::For { body, .. } | AstNode::While { body, .. } => {
+            for s in body {
+                collect_function_names_in(s, names);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Check whether an AST expression is "pure" for inlining purposes.
 /// Pure = no Call, Assign, While, For, If, Lambda, FunctionDef, SpecialVar, Break, Continue.
 fn is_pure_expr(node: &AstNode) -> bool {

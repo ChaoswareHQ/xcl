@@ -126,7 +126,9 @@ impl Compiler<'_> {
                                 return;
                             }
                         }
-                        AstNode::FieldAccess { target, field, .. } => {
+                        AstNode::FieldAccess { target, field, .. }
+                            if !self.field_may_be_method(field) =>
+                        {
                             let t_slot = self.emit_expr_to_slot(target, 0);
                             let field_idx = self.intern(field);
                             // Only emit fused opcode when operands fit.
@@ -137,6 +139,7 @@ impl Compiler<'_> {
                                 return;
                             }
                         }
+                        AstNode::FieldAccess { .. } => {}
                         _ => {}
                     }
                 }
@@ -247,6 +250,14 @@ impl Compiler<'_> {
                 self.emit(Instr::a1(OP_STORE_LOCAL, slot));
             }
             AstNode::Return { value, .. } => {
+                // A constructor in return position builds its map; it must not
+                // take the tail-call path below.
+                if let Some(AstNode::Call { callee, args, .. }) = value.as_deref()
+                    && self.try_emit_construction(callee, args)
+                {
+                    self.emit(Instr::none(OP_RETURN));
+                    return;
+                }
                 // Tail-call optimization: `return foo(args)`.
                 if let Some(AstNode::Call { callee, args, .. }) = value.as_deref() {
                     if let AstNode::Ident { name, .. } = callee.as_ref() {
@@ -283,6 +294,7 @@ impl Compiler<'_> {
                                 ..
                             }
                         )
+                        && !self.field_may_be_method(field)
                     {
                         let i = self.intern(field);
                         self.emit(Instr::a1(OP_RETURN_SELF_FIELD, i));
@@ -637,6 +649,12 @@ impl Compiler<'_> {
             }
 
             AstNode::Call { callee, args, .. } => {
+                // `Point { x: 1, y: 2 }` and `Message.Text { content: "hi" }`
+                // name a declared type, so they construct a value rather than
+                // calling one.
+                if self.try_emit_construction(callee, args) {
+                    return;
+                }
                 // A bare `$f` statement: call the value when it holds a function.
                 // (`$x` holding anything else is left on the stack as before.)
                 if args.is_empty() {
@@ -1106,7 +1124,8 @@ impl Compiler<'_> {
                         kind: SpecialVarKind::SelfValue,
                         ..
                     }
-                ) {
+                ) && !self.field_may_be_method(field)
+                {
                     let i = self.intern(field);
                     self.emit(Instr::a1(OP_SELF_GET_FIELD, i));
                     return;
@@ -1494,6 +1513,91 @@ impl Compiler<'_> {
             _ => false,
         }
     }
+
+    /// Emits a type construction instead of a call.
+    ///
+    /// `Point { x: 1, y: 2 }` (or `Point x: 1, y: 2`) builds the record map.
+    /// `Message.Text { content: "hi" }` builds the same map with the variant
+    /// in `tag`, which is what `is` tests. A local variable with the same name
+    /// shadows the type, exactly like a regular call.
+    ///
+    /// Returns `false` for every other call, leaving it unchanged.
+    fn try_emit_construction(&mut self, callee: &AstNode, args: &[CallArg]) -> bool {
+        if let AstNode::Ident { name, .. } = callee {
+            if !self.name_is_value(name)
+                && matches!(self.declared_types.get(name), Some(TypeKind::Record))
+                && let Some(entries) = constructor_entries(args)
+            {
+                let n = self.push_constructor_entries(&entries);
+                self.emit(Instr::a1(OP_MAKE_DICT, n));
+                return true;
+            }
+        }
+
+        if let AstNode::FieldAccess { target, field, .. } = callee
+            && let AstNode::Ident { name, .. } = target.as_ref()
+            && !self.name_is_value(name)
+            && matches!(
+                self.declared_types.get(name),
+                Some(TypeKind::Sum { variants })
+                    if variants.iter().any(|v| &v.name == field)
+            )
+            && let Some(entries) = constructor_entries(args)
+        {
+            let key = self.intern("tag");
+            self.emit(Instr::a1(OP_PUSH_STR, key));
+            let value = self.intern(field);
+            self.emit(Instr::a1(OP_PUSH_STR, value));
+            let n = 1 + self.push_constructor_entries(&entries);
+            self.emit(Instr::a1(OP_MAKE_DICT, n));
+            return true;
+        }
+
+        false
+    }
+
+    /// True when `name` is a regular variable and therefore shadows a type of
+    /// the same name.
+    #[inline]
+    fn name_is_value(&self, name: &str) -> bool {
+        self.local_index.contains_key(name) || self.root_slots.contains_key(name)
+    }
+
+    /// Pushes each constructor field key and value, returning the entry count.
+    fn push_constructor_entries(&mut self, entries: &[(String, &AstNode)]) -> u32 {
+        for (key, value) in entries {
+            let i = self.intern(key);
+            self.emit(Instr::a1(OP_PUSH_STR, i));
+            self.node(value);
+        }
+        entries.len() as u32
+    }
+}
+
+/// Field entries of a constructor call.
+///
+/// A record or variant is constructed from one map literal (`Point { x: 1 }`)
+/// or from named arguments (`Point x: 1`). Anything else — positional
+/// arguments, a mix of named and positional, or no arguments — is left as an
+/// ordinary call, so functions that take a map keep working.
+fn constructor_entries(args: &[CallArg]) -> Option<Vec<(String, &AstNode)>> {
+    if let [
+        CallArg {
+            value: AstNode::DictLit { entries, .. },
+            name: None,
+        },
+    ] = args
+    {
+        return Some(entries.iter().map(|(k, v)| (k.clone(), v)).collect());
+    }
+    if !args.is_empty() && args.iter().all(|a| a.name.is_some()) {
+        return Some(
+            args.iter()
+                .map(|a| (a.name.clone().unwrap_or_default(), &a.value))
+                .collect(),
+        );
+    }
+    None
 }
 
 /// Compares two receiver expressions by shape, ignoring source spans.

@@ -109,6 +109,7 @@ impl Compiler<'_> {
                     };
                     if let (Some(field), Some(obj_name)) = (field, obj_name)
                         && !self.is_global(obj_name)
+                        && !self.field_may_be_method(field)
                     {
                         let obj_slot = self.local(obj_name);
                         // Only emit fused opcode when operands fit.
