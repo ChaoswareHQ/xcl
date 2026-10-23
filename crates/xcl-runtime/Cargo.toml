@@ -20,6 +20,8 @@ default = []
 # Compile the Cranelift JIT into the loadable runtime. The launcher cannot
 # enable this for you: build the runtime with this feature.
 jit = ["xcl-vm/jit"]
+# Link the Bevy 0.20 bridge. Build with `--features bevy` to expose `bevy.*`.
+bevy = ["dep:xcl-bevy"]
 
 [dependencies]
 mimalloc.workspace = true
@@ -27,3 +29,4 @@ xcl-vm.workspace = true
 xcl-std.workspace = true
 xcl-analysis.workspace = true
 xcl-debug.workspace = true
+xcl-bevy = { workspace = true, optional = true }

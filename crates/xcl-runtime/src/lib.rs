@@ -29,6 +29,11 @@ mod imports;
 
 use xcl_vm::{FeatureDescriptor, Value};
 
+// Force-link optional plugin crates so their `linkme` entries are not stripped
+// by the linker. A plugin crate appends to `xcl_std`'s central registry.
+#[cfg(feature = "bevy")]
+use xcl_bevy as _;
+
 /// How diagnostics are written.
 #[derive(Clone, Copy, Default)]
 enum OutputFormat {
