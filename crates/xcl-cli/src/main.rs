@@ -289,11 +289,15 @@ Runtime:
   The interpreter is loaded from `xcl_rt.dll` (or the platform
   equivalent) next to this binary. Set XCL_RUNTIME to load another build.
 
+Commands:
+  list                    List compiled plugins and the domains they install
+  manifest                Print the generated plugin manifest (TOML)
+  abi                     List the C ABI exported by the runtime
+
 Features:
   --features <LIST>       Enable compiled features in addition to defaults
   --no-default-features   Install only the features named by --features
   --all-features          Install every compiled feature
-  --list-features         List compiled features and exit
 
 When no FILE or -e is given, reads from stdin.
 
@@ -414,8 +418,16 @@ impl Host {
         unsafe { (self.api.list_lints)(self.ctx) }
     }
 
-    fn list_features(&self) -> i32 {
-        unsafe { (self.api.list_features)(self.ctx) }
+    fn list_plugins(&self) -> i32 {
+        unsafe { (self.api.list_plugins)(self.ctx) }
+    }
+
+    fn manifest(&self) -> i32 {
+        unsafe { (self.api.manifest)(self.ctx) }
+    }
+
+    fn abi_list(&self) -> i32 {
+        unsafe { (self.api.abi_list)(self.ctx) }
     }
 
     fn explain(&self, code: &str) -> i32 {
@@ -472,6 +484,15 @@ fn main() {
 
     let host = Host::load(&opts);
 
+    // Simple subcommands take the first positional word. A file literally named
+    // `list` or `abi` is shadowed; commands win.
+    match opts.files.first().map(String::as_str) {
+        Some("list") => process::exit(host.list_plugins()),
+        Some("manifest") => process::exit(host.manifest()),
+        Some("abi") => process::exit(host.abi_list()),
+        _ => {}
+    }
+
     if let Some(code) = &opts.explain {
         process::exit(host.explain(code));
     }
@@ -479,7 +500,7 @@ fn main() {
         process::exit(host.list_lints());
     }
     if opts.list_features {
-        process::exit(host.list_features());
+        process::exit(host.list_plugins());
     }
     if opts.lint {
         process::exit(run_lint_mode(&opts, &host));

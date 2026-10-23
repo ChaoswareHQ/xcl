@@ -14,11 +14,11 @@ name = "xcl_debug"
 path = "src/lib.rs"
 
 [features]
-# Resolve extension opcode names through `xcl-plugins`. On by default for the
+# Resolve extension opcode names through `xcl-std`. On by default for the
 # CLI tools; off for the wasm playground, where the plugin registry (`linkme`)
 # does not exist and only core opcodes can appear.
 default = ["plugins"]
-plugins = ["dep:xcl-plugins"]
+plugins = ["dep:xcl-std"]
 
 [[bin]]
 name = "xcl-debug"
@@ -32,4 +32,4 @@ required-features = ["plugins"]
 
 [dependencies]
 xcl-vm.workspace = true
-xcl-plugins = { workspace = true, optional = true }
+xcl-std = { workspace = true, optional = true }

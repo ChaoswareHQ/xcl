@@ -11,7 +11,7 @@
 //! hard-coding heavyweight standard libraries.
 //!
 //! Higher-level functionality (such as filesystem I/O, process execution, networking, and
-//! standard library functions) is provided via plugins in `xcl-plugins`.
+//! standard library functions) is provided via plugins in `xcl-std`.
 //!
 //! # Compilation and Execution Pipeline
 //!
@@ -53,7 +53,7 @@
 //!
 //! The VM exposes `register_*` methods that accept static slices of native entries,
 //! type descriptors, trait descriptors, impl descriptors, and opcode entries.
-//! The `xcl-plugins` crate owns all registration data and calls these methods to
+//! The `xcl-std` crate owns all registration data and calls these methods to
 //! populate a VM instance with standard library functions, types, and opcodes.
 //!
 //! # Examples

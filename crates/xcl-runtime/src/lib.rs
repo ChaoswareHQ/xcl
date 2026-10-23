@@ -8,7 +8,7 @@
 //!
 //! Optional standard-library features are compiled in and selected by the host
 //! before a run (`xcl_rt_set_features`). The catalogue lives in
-//! `xcl_plugins::FEATURE_REGISTRY`.
+//! `xcl_std::FEATURE_REGISTRY`.
 //!
 //! The ABI is intentionally narrow: the host passes UTF-8 paths/source and a
 //! few configuration flags, and this library writes program output and
@@ -94,17 +94,18 @@ impl FeatureMode {
 }
 
 fn find_feature(name: &str) -> Option<&'static FeatureDescriptor> {
-    xcl_plugins::FEATURE_REGISTRY
+    xcl_std::FEATURE_REGISTRY
         .iter()
         .find(|feature| feature.name == name || feature.aliases.contains(&name))
 }
 
 fn available_features() -> String {
-    xcl_plugins::FEATURE_REGISTRY
+    let mut names: Vec<&'static str> = xcl_std::FEATURE_REGISTRY
         .iter()
         .map(|feature| feature.name)
-        .collect::<Vec<_>>()
-        .join(", ")
+        .collect();
+    names.sort_unstable();
+    names.join(", ")
 }
 
 /// Resolves a feature selection to an install order, dependencies first.
@@ -112,7 +113,7 @@ fn resolve_features(
     mode: FeatureMode,
     requested: &[String],
 ) -> Result<Vec<&'static FeatureDescriptor>, String> {
-    let all: Vec<&'static FeatureDescriptor> = xcl_plugins::FEATURE_REGISTRY.iter().collect();
+    let all: Vec<&'static FeatureDescriptor> = xcl_std::FEATURE_REGISTRY.iter().collect();
     let defaults = || all.iter().copied().filter(|feature| feature.default);
 
     let mut roots: Vec<&'static FeatureDescriptor> = Vec::new();
@@ -235,7 +236,7 @@ impl Runtime {
 
         let mut vm = self.new_vm();
         self.set_args(&mut vm, name);
-        let result = xcl_plugins::evaluate_ast(&ast, source, &mut vm);
+        let result = xcl_std::evaluate_ast(&ast, &mut vm);
         self.finish(result)
     }
 
@@ -433,33 +434,97 @@ fn print_value(value: Value) {
     }
 }
 
-fn print_features(runtime: Option<&Runtime>) {
+fn print_plugins() {
     println!(
-        "{:<10} {:<16} {:<8} {:<9} {:<12} SUMMARY",
-        "FEATURE", "ALIASES", "DEFAULT", "SELECTED", "REQUIRES"
+        "{:<8} {:<12} {:<8} {:<34} SUMMARY",
+        "PLUGIN", "ALIASES", "DEFAULT", "DOMAINS"
     );
-    for feature in xcl_plugins::FEATURE_REGISTRY.iter() {
-        let selected = runtime.is_some_and(|runtime| {
-            runtime
-                .resolved_features
-                .iter()
-                .any(|enabled| enabled.name == feature.name)
-        });
+    let mut features: Vec<_> = xcl_std::FEATURE_REGISTRY.iter().collect();
+    features.sort_by_key(|feature| (!feature.default, feature.name));
+    for feature in features {
         println!(
-            "{:<10} {:<16} {:<8} {:<9} {:<12} {}",
+            "{:<8} {:<12} {:<8} {:<34} {}",
             feature.name,
             feature.aliases.join(", "),
             if feature.default { "yes" } else { "no" },
-            if selected { "yes" } else { "no" },
-            feature.requires.join(", "),
+            feature.domains.join(", "),
             feature.summary
         );
     }
     println!();
     println!(
-        "Use --features <name>,... to add features, --no-default-features to install \
-         only the named ones, or --all-features."
+        "Install a plugin with --features <name>, or use --no-default-features to \
+         start from an empty runtime."
     );
+}
+
+/// The C ABI this runtime exports.
+const ABI_EXPORTS: &[(&str, &str)] = &[
+    ("xcl_rt_abi_version", "uint32_t xcl_rt_abi_version(void)"),
+    ("xcl_rt_abi_list", "int xcl_rt_abi_list(XclRuntime*)"),
+    ("xcl_rt_new", "XclRuntime* xcl_rt_new(void)"),
+    ("xcl_rt_free", "void xcl_rt_free(XclRuntime*)"),
+    (
+        "xcl_rt_set_quiet",
+        "void xcl_rt_set_quiet(XclRuntime*, int quiet)",
+    ),
+    (
+        "xcl_rt_set_format",
+        "void xcl_rt_set_format(XclRuntime*, int format)",
+    ),
+    (
+        "xcl_rt_add_level",
+        "int xcl_rt_add_level(XclRuntime*, const char* target, const char* level)",
+    ),
+    (
+        "xcl_rt_set_script_args",
+        "void xcl_rt_set_script_args(XclRuntime*, size_t argc, const char* const* argv)",
+    ),
+    (
+        "xcl_rt_set_features",
+        "int xcl_rt_set_features(XclRuntime*, const char* csv, int mode)",
+    ),
+    (
+        "xcl_rt_list_plugins",
+        "int xcl_rt_list_plugins(XclRuntime*)",
+    ),
+    ("xcl_rt_manifest", "int xcl_rt_manifest(XclRuntime*)"),
+    (
+        "xcl_rt_run_file",
+        "int xcl_rt_run_file(XclRuntime*, const char* path)",
+    ),
+    (
+        "xcl_rt_run_source",
+        "int xcl_rt_run_source(XclRuntime*, const char* name, const char* source, size_t len)",
+    ),
+    (
+        "xcl_rt_decompile_file",
+        "int xcl_rt_decompile_file(XclRuntime*, const char* path)",
+    ),
+    (
+        "xcl_rt_decompile_source",
+        "int xcl_rt_decompile_source(XclRuntime*, const char* name, const char* source, size_t len)",
+    ),
+    (
+        "xcl_rt_lint_file",
+        "int xcl_rt_lint_file(XclRuntime*, const char* path)",
+    ),
+    (
+        "xcl_rt_lint_source",
+        "int xcl_rt_lint_source(XclRuntime*, const char* name, const char* source, size_t len)",
+    ),
+    ("xcl_rt_list_lints", "int xcl_rt_list_lints(XclRuntime*)"),
+    (
+        "xcl_rt_explain",
+        "int xcl_rt_explain(XclRuntime*, const char* code)",
+    ),
+];
+
+fn print_abi() {
+    println!("XCL runtime ABI v{}", xcl_rt_abi_version());
+    for (_, signature) in ABI_EXPORTS {
+        println!("  {}", signature);
+    }
 }
 
 fn print_lints() {
@@ -532,7 +597,17 @@ fn explain_code(code: &str) -> i32 {
 /// ABI version understood by this runtime. The launcher refuses a mismatch.
 #[unsafe(no_mangle)]
 pub extern "C" fn xcl_rt_abi_version() -> u32 {
-    2
+    4
+}
+
+/// Prints the C ABI this runtime exports.
+///
+/// # Safety
+/// `ctx` may be null; the function does not touch the runtime state.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xcl_rt_abi_list(_ctx: *mut Runtime) -> i32 {
+    print_abi();
+    flushed(0)
 }
 
 /// Borrows the runtime behind an opaque pointer.
@@ -688,14 +763,26 @@ pub unsafe extern "C" fn xcl_rt_set_features(
     flushed(runtime.set_features(csv, mode))
 }
 
-/// Prints the compiled feature catalogue.
+/// Prints the compiled plugin catalogue.
 ///
 /// # Safety
 /// `ctx` must be a live runtime pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn xcl_rt_list_features(ctx: *mut Runtime) -> i32 {
-    let runtime = unsafe { runtime(ctx) };
-    print_features(runtime.as_deref());
+pub unsafe extern "C" fn xcl_rt_list_plugins(_ctx: *mut Runtime) -> i32 {
+    print_plugins();
+    flushed(0)
+}
+
+/// Prints the generated plugin manifest (TOML) for the compiled registry.
+///
+/// The manifest is a projection of the registry populated by the registration
+/// macros, so it always matches the code; it is not a hand-maintained file.
+///
+/// # Safety
+/// `ctx` must be a live runtime pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xcl_rt_manifest(_ctx: *mut Runtime) -> i32 {
+    print!("{}", xcl_std::manifest_toml());
     flushed(0)
 }
 
@@ -842,13 +929,14 @@ mod tests {
 
     #[test]
     fn abi_reports_its_version() {
-        assert_eq!(xcl_rt_abi_version(), 2);
+        assert_eq!(xcl_rt_abi_version(), 4);
     }
 
     #[test]
-    fn feature_selection_accepts_the_alias_and_rejects_unknown_names() {
+    fn feature_selection_uses_exact_names() {
         let mut runtime = Runtime::default();
-        assert_eq!(runtime.set_features(Some("std_util"), 2), 0);
+        assert_eq!(runtime.set_features(Some("std"), 2), 0);
+        assert_eq!(runtime.set_features(Some("std_util"), 2), 1);
         assert_eq!(runtime.set_features(Some("missing_feature"), 2), 1);
     }
 

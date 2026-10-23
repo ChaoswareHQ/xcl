@@ -438,7 +438,7 @@ fn opcode_name(op: u8) -> &'static str {
 /// appear in a program, so there is nothing to look up.
 #[cfg(feature = "plugins")]
 fn extension_opcode_name(op: u8) -> Option<&'static str> {
-    xcl_plugins::registered_opcode_name(op)
+    xcl_std::registered_opcode_name(op)
 }
 
 #[cfg(not(feature = "plugins"))]

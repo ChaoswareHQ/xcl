@@ -5,18 +5,20 @@ use super::*;
 /// Static descriptor for an optional runtime feature.
 ///
 /// Features are compiled into the runtime library (through
-/// `xcl_plugins::FEATURE_REGISTRY`) and selected by the host at run time.
+/// `xcl_std::FEATURE_REGISTRY`) and selected by the host at run time.
 /// `install` registers exactly the natives, types, traits and plugins that the
 /// feature provides, so a minimal build can expose only the parts it needs.
 pub struct FeatureDescriptor {
     /// Canonical feature name, used by `--features`.
     pub name: &'static str,
-    /// Alternate names accepted by the selector (`std_util` for `std`).
+    /// Alternate names accepted by the selector (for example, a legacy name).
     pub aliases: &'static [&'static str],
     /// One-line description for `--list-features`.
     pub summary: &'static str,
     /// Features that must be installed first.
     pub requires: &'static [&'static str],
+    /// Domains this feature installs (`util`, `result`, ...).
+    pub domains: &'static [&'static str],
     /// Whether the feature is installed when the host requests defaults.
     pub default: bool,
     /// Registers this feature's entries into a fresh VM.

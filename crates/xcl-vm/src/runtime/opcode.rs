@@ -6,7 +6,7 @@
 //!
 //! # Architecture
 //!
-//! - The `xcl-plugins` crate owns the [`OpcodeEntry`] distributed slice.
+//! - The `xcl-std` crate owns the [`OpcodeEntry`] distributed slice.
 //! - Each entry has a code, name, and handler function.
 //! - The VM populates an opcode table from the registry during registration.
 //! - Unhandled opcodes in the dispatch loop fall through to the registry lookup.
@@ -81,7 +81,7 @@ pub struct ColdModule {
 
 /// Returns the human-readable name for any core opcode.
 ///
-/// Extension opcode names are resolved via `xcl_plugins::registered_opcode_name`.
+/// Extension opcode names are resolved via `xcl_std::registered_opcode_name`.
 pub fn opcode_name(op: u8) -> Option<&'static str> {
     crate::runtime::vm::ops::opcode_name_core(op)
 }
@@ -145,18 +145,18 @@ pub mod special_var_kind {
 /// [`layout::MODULE_INDEX_MASK`] and indexes the 128-entry `opcode_table`
 /// directly, with no second lookup, and `a`/`b`/`c` stay available as the
 /// handler's operands. The range is shared by every linked crate, so codes must
-/// be unique across the whole program — `xcl_plugins::register_all` rejects
+/// be unique across the whole program — `xcl_std::register_all` rejects
 /// duplicates and names both owners.
 ///
 /// **Std loads first.** `#[opcode]` routes an entry into
-/// `STD_OPCODE_REGISTRY` when it expands inside `xcl-plugins` and into
+/// `STD_OPCODE_REGISTRY` when it expands inside `xcl-std` and into
 /// `OPCODE_REGISTRY` otherwise; std registers first, so its codes are never
 /// taken by a plugin. A plugin that collides with std fails at registration
 /// instead of silently replacing an instruction.
 ///
 /// `OP_EXT` is the cold tier: operand `a` names a module, `c` names the
 /// instruction inside it, and `b` stays a 16-bit operand. Modules are declared
-/// with `cold_module!` and registered by `xcl_plugins::register_all`. A cold
+/// with `cold_module!` and registered by `xcl_std::register_all`. A cold
 /// instruction costs one extra lookup over a hot byte, so it is for plugins whose
 /// instruction set does not fit in 128 bytes — or that run rarely.
 ///

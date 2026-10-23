@@ -5,7 +5,7 @@
 //! processes, and the standalone Luau / LuaJIT runners.
 //!
 //! The criterion benchmarks stay in the crates they measure (`xcl-vm/benches`,
-//! `xcl-plugins/benches`) because they need those crates' dev-dependencies and
+//! `xcl-std/benches`) because they need those crates' dev-dependencies and
 //! `[[bench]]` entries. This crate is the other half: the part that compares XCL
 //! against other runtimes.
 //!

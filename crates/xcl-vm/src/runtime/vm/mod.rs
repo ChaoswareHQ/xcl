@@ -796,7 +796,7 @@ impl VM {
     /// # Panics
     ///
     /// Panics when an entry uses a code below 128. Duplicate codes across crates
-    /// are caught earlier, in `xcl_plugins::register_all`, which knows the std and
+    /// are caught earlier, in `xcl_std::register_all`, which knows the std and
     /// plugin slices separately.
     pub fn register_opcodes(&mut self, entries: &'static [super::opcode::OpcodeEntry]) {
         let table = self

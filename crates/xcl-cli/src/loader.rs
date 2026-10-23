@@ -9,7 +9,7 @@ use std::ffi::{CString, c_char, c_void};
 use std::path::{Path, PathBuf};
 
 /// ABI version this launcher was built against.
-const ABI_VERSION: u32 = 2;
+const ABI_VERSION: u32 = 4;
 
 /// C functions exported by the runtime.
 pub struct RuntimeApi {
@@ -23,7 +23,9 @@ pub struct RuntimeApi {
     pub add_level: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> i32,
     pub set_script_args: unsafe extern "C" fn(*mut c_void, usize, *const *const c_char),
     pub set_features: unsafe extern "C" fn(*mut c_void, *const c_char, i32) -> i32,
-    pub list_features: unsafe extern "C" fn(*mut c_void) -> i32,
+    pub list_plugins: unsafe extern "C" fn(*mut c_void) -> i32,
+    pub manifest: unsafe extern "C" fn(*mut c_void) -> i32,
+    pub abi_list: unsafe extern "C" fn(*mut c_void) -> i32,
     pub run_file: unsafe extern "C" fn(*mut c_void, *const c_char) -> i32,
     pub run_source: unsafe extern "C" fn(*mut c_void, *const c_char, *const u8, usize) -> i32,
     pub decompile_file: unsafe extern "C" fn(*mut c_void, *const c_char) -> i32,
@@ -77,10 +79,12 @@ impl RuntimeApi {
                 "xcl_rt_set_features",
                 unsafe extern "C" fn(*mut c_void, *const c_char, i32) -> i32
             ),
-            list_features: api!(
-                "xcl_rt_list_features",
+            list_plugins: api!(
+                "xcl_rt_list_plugins",
                 unsafe extern "C" fn(*mut c_void) -> i32
             ),
+            manifest: api!("xcl_rt_manifest", unsafe extern "C" fn(*mut c_void) -> i32),
+            abi_list: api!("xcl_rt_abi_list", unsafe extern "C" fn(*mut c_void) -> i32),
             run_file: api!(
                 "xcl_rt_run_file",
                 unsafe extern "C" fn(*mut c_void, *const c_char) -> i32

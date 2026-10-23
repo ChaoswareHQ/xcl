@@ -80,7 +80,7 @@ is an index the page would otherwise have to resolve itself.
 
 ## What is linked
 
-`xcl-vm`, `xcl-analysis`, and the `xcl-debug` decompiler — **not** `xcl-plugins`.
+`xcl-vm`, `xcl-analysis`, and the `xcl-debug` decompiler — **not** `xcl-std`.
 
 The plugin layer registers itself through `linkme` distributed slices, which
 `wasm32-unknown-unknown` does not support: the linker never emits the section
@@ -102,4 +102,4 @@ boundaries, so every registry reads as empty. The split is therefore explicit:
   and plugin opcodes. The 128 hot slots read as unclaimed.
 
 The prelude is deliberately tiny. Anything larger should go through an
-explicit registry in `xcl-plugins` rather than being reimplemented here.
+explicit registry in `xcl-std` rather than being reimplemented here.

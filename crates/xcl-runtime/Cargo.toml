@@ -24,6 +24,6 @@ jit = ["xcl-vm/jit"]
 [dependencies]
 mimalloc.workspace = true
 xcl-vm.workspace = true
-xcl-plugins.workspace = true
+xcl-std.workspace = true
 xcl-analysis.workspace = true
 xcl-debug.workspace = true

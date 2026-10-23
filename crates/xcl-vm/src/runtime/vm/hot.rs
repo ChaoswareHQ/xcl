@@ -68,7 +68,8 @@ impl HotTable {
     ///
     /// That is the licence for the optimizer to evaluate it once instead of
     /// once per loop iteration: the result must not depend on VM state and
-    /// must not be observable. `print` never qualifies; `result.is_ok` does.
+    /// must not be observable. `print` never qualifies; a side-effect-free
+    /// accessor does.
     pub fn is_pure(&self, slot: u16) -> bool {
         use crate::runtime::primitives::Cap;
         self.caps
@@ -128,8 +129,8 @@ impl VM {
     ///
     /// This is how a named call finds a builtin: the exact spelling first
     /// (`print`, `util.print`, `std.util.print`), then each shorter domain
-    /// prefix so a dotted method under a qualified path (`std.util.metadata.all`)
-    /// still lands on `util` + `metadata.all`.
+    /// prefix so a dotted method under a qualified path (`std.util.print`)
+    /// still lands on `util` + `print`.
     pub fn native_entry(&self, name: &str) -> Option<BuiltinImpl> {
         if let Some(native) = self.resolve_builtin(name) {
             return Some(*native);

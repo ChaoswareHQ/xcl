@@ -15,7 +15,7 @@
 //! Contents are limited to the language itself — primitive type names, the
 //! keywords the AST delivers as identifiers, and the built-in variants. Std and
 //! plugin names (`print`, `len`, `sqrt`, `Option`, `Vec`, …) belong to
-//! `xcl-plugins` and must never be added here; the VM does not define them.
+//! `xcl-std` and must never be added here; the VM does not define them.
 
 /// Primitive type names: the sized aliases and the runtime type names.
 #[cfg(debug_assertions)]
@@ -66,7 +66,7 @@ mod tests {
 
     #[test]
     fn contains_no_std_or_plugin_names() {
-        // The VM has no builtin functions; these live in `xcl-plugins`.
+        // The VM has no builtin functions; these live in `xcl-std`.
         for name in [
             "print", "println", "input", "len", "sqrt", "pow", "sin", "Option", "Vec", "String",
             "HashMap",

@@ -3,7 +3,7 @@
 Benchmark corpus and cross-language harnesses for XCL.
 
 This crate is not a benchmark target. Criterion benches live next to the code
-they measure (`xcl-vm/benches`, `xcl-plugins/benches`); this crate holds the
+they measure (`xcl-vm/benches`, `xcl-std/benches`); this crate holds the
 other half — the programs and harnesses that compare XCL against Luau, LuaJIT
 and CPython as separate processes, plus the standalone runners they need.
 

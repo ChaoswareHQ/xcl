@@ -249,15 +249,71 @@ fn list_features_reports_the_compiled_std() {
     assert!(output.status.success(), "{}", stderr(&output));
     let out = stdout(&output);
     assert!(out.contains("std"), "{out}");
-    assert!(out.contains("std_util"), "{out}");
+    assert!(!out.contains("std_util"), "{out}");
 }
 
 #[test]
-fn feature_alias_installs_the_standard_library() {
-    let output = run(&["--features", "std_util", "-e", "print \"hi\""]);
+fn list_command_shows_plugins_and_their_domains() {
+    let output = run(&["list"]);
 
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(stdout(&output).contains("hi"), "{}", stdout(&output));
+    let out = stdout(&output);
+    assert!(out.contains("PLUGIN"), "{out}");
+    assert!(out.contains("std"), "{out}");
+    assert!(out.contains("util"), "{out}");
+    assert!(out.contains("print, input"), "{out}");
+}
+
+#[test]
+fn abi_command_lists_the_c_exports() {
+    let output = run(&["abi"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("XCL runtime ABI v4"), "{out}");
+    assert!(out.contains("xcl_rt_new"), "{out}");
+    assert!(out.contains("xcl_rt_set_features"), "{out}");
+    assert!(out.contains("xcl_rt_list_plugins"), "{out}");
+    assert!(out.contains("xcl_rt_manifest"), "{out}");
+}
+
+#[test]
+fn manifest_command_prints_generated_toml() {
+    let output = run(&["manifest"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("[[plugins]]"), "{out}");
+    assert!(out.contains("name = \"std\""), "{out}");
+    assert!(out.contains("name = \"util.print\""), "{out}");
+    assert!(out.contains("name = \"util.input\""), "{out}");
+    assert!(out.contains("[manifest]"), "{out}");
+}
+
+#[test]
+fn the_std_plugin_can_be_installed_explicitly() {
+    let output = run(&[
+        "--no-default-features",
+        "--features",
+        "std",
+        "-e",
+        "print \"util\"",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("util"), "{}", stdout(&output));
+
+    // The `util` domain is not a separate feature: one plugin, one switch.
+    let output = run(&["--no-default-features", "--features", "util", "-e", "1"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("unknown feature `util`"));
+}
+
+#[test]
+fn feature_names_are_exact() {
+    let output = run(&["--features", "std_util", "-e", "print \"hi\""]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("unknown feature `std_util`"));
 }
 
 #[test]

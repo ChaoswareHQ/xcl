@@ -17,7 +17,7 @@ homepage     = "https://chaoswarehq.com"
 xcl-analysis = { path = "crates/xcl-analysis" }
 xcl-debug = { path = "crates/xcl-debug" }
 xcl-macros = { path = "crates/xcl-macros" }
-xcl-plugins = { path = "crates/xcl-plugins" }
+xcl-std = { path = "crates/xcl-std" }
 xcl-vm     = { path = "crates/xcl-vm" }
 
 # xcl-cli
@@ -51,7 +51,7 @@ glam = "0.34.1"
 num-complex = "0.4.6"
 rand = { version = "0.10.3", default-features = false, features = ["std", "sys_rng", "thread_rng"] }
 
-# [std.net] — lightweight, secure HTTPS client (synchronous, TLS configured per-platform in xcl-plugins)
+# [std.net] — lightweight, secure HTTPS client (synchronous, TLS configured per-platform in xcl-std)
 ureq = "3.4.2"
 
 # [std.sys, std.ffi, std.abi] — platform-specific FFI
@@ -62,7 +62,7 @@ hmac = "0.13.0"
 sha2 = "0.11.1"
 hex = "0.4.3"
 
-# [std.sys] — Windows API (used by xcl-plugins)
+# [std.sys] — Windows API (used by xcl-std)
 windows = { version = "0.62.2", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",

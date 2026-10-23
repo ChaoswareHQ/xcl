@@ -15,7 +15,7 @@
 //! # What is linked, and what is not
 //!
 //! This crate depends on `xcl-vm`, `xcl-analysis`, and the decompiler — not on
-//! `xcl-plugins`. The plugin layer registers itself through `linkme`
+//! `xcl-std`. The plugin layer registers itself through `linkme`
 //! distributed slices, which `wasm32-unknown-unknown` does not support (the
 //! section symbols are never emitted, so every registry is empty). That is a
 //! deliberate trade:
@@ -344,7 +344,7 @@ pub fn run(source: &str) -> String {
 
 // ── Prelude ──
 //
-// `xcl-plugins` cannot be linked on wasm (`linkme` has no wasm support), so the
+// `xcl-std` cannot be linked on wasm (`linkme` has no wasm support), so the
 // functions the examples need are registered here by hand. They are ordinary
 // `NativeKind::Pure` entries: the same shape a plugin produces.
 
@@ -567,7 +567,7 @@ pub fn trace(source: &str) -> String {
 // ── Example plugin ──
 //
 // A playground-sized plugin: two instructions in the hot module space. Real
-// plugins declare these with `#[opcode]` in `xcl-plugins`; the playground links
+// plugins declare these with `#[opcode]` in `xcl-std`; the playground links
 // none of that, so they are registered by hand to show what a claimed hot slot
 // looks like and to prove hot dispatch works.
 

@@ -85,8 +85,8 @@ Inside a function, `$1`…`$N`, `$#`, `$@`, and `$*` refer to that function's ar
 
 ```xcl
 show() {
-    println $#        # number of arguments
-    println $@        # arguments as an array
+    print $#        # number of arguments
+    print $@        # arguments as an array
 }
 show "a" "b"          # 2, [a, b]
 ```
@@ -178,7 +178,8 @@ $greeting = "Hello, " + $name + "!"
 $x = 42  # inline comment
 ```
 
-A **leading** block of `# key: value` lines is script metadata (see [Metadata](#metadata)):
+A **leading** block of `# key: value` lines is a comment header. Runtime
+metadata access is not part of this release.
 
 ```xcl
 # name: deploy
@@ -211,18 +212,6 @@ while $x > 0 {
 `break` leaves and `continue` restarts the innermost `for` or `while` loop. Both are
 statements, so they work inside an `if` branch, and neither escapes a function or
 lambda boundary.
-
-`defer { ... }` registers a closure that runs when the current frame returns, in LIFO order, including on an early `return`:
-
-```xcl
-work() {
-    defer { println "cleanup" }
-    println "body"
-}
-work
-# body
-# cleanup
-```
 
 ### Functions
 
@@ -332,7 +321,7 @@ $x                             # 5 — the top-level variable
 Named arguments use `name: value` and may be mixed with positional ones:
 
 ```xcl
-println bg_color: "red", fg_color: "black" "hello"
+print bg_color: "red", fg_color: "black" "hello"
 ```
 
 At the call site all named arguments are packed into **one trailing map**, so a native receives them as its last positional argument (relevant when writing plugins). Because `:` introduces a name, `=` is unambiguously assignment.
@@ -340,7 +329,7 @@ At the call site all named arguments are packed into **one trailing map**, so a 
 An explicit `,` continues the argument list, so it may span lines:
 
 ```xcl
-println bg_color: "red",
+print bg_color: "red",
         fg_color: "black" "hello"
 ```
 
@@ -502,14 +491,14 @@ their own line.
 
 ### Domains
 
-The standard library is organized into **domains** (namespaces). `xcl-plugins`
-currently ships one domain, `util`; the others (`math`, `io`, `fs`, `net`,
-`encoding`) are not part of this release.
+The standard library is organized into **domains** (namespaces). `xcl-std`
+ships exactly one domain, `util`, with two entry points: `print` (output) and
+`input`. Other domains (`math`, `io`, `fs`, `net`, `encoding`) are not part of
+this release.
 
 ```xcl
 print "hello"                 # util.print
 $name = input "name: "        # util.input
-println (util.fg_color "BrightCyan" "cyan")
 ```
 
 ### Auto-Import
@@ -519,40 +508,30 @@ is the `util` print/input family:
 
 ```xcl
 print "Hello"                 # util.print
-println "Hello"               # util.println
 $line = input "name: "        # util.input
+$n = util.write "raw"         # low-level output, returns bytes written
+util.flush                    # flush stdout
 ```
 
-Any other domain method must be qualified: `util.fg_color`, `util.metadata`.
+Every other method must be qualified: `util.write`, `util.readline`.
 
 ## Standard Library
 
-All of this lives in `xcl-plugins`, under `std/`. `xcl-vm` itself contains only
+All of this lives in `xcl-std`, under `std/`. `xcl-vm` itself contains only
 primitives and the language axioms (`$self`, `$super`, special variables).
 
 ```text
-xcl-plugins/                 container
-└── std/                     container
+xcl-std/                 one crate
+└── std/                     folder chain, not a crate
     └── util/                the library (crate root: lib.rs)
-        ├── lib.rs           `Util` marker, new_vm/evaluate, module list
-        ├── registry.rs      distributed registration (linkme)
-        ├── errors.rs        error-kind vocabulary
-        ├── print.rs         print/println/eprint/eprintln, colours
-        ├── input.rs         input/readline/read
-        ├── defer.rs         the `defer` target
-        ├── panic.rs         Rust-style panic
-        ├── metadata.rs      `# name: value` header
-        ├── result.rs        `Ok`/`Err` helpers
-        └── rule.rs          print/input policy gate
+        ├── lib.rs           `#[xcl_plugin]` marker, host API
+        ├── print.rs         print, write, flush
+        └── input.rs         input, readline
 ```
 
 | Domain | Purpose | Auto-import |
 |---|---|---|
-| `util` | Fast console I/O, input, colours, `defer`, `panic`, `Result`, policy aliases | `print`, `println`, `eprint`, `eprintln`, `error`, `input`, `readline`, `prompt`, `defer`, `panic`, `read`, `write`, `flush`, `fg_color`, `bg_color` |
-| `metadata` | `get`, `all`, `has` | no |
-| `rule` | `allow`, `deny`, `deny_all`, `reset`, `is_allowed`, `message`, `list` | no |
-
-`metadata` and `rule` are aliases onto `util` methods, not separate plugins.
+| `util` | Fast console output and standard input | `print`, `input`, `readline`, `write`, `flush` |
 
 `std` is the plugin that owns `util`, so a call may also be written with the
 qualified path — all three spellings are the same function:
@@ -566,103 +545,28 @@ std.util.print "hi"     # plugin-qualified path
 The VM records the mapping (`VM::plugins()`, `VM::plugin_of("util")`), so a host
 can ask which plugin provides a domain without importing the plugin crate.
 
-### Output and Colours
+### Output
 
-`print` and friends are variadic and accept two named style arguments, `fg_color` and `bg_color`:
+`print` is variadic and writes to one locked stdout handle. Strings, ints,
+booleans and nil do not allocate an intermediate `String`.
 
 ```xcl
 print "plain"
-println "two" "values"
-
-println fg_color: "BrightCyan" "cyan text"
-println bg_color: "red", fg_color: "black" "warning"
-println fg_color: "#00ff88" "hex colour"
+print "two" "values" 1
+print ""                # no trailing newline; use util.write "\n" for one
 ```
 
-Colour names include `Black`, `Red`, `Green`, `Yellow`, `Blue`, `Magenta`, `Cyan`, `White`, their `Bright*` variants, `Dark*`, and `Gray`/`DarkGray`; hex codes may be `#rrggbb`, `rrggbb`, or `#rgb`.
-
-The same colours are available as ordinary functions:
-
-```xcl
-$text = util.fg_color "Red" "error"
-$bar  = util.bg_color "Blue" " "
-```
+`util.write` writes raw text and returns the number of bytes written;
+`util.flush` flushes buffered stdout.
 
 ### Input
 
 ```xcl
 $name = input "name: "       # prompt, one line
 $line = util.readline         # one line, no prompt
-$all  = util.read             # everything until EOF
 ```
 
-`input`, `readline`, and `read` return `none` at end of input.
-
-### Defer, Panic
-
-```xcl
-report() {
-    defer { println "done" }
-    println "working"
-    return true
-}
-
-if $fatal {
-    panic "cannot continue"
-}
-```
-
-`panic` writes `panic: <message>` to stderr and exits with status 101 (Rust's panic code), after flushing stdout.
-
-### Metadata
-
-The leading `# key: value` block is available at runtime:
-
-```xcl
-# name: demo
-# version: 1.2.0
-
-println (metadata.get "name")       # demo
-println (metadata.has "version")    # true
-
-$header = metadata.all              # {name: demo, version: 1.2.0}
-```
-
-`util.metadata`, `util.metadata_get`, `util.metadata.get`, and `util.metadata.all` are aliases.
-
-### Policy (`rule`)
-
-`rule` is a cooperative gate for `print` and input operations:
-
-```xcl
-rule.deny "fs.*"                 # wildcard deny
-println (rule.is_allowed "fs.read")   # false
-
-rule.allow "fs.read"
-rule.deny_all                    # deny everything not allowed
-rule.reset
-```
-
-A denied operation performs no I/O; it writes `util: denied <op>: <message>` to stderr and returns `none`.
-
-### Result
-
-`Result` values are maps with the VM's `Result` subtype; the payload lives under `Ok` or `Err`.
-
-```xcl
-$ok  = util.ok 42
-$bad = util.err "not_found"
-
-println (util.is_ok $ok)          # true
-println (util.unwrap $ok)         # 42
-println (util.unwrap_or $bad 0)   # 0
-```
-
-The constructors `Ok` and `Err` also work: `Ok 42`, `Err "not_found"`.
-
-Method syntax is available in statements and conditions, or with space-separated arguments: `if $r.is_ok { ... }`, `$r.unwrap`, `$e.unwrap_or 0`.
-
-Standard error-kind strings live in `xcl_plugins::errors` (`not_found`, `permission_denied`, `is_a_directory`, and so on) so scripts can match on `kind` consistently.
+`input` and `readline` return `none` at end of input.
 
 ## Architecture
 
@@ -693,12 +597,14 @@ host passes UTF-8 paths/source and receives process exit codes.
 | Export | Purpose |
 |---|---|
 | `xcl_rt_abi_version` | ABI version, checked by the launcher |
+| `xcl_rt_abi_list` | Print the exported ABI |
 | `xcl_rt_new` / `xcl_rt_free` | Runtime context |
 | `xcl_rt_set_quiet` / `set_format` | Output configuration |
 | `xcl_rt_add_level` | `-A/-W/-D/-F` lint overrides |
 | `xcl_rt_set_script_args` | `$1`, `$2`, ... |
-| `xcl_rt_set_features` | Select compiled features |
-| `xcl_rt_list_features` | List compiled features |
+| `xcl_rt_set_features` | Select compiled plugins |
+| `xcl_rt_list_plugins` | List compiled plugins |
+| `xcl_rt_manifest` | Print the generated plugin manifest (TOML) |
 | `xcl_rt_run_file` / `run_source` | Resolve imports, compile, run |
 | `xcl_rt_decompile_file` / `decompile_source` | Disassemble |
 | `xcl_rt_lint_file` / `lint_source` | Lint |
@@ -731,45 +637,57 @@ builds only the library.
 ### Features
 
 Optional standard-library plugins are compiled into the runtime and selected at
-run time. They live in `xcl_plugins::FEATURE_REGISTRY`, a
-`linkme::distributed_slice`, so a new plugin crate adds a feature without
+run time. They live in `xcl_std::FEATURE_REGISTRY`, a
+`linkme::distributed_slice`, so a new plugin crate adds a plugin without
 changing the runtime or the launcher.
 
-The first feature is `std` (alias `std_util`): the `util`, `result`, `metadata`,
-and `rule` domains, including `print`, `input`, `defer`, `panic`, and `Result`.
+`xcl list` shows what is compiled in, `xcl manifest` prints the generated
+plugin manifest, and `xcl abi` shows the C surface:
 
 ```bash
-xcl --list-features
-xcl --features std_util -e 'print "hi"'
+xcl list
+xcl manifest
+xcl abi
+```
+
+There is one plugin today. `std` is the default and installs the `util`
+domain:
+
+| Plugin | Domains | Adds |
+|---|---|---|
+| `std` | `util` | `print`, `input`, `readline`, `write`, `flush` |
+
+```bash
+xcl --features std -e 'print "hi"'
+xcl --no-default-features --features std -e 'print "minimal"'
 xcl --no-default-features -e '1 + 2'   # core language, no plugins
 xcl --all-features -e 'print "hi"'
 ```
 
-A host selects features with `xcl_rt_set_features(ctx, csv, mode)`: mode `0` is
+A host selects plugins with `xcl_rt_set_features(ctx, csv, mode)`: mode `0` is
 defaults, `1` defaults plus `csv`, `2` only `csv` (plus dependencies), and `3`
-every compiled feature. Dependencies are installed first, and a feature's
+every compiled plugin. Dependencies are installed first, and a plugin's
 `install` function registers only the domains it owns. A context starts with the
-default features, so an embedding host that does nothing gets `std`.
+default plugins, so an embedding host that does nothing gets `std`.
 
-A plugin crate adds a feature by declaring one static; it is embedded in the
-runtime at build time and appears in `--list-features` automatically:
+A plugin crate declares itself once, on its domain marker type:
 
 ```rust
-#[::linkme::distributed_slice(xcl_plugins::FEATURE_REGISTRY)]
-static MY_FEATURE: xcl_vm::FeatureDescriptor = xcl_vm::FeatureDescriptor {
-    name: "my_plugin",
-    aliases: &[],
-    summary: "my_plugin — example domain",
-    requires: &[],          // names of features installed first
-    default: false,
-    install: |vm| xcl_plugins::register_domains(vm, &["my_domain"], true),
-};
+#[xcl_plugin(default, domain = "my_domain", summary = "my_plugin — example domain")]
+pub struct MyDomain;
 ```
 
+`#[xcl_plugin]` emits the registry anchors, the `PLUGIN_REGISTRY` entry, and the
+`FEATURE_REGISTRY` entry, and derives `Xcl` for the marker. Functions, impls, and
+types then use `#[xcl_fn]`, `#[xcl_impl]`, and `#[derive(Xcl)]` and never name a
+slice. The plugin name comes from the crate (`xcl-my-plugin` → `my_plugin`) and
+the domain from the type (`Util` → `util`); both can be overridden with
+`name = "..."` / `domain = "..."`.
+
 `register_domains` installs only the natives, types, traits, and plugin
-descriptors whose domain is listed; `true` also includes domain-less globals
-such as `defer`. Opcodes and impl blocks are always registered because unused
-opcodes are harmless and impls may be shared by several domains.
+descriptors whose domain is listed; `true` also includes domain-less globals.
+Opcodes and impl blocks are always registered because unused opcodes are
+harmless and impls may be shared by several domains.
 
 ### Memory Model
 
@@ -812,7 +730,7 @@ The code space is `0..=126` for core instructions, `127` for `OP_EXT` (a 32-bit 
 | `xcl-vm` | Core VM: lexer, parser, bytecode compiler, optimizer, runtime, opcodes |
 | `xcl-jit` | Optional Cranelift JIT backend (`jit` feature) |
 | `xcl-macros` | Procedural macros: `#[xcl_fn]`, `#[xcl_impl]`, `#[xcl_trait]`, `#[derive(Xcl)]`, `#[opcode]` |
-| `xcl-plugins` | Standard library domains: `util`, `fs`, `io`, `math`, `json`, `https`, `metadata`, `rule` |
+| `xcl-std` | Standard library plugin (`std`): the `util` domain with `print` and `input` |
 | `xcl-cli` | Thin launcher: loads the runtime library and forwards commands |
 | `xcl-runtime` | Loadable interpreter (`cdylib`): VM, plugins, imports, diagnostics, mimalloc, C ABI |
 | `xcl-debug` | `xcl-debug` (tokens/AST) and `xcl-bytecode` (disassemble/trace/profile/stats) |

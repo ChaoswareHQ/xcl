@@ -1,0 +1,32 @@
+[package]
+name = "xcl-std"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+homepage.workspace = true
+
+# Describes this crate's plugins to tooling (`xcl list`, docs, package indexes).
+# This is metadata only: the compiler never reads it. The same values are
+# compiled into `PLUGIN_REGISTRY` so a running VM can answer without Cargo.
+[package.metadata.xcl.plugins.std]
+kind = "plugin"
+domains = ["util"]
+summary = "standard library — print, input"
+
+# `std/util` is a folder chain, not a set of crates: this crate is the only
+# package, and its library lives at the bottom of the chain.
+[lib]
+path = "std/util/lib.rs"
+
+[features]
+default = []
+
+[dependencies]
+xcl-macros.workspace = true
+xcl-vm.workspace = true
+linkme.workspace = true
+itoa.workspace = true
