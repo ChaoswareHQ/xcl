@@ -22,8 +22,8 @@ libc.workspace = true
 [features]
 # Kept so existing build scripts (`--features lint`, `--features debug`) keep
 # working. The interpreter loaded at run time always contains both. The JIT is
-# compiled into the runtime, not the launcher:
-# `cargo build -p xcl-runtime --features jit`.
+# compiled into the SDK, not the launcher:
+# `cargo build -p xcl-toolchains --features jit`.
 default = ["lint"]
 lint = []
 debug = []

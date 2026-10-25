@@ -92,8 +92,8 @@ fn infer_domain_from_span(span: proc_macro2::Span) -> Option<String> {
 /// `CARGO_PKG_NAME` is set by cargo for the crate being compiled, so this is a
 /// reliable way to route a registration into the std-first registry without
 /// asking every author to spell it out.
-fn is_std_crate() -> bool {
-    std::env::var("CARGO_PKG_NAME").ok().as_deref() == Some("xcl-std")
+fn is_engine_crate() -> bool {
+    std::env::var("CARGO_PKG_NAME").ok().as_deref() == Some("xcl-rt")
 }
 
 /// Capability names accepted by `flags = "…"` and `caps = "…"`, mapped to
@@ -120,7 +120,7 @@ const CAPABILITY_NAMES: &[(&str, &str)] = &[
 ];
 
 /// Expands a capability list such as `"PURE | DETERMINISTIC"` or
-/// `"Len, Contains"` into a constant [`CapSet`](::xcl_vm::CapSet) expression.
+/// `"Len, Contains"` into a constant [`CapSet`](::xcl_rt::CapSet) expression.
 fn capability_set_tokens(list: &str, span: Span) -> syn::Result<proc_macro2::TokenStream> {
     capability_set_tokens_at(list, span, quote!(::xcl_vm))
 }
@@ -366,7 +366,7 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
             Ok(ts) => ts,
             Err(e) => return e.to_compile_error().into(),
         },
-        None => quote!(::xcl_vm::CapSet::EMPTY),
+        None => quote!(::xcl_rt::CapSet::EMPTY),
     };
 
     let summary_expr = match attrs.summary {
@@ -391,9 +391,9 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
             let (kind_expr, fields_tokens) = match &data_struct.fields {
                 syn::Fields::Named(fields) => {
                     let kind_expr = match kind.as_deref() {
-                        Some("Record") => quote!(::xcl_vm::TypeKind::Record),
-                        Some("Opaque") => quote!(::xcl_vm::TypeKind::Opaque),
-                        _ => quote!(::xcl_vm::TypeKind::Record),
+                        Some("Record") => quote!(::xcl_rt::TypeKind::Record),
+                        Some("Opaque") => quote!(::xcl_rt::TypeKind::Opaque),
+                        _ => quote!(::xcl_rt::TypeKind::Record),
                     };
 
                     if kind.as_deref() == Some("Opaque") {
@@ -403,7 +403,7 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
                             let field_name = f.ident.as_ref().unwrap().to_string();
                             let field_ty = rust_type_to_xcl_type(&f.ty);
                             quote! {
-                                ::xcl_vm::TypeField {
+                                ::xcl_rt::TypeField {
                                     name: #field_name,
                                     ty: #field_ty,
                                     optional: false,
@@ -413,14 +413,14 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
                         (kind_expr, quote!(&[#(#fs_entries),*]))
                     }
                 }
-                syn::Fields::Unnamed(_) => (quote!(::xcl_vm::TypeKind::Opaque), quote!(&[])),
-                syn::Fields::Unit => (quote!(::xcl_vm::TypeKind::Opaque), quote!(&[])),
+                syn::Fields::Unnamed(_) => (quote!(::xcl_rt::TypeKind::Opaque), quote!(&[])),
+                syn::Fields::Unit => (quote!(::xcl_rt::TypeKind::Opaque), quote!(&[])),
             };
 
             let expanded = quote! {
-                #[::linkme::distributed_slice(::xcl_std::TYPE_REGISTRY)]
+                #[::linkme::distributed_slice(::xcl_rt::TYPE_REGISTRY)]
                 #[allow(non_upper_case_globals)]
-                static #statik: ::xcl_vm::TypeDescriptor = ::xcl_vm::TypeDescriptor {
+                static #statik: ::xcl_rt::TypeDescriptor = ::xcl_rt::TypeDescriptor {
                     name: #name_str,
                     domain: #domain_expr,
                     kind: #kind_expr,
@@ -443,8 +443,8 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
             );
 
             let kind_expr = match kind.as_deref() {
-                Some("Sum") => quote!(::xcl_vm::TypeKind::Sum),
-                _ => quote!(::xcl_vm::TypeKind::Sum),
+                Some("Sum") => quote!(::xcl_rt::TypeKind::Sum),
+                _ => quote!(::xcl_rt::TypeKind::Sum),
             };
 
             let variants_tokens = if data_enum.variants.is_empty() {
@@ -458,7 +458,7 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
                                 let field_name = f.ident.as_ref().unwrap().to_string();
                                 let field_ty = rust_type_to_xcl_type(&f.ty);
                                 quote! {
-                                    ::xcl_vm::TypeField {
+                                    ::xcl_rt::TypeField {
                                         name: #field_name,
                                         ty: #field_ty,
                                         optional: false,
@@ -466,7 +466,7 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
                                 }
                             });
                             quote! {
-                                ::xcl_vm::TypeVariant {
+                                ::xcl_rt::TypeVariant {
                                     name: #variant_name,
                                     fields: &[#(#fs_entries),*],
                                 }
@@ -476,7 +476,7 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
                             let fs_entries = fields.unnamed.iter().map(|f| {
                                 let field_ty = rust_type_to_xcl_type(&f.ty);
                                 quote! {
-                                    ::xcl_vm::TypeField {
+                                    ::xcl_rt::TypeField {
                                         name: "value",
                                         ty: #field_ty,
                                         optional: false,
@@ -484,7 +484,7 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
                                 }
                             });
                             quote! {
-                                ::xcl_vm::TypeVariant {
+                                ::xcl_rt::TypeVariant {
                                     name: #variant_name,
                                     fields: &[#(#fs_entries),*],
                                 }
@@ -492,7 +492,7 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
                         }
                         syn::Fields::Unit => {
                             quote! {
-                                ::xcl_vm::TypeVariant {
+                                ::xcl_rt::TypeVariant {
                                     name: #variant_name,
                                     fields: &[],
                                 }
@@ -504,9 +504,9 @@ pub fn xcl_derive(item: TokenStream) -> TokenStream {
             };
 
             let expanded = quote! {
-                #[::linkme::distributed_slice(::xcl_std::TYPE_REGISTRY)]
+                #[::linkme::distributed_slice(::xcl_rt::TYPE_REGISTRY)]
                 #[allow(non_upper_case_globals)]
-                static #statik: ::xcl_vm::TypeDescriptor = ::xcl_vm::TypeDescriptor {
+                static #statik: ::xcl_rt::TypeDescriptor = ::xcl_rt::TypeDescriptor {
                     name: #name_str,
                     domain: #domain_expr,
                     kind: #kind_expr,
@@ -561,7 +561,7 @@ pub fn xcl_trait(_attr: TokenStream, item: TokenStream) -> TokenStream {
     } else {
         let entries = method_names.iter().map(|m_name| {
             quote! {
-                ::xcl_vm::TraitMethod {
+                ::xcl_rt::TraitMethod {
                     name: #m_name,
                     args: None,
                     ret: None,
@@ -580,9 +580,9 @@ pub fn xcl_trait(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         #trait_item
 
-        #[::linkme::distributed_slice(::xcl_std::TRAIT_REGISTRY)]
+        #[::linkme::distributed_slice(::xcl_rt::TRAIT_REGISTRY)]
         #[allow(non_upper_case_globals)]
-        static #statik: ::xcl_vm::TraitDescriptor = ::xcl_vm::TraitDescriptor {
+        static #statik: ::xcl_rt::TraitDescriptor = ::xcl_rt::TraitDescriptor {
             name: #name_str,
             domain: None,
             methods: #methods_tokens,
@@ -733,7 +733,7 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
             let t = &np.ty;
             let d = &np.default;
             quote! {
-                ::xcl_vm::NamedParam {
+                ::xcl_rt::NamedParam {
                     name: #n,
                     ty: #t,
                     default: #d,
@@ -751,7 +751,7 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
             Ok(ts) => ts,
             Err(e) => return e.to_compile_error().into(),
         },
-        None => quote!(::xcl_vm::CapSet::EMPTY),
+        None => quote!(::xcl_rt::CapSet::EMPTY),
     };
 
     if uses_typed_params {
@@ -765,20 +765,20 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
             #func
 
             #[allow(dead_code)]
-            fn #wrapper_ident(args: &[::xcl_vm::Value]) -> ::xcl_vm::Value {
+            fn #wrapper_ident(args: &[::xcl_rt::Value]) -> ::xcl_rt::Value {
                 #(#arg_conversions)*
                 #fn_ident(#(#arg_vars),*)
             }
 
-            #[::linkme::distributed_slice(::xcl_std::NATIVE_REGISTRY)]
+            #[::linkme::distributed_slice(::xcl_rt::NATIVE_REGISTRY)]
             #[allow(non_upper_case_globals)]
-            #vis static #statik: ::xcl_vm::NativeEntry = ::xcl_vm::NativeEntry {
+            #vis static #statik: ::xcl_rt::NativeEntry = ::xcl_rt::NativeEntry {
                 domain: #domain_expr,
                 impl_type: #impl_type_expr,
                 override_method: #override_method_expr,
                 method: #method_name,
-                kind: ::xcl_vm::NativeKind::Pure,
-                ptr: ::xcl_vm::RawPtr(#wrapper_ident as *const ()),
+                kind: ::xcl_rt::NativeKind::Pure,
+                ptr: ::xcl_rt::RawPtr(#wrapper_ident as *const ()),
                 args: #args_static,
                 ret: #ret_static,
                 named: #named_static,
@@ -797,15 +797,15 @@ pub fn xcl_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
         let expanded = quote! {
             #func
 
-            #[::linkme::distributed_slice(::xcl_std::NATIVE_REGISTRY)]
+            #[::linkme::distributed_slice(::xcl_rt::NATIVE_REGISTRY)]
             #[allow(non_upper_case_globals)]
-            #vis static #statik: ::xcl_vm::NativeEntry = ::xcl_vm::NativeEntry {
+            #vis static #statik: ::xcl_rt::NativeEntry = ::xcl_rt::NativeEntry {
                 domain: #domain_expr,
                 impl_type: #impl_type_expr,
                 override_method: #override_method_expr,
                 method: #method_name,
                 kind: #kind,
-                ptr: ::xcl_vm::RawPtr(#fn_ident as *const ()),
+                ptr: ::xcl_rt::RawPtr(#fn_ident as *const ()),
                 args: #args_static,
                 ret: #ret_static,
                 named: #named_static,
@@ -1083,10 +1083,10 @@ fn generate_arg_conversions(
             let arg_name = &pt.pat;
             let arg_type = &pt.ty;
 
-            // Generate: let <name> = ::xcl_vm::extract_arg::<Type>(args, <index>);
+            // Generate: let <name> = ::xcl_rt::extract_arg::<Type>(args, <index>);
             let index = syn::Index::from(i);
             let conversion = quote! {
-                let #arg_name = ::xcl_vm::extract_arg::<#arg_type>(args, #index);
+                let #arg_name = ::xcl_rt::extract_arg::<#arg_type>(args, #index);
             };
             conversions.push(conversion);
 
@@ -1108,11 +1108,11 @@ pub fn xcl_type(attr: TokenStream, item: TokenStream) -> TokenStream {
     let kind_str = parsed.kind;
 
     let kind_expr = match kind_str.as_str() {
-        "Opaque" => quote!(::xcl_vm::TypeKind::Opaque),
-        "Record" => quote!(::xcl_vm::TypeKind::Record),
-        "Sum" => quote!(::xcl_vm::TypeKind::Sum),
-        "Alias" => quote!(::xcl_vm::TypeKind::Alias),
-        _ => quote!(::xcl_vm::TypeKind::Opaque),
+        "Opaque" => quote!(::xcl_rt::TypeKind::Opaque),
+        "Record" => quote!(::xcl_rt::TypeKind::Record),
+        "Sum" => quote!(::xcl_rt::TypeKind::Sum),
+        "Alias" => quote!(::xcl_rt::TypeKind::Alias),
+        _ => quote!(::xcl_rt::TypeKind::Opaque),
     };
 
     let domain_expr = if let Some(ref d) = domain {
@@ -1150,7 +1150,7 @@ pub fn xcl_type(attr: TokenStream, item: TokenStream) -> TokenStream {
             let ty = &f.ty;
             let opt = f.optional;
             quote! {
-                ::xcl_vm::TypeField {
+                ::xcl_rt::TypeField {
                     name: #name_s,
                     ty: #ty,
                     optional: #opt,
@@ -1174,7 +1174,7 @@ pub fn xcl_type(attr: TokenStream, item: TokenStream) -> TokenStream {
                     let ty = &f.ty;
                     let opt = f.optional;
                     quote! {
-                        ::xcl_vm::TypeField {
+                        ::xcl_rt::TypeField {
                             name: #name_s,
                             ty: #ty,
                             optional: #opt,
@@ -1184,7 +1184,7 @@ pub fn xcl_type(attr: TokenStream, item: TokenStream) -> TokenStream {
                 quote!(&[#(#fs_entries),*])
             };
             quote! {
-                ::xcl_vm::TypeVariant {
+                ::xcl_rt::TypeVariant {
                     name: #name_s,
                     fields: #fs,
                 }
@@ -1198,15 +1198,15 @@ pub fn xcl_type(attr: TokenStream, item: TokenStream) -> TokenStream {
             Ok(ts) => ts,
             Err(e) => return e.to_compile_error().into(),
         },
-        None => quote!(::xcl_vm::CapSet::EMPTY),
+        None => quote!(::xcl_rt::CapSet::EMPTY),
     };
 
     let expanded = quote! {
         #item
 
-        #[::linkme::distributed_slice(::xcl_std::TYPE_REGISTRY)]
+        #[::linkme::distributed_slice(::xcl_rt::TYPE_REGISTRY)]
         #[allow(non_upper_case_globals)]
-        static #statik: ::xcl_vm::TypeDescriptor = ::xcl_vm::TypeDescriptor {
+        static #statik: ::xcl_rt::TypeDescriptor = ::xcl_rt::TypeDescriptor {
             name: #name,
             domain: #domain_expr,
             kind: #kind_expr,
@@ -1358,13 +1358,13 @@ fn parse_variants_stream(input: syn::parse::ParseStream<'_>) -> syn::Result<Vec<
 
 fn detect_kind(func: &ItemFn) -> proc_macro2::TokenStream {
     let Some(FnArg::Typed(pt)) = func.sig.inputs.first() else {
-        return quote!(::xcl_vm::NativeKind::Pure);
+        return quote!(::xcl_rt::NativeKind::Pure);
     };
 
     if is_ctx_type(&pt.ty) {
-        quote!(::xcl_vm::NativeKind::Ctx)
+        quote!(::xcl_rt::NativeKind::Ctx)
     } else {
-        quote!(::xcl_vm::NativeKind::Pure)
+        quote!(::xcl_rt::NativeKind::Pure)
     }
 }
 
@@ -1485,7 +1485,7 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         } else {
             let entries = method_names.iter().map(|m_name| {
                 quote! {
-                    ::xcl_vm::ImplMethod {
+                    ::xcl_rt::ImplMethod {
                         name: #m_name,
                     }
                 }
@@ -1505,9 +1505,9 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         let expanded = quote! {
             #impl_item
 
-            #[::linkme::distributed_slice(::xcl_std::IMPL_REGISTRY)]
+            #[::linkme::distributed_slice(::xcl_rt::IMPL_REGISTRY)]
             #[allow(non_upper_case_globals)]
-            static #statik: ::xcl_vm::ImplDescriptor = ::xcl_vm::ImplDescriptor {
+            static #statik: ::xcl_rt::ImplDescriptor = ::xcl_rt::ImplDescriptor {
                 type_name: #type_name,
                 trait_name: #trait_name,
                 methods: #methods_tokens,
@@ -1585,13 +1585,13 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                         if is_vec_value {
                             quote! {
                                 let #local_name = {
-                                    let val = ::xcl_vm::extract_arg::<::xcl_vm::Value>(args, #arg_idx);
-                                    val.as_array().map(|arr| arr.iter().copied().collect::<Vec<::xcl_vm::Value>>()).unwrap_or_default()
+                                    let val = ::xcl_rt::extract_arg::<::xcl_rt::Value>(args, #arg_idx);
+                                    val.as_array().map(|arr| arr.iter().copied().collect::<Vec<::xcl_rt::Value>>()).unwrap_or_default()
                                 };
                             }
                         } else {
                             quote! {
-                                let #local_name = ::xcl_vm::extract_arg::<#arg_type>(args, #arg_idx);
+                                let #local_name = ::xcl_rt::extract_arg::<#arg_type>(args, #arg_idx);
                             }
                         }
                     } else {
@@ -1618,13 +1618,13 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 let return_conversion = match &iif.sig.output {
                     syn::ReturnType::Type(_, _ty) => {
                         quote! {
-                            ::xcl_vm::IntoValue::into_value(#type_path_expr::#method_name(#(#call_args),*))
+                            ::xcl_rt::IntoValue::into_value(#type_path_expr::#method_name(#(#call_args),*))
                         }
                     }
                     syn::ReturnType::Default => {
                         quote! {
                             #type_path_expr::#method_name(#(#call_args),*);
-                            ::xcl_vm::Value::nil()
+                            ::xcl_rt::Value::nil()
                         }
                     }
                 };
@@ -1632,26 +1632,26 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 let auto_import_val = auto_import;
                 let hot_val = hot;
                 native_entries.push(quote! {
-                    #[::linkme::distributed_slice(::xcl_std::NATIVE_REGISTRY)]
+                    #[::linkme::distributed_slice(::xcl_rt::NATIVE_REGISTRY)]
                     #[allow(non_upper_case_globals)]
-                    static #statik: ::xcl_vm::NativeEntry = ::xcl_vm::NativeEntry {
+                    static #statik: ::xcl_rt::NativeEntry = ::xcl_rt::NativeEntry {
                         domain: #domain_expr,
                         impl_type: None,
                         override_method: None,
                         method: #method_name_str,
-                        kind: ::xcl_vm::NativeKind::Pure,
-                        ptr: ::xcl_vm::RawPtr(#wrapper_name as *const ()),
+                        kind: ::xcl_rt::NativeKind::Pure,
+                        ptr: ::xcl_rt::RawPtr(#wrapper_name as *const ()),
                         args: #args_expr,
                         ret: #ret_type,
                         named: &[],
                         summary: #summary_expr,
                         arg_desc: &[],
                         auto_import: #auto_import_val,
-                        caps: ::xcl_vm::CapSet::EMPTY,
+                        caps: ::xcl_rt::CapSet::EMPTY,
                         hot: #hot_val,
                     };
 
-                    fn #wrapper_name(args: &[::xcl_vm::Value]) -> ::xcl_vm::Value {
+                    fn #wrapper_name(args: &[::xcl_rt::Value]) -> ::xcl_rt::Value {
                         #(#arg_extracts)*
                         #return_conversion
                     }
@@ -1688,11 +1688,11 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Where the registries live
 ///
-/// `xcl-std` owns the `linkme` slice anchors (`NATIVE_REGISTRY`, …) and is the
-/// only crate that declares them. Every other plugin crate depends on
-/// `xcl-std` and appends to those same slices through `::xcl_std::*`, so one
-/// `xcl_std::register_all` call sees every statically linked plugin. This is
-/// also why the macro must be used once per plugin crate, at its crate root.
+/// `xcl-rt` owns the `linkme` slice anchors (`NATIVE_REGISTRY`, …) and is the
+/// only crate that declares them. Every plugin crate appends to those same
+/// slices through `::xcl_rt::*`, so one `xcl_rt::register_all` call sees every
+/// statically linked plugin. This is also why the macro must be used once per
+/// plugin crate, at its crate root.
 ///
 /// # Attributes
 ///
@@ -1702,6 +1702,8 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `summary = "..."` — one line shown by `xcl list`
 /// - `aliases = "old, older"` — alternate feature names
 /// - `requires = "base"` — features installed first
+/// - `permissions = "gui, input"` — host capabilities the plugin uses; a host
+///   with a profile that does not grant them refuses to install the plugin
 /// - `default` / `default = true|false` — installed when the host uses defaults
 ///
 /// # Requirements
@@ -1718,6 +1720,7 @@ pub fn xcl_plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut summary: Option<String> = None;
     let mut aliases: Vec<String> = Vec::new();
     let mut requires: Vec<String> = Vec::new();
+    let mut permissions: Vec<String> = Vec::new();
     let mut default = false;
 
     let parser = syn::meta::parser(|meta| {
@@ -1736,6 +1739,9 @@ pub fn xcl_plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
         } else if meta.path.is_ident("requires") {
             requires = split_csv_list(&meta.value()?.parse::<LitStr>()?.value());
             Ok(())
+        } else if meta.path.is_ident("permissions") {
+            permissions = split_csv_list(&meta.value()?.parse::<LitStr>()?.value());
+            Ok(())
         } else if meta.path.is_ident("default") {
             default = if meta.input.peek(Token![=]) {
                 meta.value()?.parse::<syn::LitBool>()?.value()
@@ -1744,8 +1750,9 @@ pub fn xcl_plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
             };
             Ok(())
         } else {
-            Err(meta
-                .error("expected `name`, `domain`, `summary`, `aliases`, `requires`, or `default`"))
+            Err(meta.error(
+                "expected `name`, `domain`, `summary`, `aliases`, `requires`, `permissions`, or `default`",
+            ))
         }
     });
     if let Err(error) = syn::parse::Parser::parse2(parser, attr.into()) {
@@ -1780,83 +1787,37 @@ pub fn xcl_plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
         Span::call_site(),
     );
 
-    // Only `xcl-std` owns the slice anchors. Every other plugin crate appends
-    // to those same slices through `::xcl_std::*`, so the host's single
-    // `register_all` sees all statically linked plugins. A second crate that
-    // emitted its own anchors would be invisible to the host.
-    let own_slices = is_std_crate();
-    let anchors = if own_slices {
-        quote! {
-            // ── Registry anchors ──────────────────────────────────────────────
-            // Declared once by the crate that owns the registry; every
-            // `xcl_fn`/`xcl_impl`/`Xcl` expansion points at these paths.
-            #[linkme::distributed_slice]
-            pub static NATIVE_REGISTRY: [::xcl_vm::NativeEntry] = [..];
-
-            #[linkme::distributed_slice]
-            pub static TYPE_REGISTRY: [::xcl_vm::TypeDescriptor] = [..];
-
-            #[linkme::distributed_slice]
-            pub static TRAIT_REGISTRY: [::xcl_vm::TraitDescriptor] = [..];
-
-            #[linkme::distributed_slice]
-            pub static IMPL_REGISTRY: [::xcl_vm::ImplDescriptor] = [..];
-
-            #[linkme::distributed_slice]
-            pub static STD_OPCODE_REGISTRY: [::xcl_vm::OpcodeEntry] = [..];
-
-            #[linkme::distributed_slice]
-            pub static OPCODE_REGISTRY: [::xcl_vm::OpcodeEntry] = [..];
-
-            #[linkme::distributed_slice]
-            pub static PLUGIN_REGISTRY: [::xcl_vm::PluginDescriptor] = [..];
-
-            #[linkme::distributed_slice]
-            pub static COLD_MODULE_REGISTRY: [::xcl_vm::ColdModule] = [..];
-
-            #[linkme::distributed_slice]
-            pub static FEATURE_REGISTRY: [::xcl_vm::FeatureDescriptor] = [..];
-        }
-    } else {
-        quote! {}
-    };
-    let plugin_registry = if own_slices {
-        quote!(PLUGIN_REGISTRY)
-    } else {
-        quote!(::xcl_std::PLUGIN_REGISTRY)
-    };
-    let feature_registry = if own_slices {
-        quote!(FEATURE_REGISTRY)
-    } else {
-        quote!(::xcl_std::FEATURE_REGISTRY)
-    };
+    // The engine owns the slice anchors. Every plugin crate appends to those
+    // same slices through `::xcl_rt::*`, so the host's single `register_all`
+    // sees every statically linked plugin.
+    let plugin_registry = quote!(::xcl_rt::PLUGIN_REGISTRY);
+    let feature_registry = quote!(::xcl_rt::FEATURE_REGISTRY);
 
     let expanded = quote! {
         #[derive(::xcl_macros::Xcl)]
         #[xcl(domain = #domain)]
         #item
 
-        #anchors
-
         // ── The plugin and its installable feature ────────────────────────
-        fn #install_fn(vm: &mut ::xcl_vm::VM) {
-            ::xcl_std::register_domains(vm, &[#domain], true);
+        fn #install_fn(vm: &mut ::xcl_rt::VM) {
+            ::xcl_rt::register_domains(vm, &[#domain], true);
         }
 
         #[linkme::distributed_slice(#plugin_registry)]
         #[allow(non_upper_case_globals)]
-        static #plugin_static: ::xcl_vm::PluginDescriptor = ::xcl_vm::PluginDescriptor {
+        static #plugin_static: ::xcl_rt::PluginDescriptor = ::xcl_rt::PluginDescriptor {
             name: #name,
             summary: #summary,
-            domains: &[::xcl_vm::DomainAlias {
+            domains: &[::xcl_rt::DomainAlias {
                 path: #qualified,
                 domain: #domain,
             }],
+            permissions: &[#(#permissions),*],
         };
 
         #[linkme::distributed_slice(#feature_registry)]
         #[allow(non_upper_case_globals)]
-        static #feature_static: ::xcl_vm::FeatureDescriptor = ::xcl_vm::FeatureDescriptor {
+        static #feature_static: ::xcl_rt::FeatureDescriptor = ::xcl_rt::FeatureDescriptor {
             name: #name,
             aliases: &[#(#aliases),*],
             summary: #summary,
@@ -1883,26 +1844,26 @@ fn split_csv_list(value: &str) -> Vec<String> {
 /// `#[opcode(name = "OP_...", code = N)]` — Register an extension opcode handler.
 ///
 /// Declares a function as an opcode handler and registers it in the VM's
-/// [`OPCODE_REGISTRY`](::xcl_std::OPCODE_REGISTRY) distributed slice.
+/// [`OPCODE_REGISTRY`](::xcl_rt::OPCODE_REGISTRY) distributed slice.
 ///
 /// # Requirements
 ///
 /// - `name` must be a valid Rust identifier starting with `OP_`.
 /// - `code` must be an integer in the range `128..=255`.
 /// - The function signature must be:
-///   `fn(&mut ::xcl_vm::VM, usize, ::xcl_vm::Instr) -> ::xcl_vm::OpcodeResult`
+///   `fn(&mut ::xcl_rt::VM, usize, ::xcl_rt::Instr) -> ::xcl_rt::OpcodeResult`
 ///
 /// # Example
 ///
 /// ```ignore
 /// #[opcode(name = "OP_XCL_TEST", code = 200)]
 /// fn op_xcl_test(
-///     vm: &mut ::xcl_vm::VM,
+///     vm: &mut ::xcl_rt::VM,
 ///     top: usize,
-///     instr: ::xcl_vm::Instr,
-/// ) -> ::xcl_vm::OpcodeResult {
-///     vm.push_value(::xcl_vm::Value::from_i48(42));
-///     ::xcl_vm::OpcodeResult::Next
+///     instr: ::xcl_rt::Instr,
+/// ) -> ::xcl_rt::OpcodeResult {
+///     vm.push_value(::xcl_rt::Value::from_i48(42));
+///     ::xcl_rt::OpcodeResult::Next
 /// }
 /// ```
 #[proc_macro_attribute]
@@ -1968,12 +1929,12 @@ pub fn opcode(attr: TokenStream, item: TokenStream) -> TokenStream {
     let func_name_str = func_name.to_string();
 
     // The crate an opcode is defined in decides when it is registered. The
-    // standard plugin crate always registers first, so a third-party plugin
-    // can never shadow or collide with a std opcode silently.
-    let registry_path = if is_std_crate() {
-        quote!(::xcl_std::STD_OPCODE_REGISTRY)
+    // engine's own opcodes always register first, so a plugin can never shadow
+    // or collide with an engine opcode silently.
+    let registry_path = if is_engine_crate() {
+        quote!(::xcl_rt::STD_OPCODE_REGISTRY)
     } else {
-        quote!(::xcl_std::OPCODE_REGISTRY)
+        quote!(::xcl_rt::OPCODE_REGISTRY)
     };
 
     let const_ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
@@ -1990,7 +1951,7 @@ pub fn opcode(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         #[::linkme::distributed_slice(#registry_path)]
         #[allow(non_upper_case_globals)]
-        static #static_ident: ::xcl_vm::OpcodeEntry = ::xcl_vm::OpcodeEntry {
+        static #static_ident: ::xcl_rt::OpcodeEntry = ::xcl_rt::OpcodeEntry {
             code: #code,
             name: #name,
             handler: #func_name,

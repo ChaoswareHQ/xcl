@@ -3,8 +3,8 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use xcl_std::{IMPL_REGISTRY, NATIVE_REGISTRY, TRAIT_REGISTRY, TYPE_REGISTRY};
-use xcl_vm::TypeKind;
+use xcl_rt::{IMPL_REGISTRY, NATIVE_REGISTRY, TRAIT_REGISTRY, TYPE_REGISTRY};
+use xcl_toolchain::TypeKind;
 
 /// Parse an args string like "path: str; mode: str" into ParamDoc structs.
 fn parse_params(args: &str) -> Vec<ParamDoc> {
@@ -40,23 +40,23 @@ type PrimitiveEntry = (
     &'static [&'static str],
 );
 
-/// Extract doc comments from Rust source files in xcl-std.
+/// Extract doc comments from the engine's standard-library sources.
 ///
-/// Walks the xcl-std source directory, reads each `.rs` file, and extracts
+/// Walks `crates/xcl-rt/src/stdlib`, reads each `.rs` file, and extracts
 /// `///` doc comments that immediately precede `#[xcl_fn]` or `#[xcl_type]` attributes.
 /// Returns a map from the function/type name to the full parsed documentation.
 fn extract_rust_doc_comments() -> HashMap<String, ParsedDoc> {
     let mut comments = HashMap::new();
 
-    // Path to xcl-std source — use the environment variable or default path
+    // Path to the standard-library sources.
     let std_src = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
         .unwrap_or(Path::new("."))
         .join("crates")
-        .join("xcl-std")
-        .join("std")
-        .join("util");
+        .join("xcl-rt")
+        .join("src")
+        .join("stdlib");
 
     if !std_src.is_dir() {
         return comments;
@@ -357,9 +357,9 @@ fn extract_attr_name(attr: &str, key: &str) -> Option<String> {
 }
 
 pub fn collect_std() -> DocModel {
-    // Force-link xcl-std so its linkme entries are not stripped by the linker.
+    // Force-link the engine so its linkme entries are not stripped by the linker.
     // Without this, NATIVE_REGISTRY and TYPE_REGISTRY will be empty.
-    let _ = xcl_std::new_vm();
+    let _ = xcl_rt::new_vm();
 
     // Extract doc comments from Rust source files
     let rust_docs = extract_rust_doc_comments();
@@ -808,15 +808,15 @@ pub fn collect_src(path: &Path, model: &mut DocModel) -> Result<()> {
 fn collect_one(path: &Path, model: &mut DocModel) -> Result<()> {
     let source = fs::read_to_string(path)?;
     let file = path.display().to_string();
-    let tokens = xcl_vm::lexer::lex(&source, &file);
-    let ast = xcl_vm::parser::parse(&tokens, &source);
+    let tokens = xcl_toolchain::lexer::lex(&source, &file);
+    let ast = xcl_toolchain::parser::parse(&tokens, &source);
 
     // Find doc comments preceding functions
     // In XCL, comments start with # — we look for comment tokens before function defs
     let mut pending_doc: Option<String> = None;
 
     for node in &ast {
-        if let xcl_vm::AstNode::FunctionDef {
+        if let xcl_toolchain::AstNode::FunctionDef {
             name,
             params,
             return_type,

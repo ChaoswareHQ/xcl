@@ -1,0 +1,37 @@
+[package]
+name = "xcl-rt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+homepage.workspace = true
+
+[lib]
+name = "xcl_rt"
+# Library only. The shipped DLL is built by `xcl-rt-dll` (allocator + C ABI).
+crate-type = ["rlib"]
+
+[features]
+default = ["std"]
+std = []
+opcode-stats = []
+# Records the executed instruction stream for the browser playground.
+# Off by default: the hook compiles out entirely when the feature is absent.
+trace = []
+# Cranelift-backed JIT for integer loops. Off by default; requires `std`.
+jit = ["std", "dep:xcl-jit"]
+
+[dependencies]
+# `collections` provides `bumpalo::collections::String`, used to build
+# concatenation results directly in the arena (one write, no intermediate
+# allocation, reclaimed with the VM).
+bumpalo = { workspace = true, features = ["collections"] }
+smallvec.workspace = true
+hashbrown.workspace = true
+xcl-macros.workspace = true
+linkme.workspace = true
+itoa.workspace = true
+xcl-jit = { path = "../xcl-jit", optional = true }

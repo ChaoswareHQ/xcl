@@ -27,10 +27,10 @@ use std::env;
 use std::fs;
 use std::process;
 
-use xcl_vm::AstNode;
-use xcl_vm::Span;
-use xcl_vm::lexer::{self, TokenWithText};
-use xcl_vm::parser;
+use xcl_toolchain::AstNode;
+use xcl_toolchain::Span;
+use xcl_toolchain::lexer::{self, TokenWithText};
+use xcl_toolchain::parser;
 
 /// Extract the span from any AST node
 fn node_span(node: &AstNode) -> &Span {

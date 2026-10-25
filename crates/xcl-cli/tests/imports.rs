@@ -20,11 +20,11 @@ fn runtime_path() -> &'static PathBuf {
             .and_then(|path| path.parent())
             .expect("target/debug");
         let name = if cfg!(windows) {
-            "xcl_rt.dll"
+            "xcl_toolchain.dll"
         } else if cfg!(target_os = "macos") {
-            "libxcl_rt.dylib"
+            "libxcl_toolchain.dylib"
         } else {
-            "libxcl_rt.so"
+            "libxcl_toolchain.so"
         };
         let path = dir.join(name);
         if !path.exists() {
@@ -34,7 +34,7 @@ fn runtime_path() -> &'static PathBuf {
                 .unwrap_or("debug");
             let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
             let mut build = Command::new(cargo);
-            build.args(["build", "-p", "xcl-runtime"]);
+            build.args(["build", "-p", "xcl-toolchains"]);
             match profile {
                 // Cargo's `dev` profile writes to `target/debug`.
                 "debug" => {}
@@ -45,8 +45,8 @@ fn runtime_path() -> &'static PathBuf {
                     build.args(["--profile", other]);
                 }
             }
-            let status = build.status().expect("build xcl-runtime");
-            assert!(status.success(), "cargo build -p xcl-runtime failed");
+            let status = build.status().expect("build xcl-toolchains");
+            assert!(status.success(), "cargo build -p xcl-toolchains failed");
         }
         assert!(path.exists(), "runtime not found at {}", path.display());
         path
@@ -86,7 +86,7 @@ impl Drop for TempDir {
 fn run(script: &Path) -> Output {
     Command::new(BIN)
         .arg(script)
-        .env("XCL_RUNTIME", runtime_path())
+        .env("XCL_TOOLCHAIN", runtime_path())
         .output()
         .expect("run xcl")
 }

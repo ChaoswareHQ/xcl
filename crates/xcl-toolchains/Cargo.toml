@@ -1,0 +1,57 @@
+[package]
+name = "xcl-toolchains"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "xcl_toolchain"
+# `cdylib` is the loadable frontend; `rlib` lets a Rust host link it directly
+# and lets the wasm playground use the compiler without the host half.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["std", "host"]
+# Forwarded to the engine.
+std = ["xcl-rt/std"]
+# File imports, `plugin.toml`, the C ABI, and the global allocator. Off for
+# `wasm32` and for Rust hosts that only want the compiler.
+host = ["std"]
+trace = ["xcl-rt/trace"]
+opcode-stats = ["xcl-rt/opcode-stats"]
+# Cranelift JIT for integer loops. Off by default.
+jit = ["std", "xcl-rt/jit"]
+
+[dependencies]
+# The engine. `default-features = false` keeps the artifact crate (allocator + C
+# ABI) out of the compiler; `std` is forwarded so the engine is built the
+# same way the toolchain is.
+xcl-rt = { workspace = true, default-features = false }
+logos.workspace = true
+smallvec.workspace = true
+
+[dev-dependencies]
+bumpalo.workspace = true
+criterion.workspace = true
+mlua.workspace = true
+
+[[bench]]
+name = "vm_core"
+harness = false
+
+[[bench]]
+name = "vm_data"
+harness = false
+
+[[bench]]
+name = "vm_algorithms"
+harness = false
+
+[[bench]]
+name = "vm_games"
+harness = false

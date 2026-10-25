@@ -1,7 +1,18 @@
 [workspace]
 resolver = "3"
-default-members = ["crates/xcl-cli", "crates/xcl-runtime"]
-members = ["crates/*", "plugins/*"]
+default-members = ["crates/xcl-cli", "crates/xcl-toolchains"]
+members = [
+    "crates/xcl-benchmark",
+    "crates/xcl-cli",
+    "crates/xcl-debug",
+    "crates/xcl-doc",
+    "crates/xcl-jit",
+    "crates/xcl-macros",
+    "crates/xcl-rt",
+    "crates/xcl-rt-dll",
+    "crates/xcl-toolchains",
+    "crates/xcl-wasm",
+]
 
 [workspace.package]
 version      = "0.1.0"
@@ -14,17 +25,11 @@ readme       = "README.md"
 homepage     = "https://chaoswarehq.com"
 
 [workspace.dependencies]
-xcl-analysis = { path = "crates/xcl-analysis" }
 xcl-debug = { path = "crates/xcl-debug" }
 xcl-macros = { path = "crates/xcl-macros" }
-xcl-std = { path = "crates/xcl-std" }
-xcl-vm     = { path = "crates/xcl-vm" }
-
-# plugins/*
-xcl-bevy   = { path = "plugins/bevy" }
-
-# plugins/bevy
-bevy = "0.20"
+xcl-rt     = { path = "crates/xcl-rt" }
+xcl-rt-dll = { path = "crates/xcl-rt-dll" }
+xcl-toolchains = { path = "crates/xcl-toolchains" }
 
 # xcl-cli
 mimalloc = "0.1.52"
@@ -85,42 +90,3 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
-overflow-checks = false
-debug-assertions = false
-
-# Size: Cranelift is compile-time machinery, not hot runtime code, so optimize
-# it for size. The generated XCL code is unaffected, and JIT compile time was
-# measured unchanged (~1.3 ms for `fib`; see docs/benchmarking.md).
-[profile.release.package."cranelift-codegen"]
-opt-level = "z"
-
-[profile.release.package."cranelift-assembler-x64"]
-opt-level = "z"
-
-[profile.release.package."cranelift-frontend"]
-opt-level = "z"
-
-[profile.release.package."cranelift-jit"]
-opt-level = "z"
-
-[profile.release.package."cranelift-module"]
-opt-level = "z"
-
-[profile.release.package."cranelift-native"]
-opt-level = "z"
-
-[profile.release.package."regalloc2"]
-opt-level = "z"
-
-# Profiling: debug info + opt-level 1 for flamegraph readability
-[profile.bench-flamegraph]
-inherits = "release"
-opt-level = 1
-debug = true
-strip = false
-
-# Profiling: LTO release with debuginfo for BOLT re-compilation
-[profile.release-lto-debug]
-inherits = "release"
-debug = true
-strip = false

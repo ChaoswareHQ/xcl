@@ -9,27 +9,15 @@ repository.workspace = true
 readme = "README.md"
 homepage.workspace = true
 
-[lib]
-name = "xcl_debug"
-path = "src/lib.rs"
-
-[features]
-# Resolve extension opcode names through `xcl-std`. On by default for the
-# CLI tools; off for the wasm playground, where the plugin registry (`linkme`)
-# does not exist and only core opcodes can appear.
-default = ["plugins"]
-plugins = ["dep:xcl-std"]
-
 [[bin]]
 name = "xcl-debug"
 path = "src/main.rs"
-required-features = ["plugins"]
 
 [[bin]]
 name = "xcl-bytecode"
 path = "src/bytecode_main.rs"
-required-features = ["plugins"]
 
 [dependencies]
-xcl-vm.workspace = true
-xcl-std = { workspace = true, optional = true }
+xcl-rt.workspace = true
+# Compiler only: the tools read their own files, so the host half is not needed.
+xcl-toolchains = { workspace = true, default-features = false, features = ["std"] }

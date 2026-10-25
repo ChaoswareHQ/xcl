@@ -1,9 +1,0 @@
-# Test: Generic request method
-# Tests: https.request with custom method
-
-$response = https.request "OPTIONS" "https://httpbin.org/get" {} "" none
-print "OPTIONS Status:" $response.status
-print "OPTIONS OK:" $response.ok
-if $response.ok {
-    print "PASS: OPTIONS request succeeded"
-}

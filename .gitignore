@@ -482,3 +482,9 @@ MigrationBackup/
 
 .research/
 .env
+
+# size-build script backup
+Cargo.toml.size.bak
+
+# compiled XCL bytecode (`xcl --compile`)
+*.xclb

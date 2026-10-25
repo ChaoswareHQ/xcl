@@ -40,11 +40,11 @@ The JIT tier is measured by copying the JIT build aside first, so both binaries
 exist:
 
 ```sh
-cargo build --release -p xcl-runtime --features jit
+cargo build --release -p xcl-sdk --features jit
 mkdir -p target/release/jit
 cp target/release/xcl target/release/jit/xcl
-cp target/release/xcl_rt.dll target/release/jit/
-cargo build --release -p xcl-runtime
+cp target/release/xcl_sdk.dll target/release/jit/
+cargo build --release -p xcl-sdk
 ```
 
 ## Adding a workload

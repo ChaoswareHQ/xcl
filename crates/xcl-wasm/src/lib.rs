@@ -42,10 +42,10 @@ use std::cell::RefCell;
 
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
-use xcl_analysis::{LintConfig, SourceMap, check_source, json_string};
-use xcl_vm::runtime::opcode::layout;
+use xcl_toolchain::lint::{LintConfig, SourceMap, check_source, json_string};
+use xcl_toolchain::runtime::opcode::layout;
 
-use xcl_vm::{
+use xcl_toolchain::{
     Bytecode, CapSet, FuncValue, Instr, NativeEntry, NativeKind, OpcodeEntry, OpcodeResult,
     ParseError, RawPtr, VM, Value,
 };
@@ -138,13 +138,13 @@ pub fn opcode_map() -> String {
 /// Classifies one opcode code.
 fn classify(code: u8) -> (&'static str, Option<&'static str>) {
     if code == layout::OP_EXT {
-        return ("ext", xcl_vm::opcode_name(code));
+        return ("ext", xcl_toolchain::opcode_name(code));
     }
     if layout::is_module_slot(code) {
         // The example plugin below is the only owner of hot slots in this build.
         return ("hot", plugin_name(code));
     }
-    match xcl_vm::opcode_name(code) {
+    match xcl_toolchain::opcode_name(code) {
         Some(name) => ("core", Some(name)),
         None if layout::CORE_GROWTH.contains(&code) => ("growth", None),
         None => ("unused", None),
@@ -172,7 +172,7 @@ pub fn diagnose(source: &str) -> String {
 pub fn decompile(source: &str) -> String {
     match compile(source) {
         Ok(bytecode) => {
-            let text = xcl_debug::decompile::decompile(&bytecode);
+            let text = xcl_toolchain::decompile::decompile(&bytecode);
             format!("{{\"ok\":true,\"text\":{}}}", json_string(&text))
         }
         Err(errors) => format!("{{\"ok\":false,\"errors\":{}}}", errors_json(&errors)),
@@ -268,7 +268,7 @@ pub fn program(source: &str) -> String {
 
         // The graph view needs the edge targets, and only the VM knows which
         // operand holds one.
-        let branch = xcl_vm::runtime::vm::ops::meta::branch_kind(op);
+        let branch = xcl_toolchain::runtime::vm::ops::meta::branch_kind(op);
         if branch != 0 {
             let target = if branch == 1 {
                 Some(instr.a() as usize)
@@ -323,10 +323,10 @@ pub fn program(source: &str) -> String {
 pub fn run(source: &str) -> String {
     OUTPUT.with(|buffer| buffer.borrow_mut().clear());
 
-    let mut vm = xcl_vm::VM::new();
+    let mut vm = xcl_toolchain::VM::new();
     vm.register_natives(&PRELUDE);
 
-    match xcl_vm::evaluate_recover(FILE, source, &mut vm) {
+    match xcl_toolchain::evaluate_recover(FILE, source, &mut vm) {
         Ok(value) => {
             let output = OUTPUT.with(|buffer| buffer.borrow().clone());
             format!(
@@ -444,12 +444,12 @@ fn write_value(out: &mut String, value: Value) {
 /// syntax error. `run` uses this path, so the Output panel sees exactly what a
 /// normal VM execution produces.
 fn compile(source: &str) -> Result<Bytecode, Vec<ParseError>> {
-    let tokens = xcl_vm::lexer::lex(source, FILE);
-    let parsed = xcl_vm::parse_recover(&tokens, source);
+    let tokens = xcl_toolchain::lexer::lex(source, FILE);
+    let parsed = xcl_toolchain::parse_recover(&tokens, source);
     if !parsed.errors.is_empty() {
         return Err(parsed.errors);
     }
-    Ok(xcl_vm::bytecode::compile(&parsed.ast))
+    Ok(xcl_toolchain::bytecode::compile(&parsed.ast))
 }
 
 /// A compiled image plus `(first_ip, line)` for every top-level statement.
@@ -459,12 +459,12 @@ type TraceImage = (Bytecode, Vec<(u32, u32)>);
 /// bytecode plus the statement-to-line map. `program` and `trace` share this
 /// path so their instruction offsets agree.
 fn compile_unoptimized(source: &str) -> Result<TraceImage, Vec<ParseError>> {
-    let tokens = xcl_vm::lexer::lex(source, FILE);
-    let parsed = xcl_vm::parse_recover(&tokens, source);
+    let tokens = xcl_toolchain::lexer::lex(source, FILE);
+    let parsed = xcl_toolchain::parse_recover(&tokens, source);
     if !parsed.errors.is_empty() {
         return Err(parsed.errors);
     }
-    Ok(xcl_vm::bytecode::compile_unoptimized(&parsed.ast))
+    Ok(xcl_toolchain::bytecode::compile_unoptimized(&parsed.ast))
 }
 
 /// `,"name":["a","b"]`
@@ -611,10 +611,10 @@ fn plugin_name(code: u8) -> Option<&'static str> {
 #[wasm_bindgen]
 pub fn plugin_demo() -> String {
     let instructions = vec![
-        Instr::a1(xcl_vm::bytecode::OP_PUSH_INT, 21),
+        Instr::a1(xcl_toolchain::bytecode::OP_PUSH_INT, 21),
         Instr::none(200),
         Instr::none(201),
-        Instr::none(xcl_vm::bytecode::OP_HALT),
+        Instr::none(xcl_toolchain::bytecode::OP_HALT),
     ];
 
     let bytecode = Bytecode {
@@ -627,7 +627,7 @@ pub fn plugin_demo() -> String {
         user_functions: Arc::from(Vec::<(Box<str>, Arc<FuncValue>)>::new()),
         function_by_name: Arc::from(Vec::<u32>::new()),
         closures: Arc::from(Vec::<FuncValue>::new()),
-        field_chains: Arc::from(Vec::<xcl_vm::bytecode::FieldChain>::new()),
+        field_chains: Arc::from(Vec::<xcl_toolchain::bytecode::FieldChain>::new()),
     };
 
     let mut vm = VM::new();
@@ -677,13 +677,13 @@ pub fn plugin_demo() -> String {
 
 /// Opcodes whose `a` is a string-table index.
 fn takes_string_operand(op: u8) -> bool {
-    use xcl_vm::bytecode::*;
+    use xcl_toolchain::bytecode::*;
     matches!(op, OP_PUSH_STR | OP_GET_FIELD | OP_TYPE_TEST | OP_TYPE_CAST)
 }
 
 /// Opcodes whose `a` is a local or global slot index.
 fn takes_slot_operand(op: u8) -> bool {
-    use xcl_vm::bytecode::*;
+    use xcl_toolchain::bytecode::*;
     matches!(
         op,
         OP_LOAD_LOCAL

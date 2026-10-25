@@ -1,0 +1,27 @@
+[package]
+name = "xcl-rt-dll"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+# The shipped engine artifact. `xcl-rt` is a plain library (so a Rust game can
+# link it without inheriting an allocator); this crate is the DLL: it owns the
+# global allocator and the C ABI, and nothing else.
+[lib]
+name = "xcl_rt"
+crate-type = ["cdylib"]
+
+[dependencies]
+xcl-rt.workspace = true
+mimalloc.workspace = true
+
+[features]
+default = ["std"]
+std = ["xcl-rt/std"]
+trace = ["xcl-rt/trace"]
+opcode-stats = ["xcl-rt/opcode-stats"]
+jit = ["xcl-rt/jit"]

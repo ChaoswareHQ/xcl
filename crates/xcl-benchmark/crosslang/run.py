@@ -13,11 +13,11 @@ start-up-adjusted times.
 Optional: benchmark the JIT build next to the interpreter. Keep a JIT runtime
 beside a copy of the launcher, then rebuild the default runtime:
 
-    cargo build --release -p xcl-runtime --features jit
+    cargo build --release -p xcl-sdk --features jit
     mkdir -p target/release/jit
     cp target/release/xcl target/release/jit/xcl
-    cp target/release/xcl_rt.dll target/release/jit/
-    cargo build --release -p xcl-runtime
+    cp target/release/xcl_sdk.dll target/release/jit/
+    cargo build --release -p xcl-sdk
     CROSSLANG_REPS=7 python crates/xcl-benchmark/crosslang/run.py
 
 `CROSSLANG_REPS` controls the measured repetitions (default 5; one extra run is

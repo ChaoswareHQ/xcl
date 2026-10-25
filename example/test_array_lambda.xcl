@@ -1,5 +1,0 @@
-# Test array followed by lambda
-
-# This should work: array literal followed by lambda as separate args
-$result = collections.map [1, 2, 3] |$x| $x * 2
-print $result

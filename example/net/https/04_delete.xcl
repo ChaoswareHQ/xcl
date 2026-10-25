@@ -1,9 +1,0 @@
-# Test: DELETE request
-# Tests: https.delete
-
-$response = https.delete "https://httpbin.org/delete" none
-print "DELETE Status:" $response.status
-print "DELETE OK:" $response.ok
-if $response.ok {
-    print "PASS: DELETE request succeeded"
-}

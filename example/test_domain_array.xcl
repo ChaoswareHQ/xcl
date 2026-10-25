@@ -1,7 +1,0 @@
-# Simple test: domain function with array arg
-$result = math.add 1 2
-print $result
-
-# Domain function with array
-$len = collections.array_len [1, 2, 3]
-print $len

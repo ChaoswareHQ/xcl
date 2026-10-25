@@ -15,9 +15,8 @@ homepage.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-xcl-analysis.workspace = true
-# The decompiler, without the plugin registry: `linkme` has no equivalent on
-# wasm32-unknown-unknown, so the playground links core instructions only.
-xcl-debug = { workspace = true, default-features = false }
-xcl-vm = { workspace = true, features = ["trace"] }
+xcl-rt = { workspace = true, default-features = false, features = ["std"] }
+# Compiler, linter, and disassembler without the host half: `std::fs`, the C ABI,
+# and mimalloc have no place in the browser build.
+xcl-toolchains = { workspace = true, default-features = false, features = ["std", "trace"] }
 wasm-bindgen.workspace = true
