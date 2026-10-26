@@ -5,7 +5,7 @@ use super::*;
 /// Static descriptor for an optional runtime feature.
 ///
 /// Features are compiled into the runtime library (through
-/// `xcl_std::FEATURE_REGISTRY`) and selected by the host at run time.
+/// `xcl_rt::FEATURE_REGISTRY`) and selected by the host at run time.
 /// `install` registers exactly the natives, types, traits and plugins that the
 /// feature provides, so a minimal build can expose only the parts it needs.
 pub struct FeatureDescriptor {

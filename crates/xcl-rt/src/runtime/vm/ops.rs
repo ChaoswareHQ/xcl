@@ -333,7 +333,7 @@ mod core_ops {
                     // program that never mentions `$0` never touches the arena.
                     if vm.script_name_value.is_nil() {
                         let built = Value::from_str_ref(
-                            vm.script_name
+                            vm.cold.script_name
                                 .as_deref()
                                 .unwrap_or(crate::runtime::vm::DEFAULT_SCRIPT_NAME),
                             &vm.arena,
@@ -1165,7 +1165,7 @@ mod core_ops {
             if ord != 0
                 && let Some(func_val) = vm
                     .globals
-                    .get((vm.function_base + ord - 1) as usize)
+                    .get((vm.cold.function_base + ord - 1) as usize)
                     .copied()
                 && let Some(f) = func_val.as_func()
             {
@@ -1653,9 +1653,9 @@ mod core_ops {
             };
             if ord != 0
                 && let Some(name) = callee.as_str()
-                && !vm.global_index.contains_key(name)
+                && !vm.cold.global_index.contains_key(name)
             {
-                let func_slot = (vm.function_base + ord - 1) as usize;
+                let func_slot = (vm.cold.function_base + ord - 1) as usize;
                 if let Some(func_val) = vm.globals.get(func_slot).copied()
                     && let Some(f) = func_val.as_func()
                 {
@@ -1763,9 +1763,9 @@ mod core_ops {
             };
             if ord != 0
                 && let Some(name) = callee.as_str()
-                && !vm.global_index.contains_key(name)
+                && !vm.cold.global_index.contains_key(name)
             {
-                let func_slot = (vm.function_base + ord - 1) as usize;
+                let func_slot = (vm.cold.function_base + ord - 1) as usize;
                 if let Some(func_val) = vm.globals.get(func_slot).copied()
                     && let Some(f) = func_val.as_func()
                 {
@@ -1777,10 +1777,10 @@ mod core_ops {
             // Resolve the function (same cold logic as op_tail_call)
             let func = if let Some(name) = callee.as_str() {
                 // 1. Check global builtins first
-                if let Some(&idx) = vm.global_index.get(name) {
-                    let gt_len = vm.global_table.len();
+                if let Some(&idx) = vm.cold.global_index.get(name) {
+                    let gt_len = vm.cold.global_table.len();
                     if (idx as usize) < gt_len {
-                        if let Some(Some(impl_)) = vm.global_table.get(idx as usize) {
+                        if let Some(Some(impl_)) = vm.cold.global_table.get(idx as usize) {
                             let impl_copy = *impl_;
                             let result = impl_copy.call(vm, &args);
                             if let Some(frame) = vm.frames.last() {
@@ -1880,10 +1880,10 @@ mod core_ops {
             // Resolve the function (same logic as OP_CALL, using the 4-entry cache)
             let func = if let Some(name) = callee.as_str() {
                 // 1. Check global builtins first
-                if let Some(&idx) = vm.global_index.get(name) {
-                    let gt_len = vm.global_table.len();
+                if let Some(&idx) = vm.cold.global_index.get(name) {
+                    let gt_len = vm.cold.global_table.len();
                     if (idx as usize) < gt_len {
-                        if let Some(Some(impl_)) = vm.global_table.get(idx as usize) {
+                        if let Some(Some(impl_)) = vm.cold.global_table.get(idx as usize) {
                             let impl_copy = *impl_;
                             let result = impl_copy.call(vm, &args);
                             // Truncate operand stack and push result
@@ -2069,7 +2069,7 @@ mod core_ops {
             if ord != 0
                 && let Some(func_val) = vm
                     .globals
-                    .get((vm.function_base + ord - 1) as usize)
+                    .get((vm.cold.function_base + ord - 1) as usize)
                     .copied()
                 && let Some(f) = func_val.as_func()
             {
@@ -2099,7 +2099,7 @@ mod core_ops {
 
             // Resolve parent domain for super delegation using vm.type_entries
             if let Some(map) = receiver.as_map() {
-                for desc in vm.type_entries.iter() {
+                for desc in vm.cold.type_entries.iter() {
                     let desc = *desc;
                     if desc.kind == crate::runtime::value::TypeKind::Record {
                         let mut matches = true;
@@ -3553,7 +3553,7 @@ mod core_ops {
             let Some(map) = value.as_map() else {
                 return false;
             };
-            vm.type_entries.iter().any(|desc| {
+            vm.cold.type_entries.iter().any(|desc| {
                 desc.name == name
                     && desc.kind == crate::runtime::value::TypeKind::Record
                     && !desc.fields.is_empty()
@@ -3573,7 +3573,7 @@ mod core_ops {
             let Some(map) = value.as_map() else {
                 return false;
             };
-            vm.type_entries.iter().any(|desc| {
+            vm.cold.type_entries.iter().any(|desc| {
                 desc.kind == crate::runtime::value::TypeKind::Record
                     && !desc.fields.is_empty()
                     && desc.fields.iter().all(|f| map.contains_key(f.name))
@@ -3696,11 +3696,11 @@ mod core_ops {
         ) -> OpcodeResult {
             if let Some(name) = callee.as_str() {
                 // 1. Check global builtins first
-                if let Some(&idx) = vm.global_index.get(name) {
-                    let gt_len = vm.global_table.len();
+                if let Some(&idx) = vm.cold.global_index.get(name) {
+                    let gt_len = vm.cold.global_table.len();
                     if (idx as usize) < gt_len {
                         // Index points into global_table (builtins)
-                        if let Some(Some(impl_)) = vm.global_table.get(idx as usize) {
+                        if let Some(Some(impl_)) = vm.cold.global_table.get(idx as usize) {
                             let impl_copy = *impl_;
                             let result = impl_copy.call(vm, &args);
                             vm.push(result);
@@ -3731,7 +3731,7 @@ mod core_ops {
                     return OpcodeResult::Next;
                 }
                 // 2b. Domain expansion
-                if vm.domain_index.contains_key(name) {
+                if vm.cold.domain_index.contains_key(name) {
                     if let Some((func_idx, func)) = args
                         .iter()
                         .enumerate()
@@ -3743,25 +3743,25 @@ mod core_ops {
                             .filter(|(i, _)| *i != func_idx)
                             .map(|(_, v)| *v)
                             .collect();
-                        let &didx = vm.domain_index.get(name).unwrap();
-                        let slot = &vm.domain_table[didx as usize];
+                        let &didx = vm.cold.domain_index.get(name).unwrap();
+                        let slot = &vm.cold.domain_table[didx as usize];
                         let mut saved: Vec<(Box<str>, Option<u32>)> = Vec::new();
                         for (method_name, &midx) in slot.index.iter() {
                             let existing = vm
-                                .global_index
-                                .insert(method_name.clone(), vm.global_table.len() as u32);
+                                .cold.global_index
+                                .insert(method_name.clone(), vm.cold.global_table.len() as u32);
                             saved.push((method_name.clone(), existing));
                             let impl_ = slot.methods[midx as usize];
-                            vm.global_table.push(impl_);
+                            vm.cold.global_table.push(impl_);
                         }
                         let func_value = Value::from_func(func.clone(), &vm.arena);
                         let result = vm.call_value(func_value, &call_args);
                         for (method_name, existing) in saved.into_iter().rev() {
-                            vm.global_table.pop();
+                            vm.cold.global_table.pop();
                             if let Some(idx) = existing {
-                                vm.global_index.insert(method_name.clone(), idx);
+                                vm.cold.global_index.insert(method_name.clone(), idx);
                             } else {
-                                vm.global_index.remove(&method_name);
+                                vm.cold.global_index.remove(&method_name);
                             }
                         }
                         vm.push(result);
@@ -3772,8 +3772,8 @@ mod core_ops {
                         .enumerate()
                         .find_map(|(i, a)| a.as_map().map(|m| (i, m)))
                     {
-                        let &didx = vm.domain_index.get(name).unwrap();
-                        let calls: Vec<(u32, Value)> = vm.domain_table[didx as usize]
+                        let &didx = vm.cold.domain_index.get(name).unwrap();
+                        let calls: Vec<(u32, Value)> = vm.cold.domain_table[didx as usize]
                             .index
                             .iter()
                             .filter_map(|(method_name, &midx)| {
@@ -3782,7 +3782,7 @@ mod core_ops {
                             .collect();
                         let mut last_result = Value::nil();
                         for (midx, value) in calls {
-                            let impl_ = vm.domain_table[didx as usize].methods[midx as usize]
+                            let impl_ = vm.cold.domain_table[didx as usize].methods[midx as usize]
                                 .as_ref()
                                 .copied()
                                 .unwrap();
@@ -3824,7 +3824,7 @@ mod core_ops {
 
             let mut best: Option<&TypeDescriptor> = None;
             let mut best_fields = 0usize;
-            for desc in vm.type_entries.iter() {
+            for desc in vm.cold.type_entries.iter() {
                 let desc = *desc;
                 if desc.kind == TypeKind::Record
                     && !desc.fields.is_empty()
@@ -3839,7 +3839,7 @@ mod core_ops {
             let Some(parent_name) = best.and_then(|desc| desc.parent_type) else {
                 return Value::nil();
             };
-            let Some(parent) = vm.type_entries.iter().find(|desc| desc.name == parent_name) else {
+            let Some(parent) = vm.cold.type_entries.iter().find(|desc| desc.name == parent_name) else {
                 return Value::nil();
             };
 

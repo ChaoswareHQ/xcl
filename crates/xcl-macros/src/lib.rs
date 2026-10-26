@@ -122,13 +122,13 @@ const CAPABILITY_NAMES: &[(&str, &str)] = &[
 /// Expands a capability list such as `"PURE | DETERMINISTIC"` or
 /// `"Len, Contains"` into a constant [`CapSet`](::xcl_rt::CapSet) expression.
 fn capability_set_tokens(list: &str, span: Span) -> syn::Result<proc_macro2::TokenStream> {
-    capability_set_tokens_at(list, span, quote!(::xcl_vm))
+    capability_set_tokens_at(list, span, quote!(::xcl_rt))
 }
 
 /// Like [`capability_set_tokens`], but resolves `CapSet`/`Cap` through `root`.
 ///
-/// Code generated *inside* `xcl-vm` must use `crate::runtime::primitives`
-/// rather than `::xcl_vm`.
+/// Code generated *inside* `xcl-rt` must use `crate::runtime::primitives`
+/// rather than `::xcl_rt`.
 fn capability_set_tokens_at(
     list: &str,
     span: Span,
@@ -1708,7 +1708,7 @@ pub fn xcl_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Requirements
 ///
-/// The crate must depend on `xcl-std`, `xcl-macros`, `xcl-vm`, and `linkme`.
+/// The crate must depend on `xcl-rt`, `xcl-macros`, and `linkme`.
 /// Applying the macro inside a module would scope a plugin crate's generated
 /// items to that module; use the crate root.
 #[proc_macro_attribute]

@@ -7,10 +7,14 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[allow(dead_code)]
 struct Counting;
 
+#[allow(dead_code)]
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+#[allow(dead_code)]
 static FREES: AtomicUsize = AtomicUsize::new(0);
+#[allow(dead_code)]
 static BYTES: AtomicUsize = AtomicUsize::new(0);
 
 unsafe impl GlobalAlloc for Counting {
@@ -30,6 +34,7 @@ unsafe impl GlobalAlloc for Counting {
     }
 }
 
+#[cfg(not(feature = "host"))]
 #[global_allocator]
 static GLOBAL: Counting = Counting;
 

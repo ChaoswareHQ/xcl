@@ -631,8 +631,9 @@ fn main() {
                 println!("  const char* xcl_rt_error(XclEngine*)");
                 println!("  int xcl_rt_set_quiet(XclEngine*, int quiet)");
                 println!(
-                    "  void xcl_rt_set_script_args(XclEngine*, size_t argc, const char* const* argv)"
+                    "  int xcl_rt_set_script_args(XclEngine*, size_t argc, const char* const* argv)"
                 );
+                println!("  int xcl_rt_error_code(const XclEngine*)");
                 process::exit(0);
             }
             Err(error) => {

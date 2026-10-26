@@ -12,3 +12,11 @@ publish = false
 
 [lib]
 path = "src/lib.rs"
+
+[[bench]]
+name = "interpreter"
+harness = false
+
+[dev-dependencies]
+criterion = "0.5"
+xcl-rt = { path = "../xcl-rt" }

@@ -28,7 +28,7 @@ impl<'a> DomainCtx<'a> {
 
     /// Returns the type descriptors registered in the VM.
     pub fn type_entries(&self) -> &[&'static TypeDescriptor] {
-        &self.vm.type_entries
+        &self.vm.cold.type_entries
     }
 
     /// Returns a reference to the VM's bump allocation arena.
@@ -81,7 +81,7 @@ impl<'a> DomainCtx<'a> {
     /// Enables nested domain blocks: `browser "chrome" { browser "firefox" { ... } }`.
     pub fn push_context(&mut self, key: &str, value: Value) {
         self.vm
-            .context_stack
+            .cold.context_stack
             .entry(key.to_string())
             .or_insert_with(Vec::new)
             .push(value);
@@ -90,7 +90,7 @@ impl<'a> DomainCtx<'a> {
     /// Retrieves the active context value for the given key (top of the stack).
     pub fn get_context(&self, key: &str) -> Option<Value> {
         self.vm
-            .context_stack
+            .cold.context_stack
             .get(key)
             .and_then(|stack| stack.last().copied())
     }
@@ -98,7 +98,7 @@ impl<'a> DomainCtx<'a> {
     /// Pops the active context value for the given key.
     pub fn pop_context(&mut self, key: &str) -> Option<Value> {
         self.vm
-            .context_stack
+            .cold.context_stack
             .get_mut(key)
             .and_then(|stack| stack.pop())
     }
@@ -106,7 +106,7 @@ impl<'a> DomainCtx<'a> {
     /// Checks if a context key currently has values on its stack.
     pub fn has_context(&self, key: &str) -> bool {
         self.vm
-            .context_stack
+            .cold.context_stack
             .get(key)
             .map(|s| !s.is_empty())
             .unwrap_or(false)
@@ -114,13 +114,13 @@ impl<'a> DomainCtx<'a> {
 
     /// Clears all context entries for the given key.
     pub fn clear_context(&mut self, key: &str) {
-        self.vm.context_stack.remove(key);
+        self.vm.cold.context_stack.remove(key);
     }
 
     /// Returns a list of all currently active context keys.
     pub fn context_keys(&self) -> Vec<String> {
         self.vm
-            .context_stack
+            .cold.context_stack
             .iter()
             .filter(|(_, stack)| !stack.is_empty())
             .map(|(k, _)| k.clone())
@@ -130,7 +130,7 @@ impl<'a> DomainCtx<'a> {
     /// Creates a snapshot map of the top active value for each context key.
     pub fn context_snapshot(&self) -> crate::HashMap<String, Value> {
         let mut map = crate::HashMap::new();
-        for (key, stack) in &self.vm.context_stack {
+        for (key, stack) in &self.vm.cold.context_stack {
             if let Some(top) = stack.last() {
                 map.insert(key.clone(), *top);
             }
@@ -174,7 +174,7 @@ impl<'a> DomainCtx<'a> {
         // Find all impl descriptors for this type — collect trait names
         let impl_descs = self
             .vm
-            .impl_index
+            .cold.impl_index
             .iter()
             .filter(|desc| desc.type_name == impl_type_name)
             .collect::<Vec<_>>();
@@ -191,7 +191,7 @@ impl<'a> DomainCtx<'a> {
 
         // Collect (owned_name, BuiltinImpl) pairs for matching entries
         let mut pairs: Vec<(String, BuiltinImpl)> = Vec::new();
-        for entry in self.vm.native_entries.iter() {
+        for entry in self.vm.cold.native_entries.iter() {
             let entry = *entry;
             if entry.impl_type == Some(impl_type_name) {
                 // Check if this entry's override_method or method matches any method in the impl

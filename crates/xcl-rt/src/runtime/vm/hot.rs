@@ -10,7 +10,7 @@
 //! A slot number is only meaningful to the VM that assigned it, and the VM is
 //! built from the linked plugin registries. The SDK's evaluate path therefore
 //! compiles with the same VM it then runs on, which is the only combination
-//! that can bind slots. `xcl_vm::bytecode::compile` has no VM and emits
+//! that can bind slots. `xcl_toolchain::bytecode::compile` has no VM and emits
 //! `OP_CALL_NAME` for every call.
 //!
 //! Nothing else is per-VM: a slot binds only names that ordinary resolution
@@ -111,18 +111,18 @@ impl VM {
     /// The slot table the compiler uses to decide between `OP_CALL_HOT` and
     /// `OP_CALL_NAME`.
     pub fn hot_table(&self) -> &HotTable {
-        &self.hot_table
+        &self.cold.hot_table
     }
 
     /// Registered hot natives, indexed by instruction operand `b`.
     pub fn hot_natives(&self) -> &[HotNative] {
-        &self.hot_natives
+        &self.cold.hot_natives
     }
 
     /// The native bound to `slot`, if the slot is populated.
     #[inline]
     pub fn hot_native(&self, slot: usize) -> Option<HotNative> {
-        self.hot_natives.get(slot).copied()
+        self.cold.hot_natives.get(slot).copied()
     }
 
     /// Resolves a callable name to its native implementation.
@@ -161,8 +161,8 @@ impl VM {
     pub(super) fn rebuild_hot_table(&mut self) {
         let mut table = HotTable::default();
         let mut natives = Vec::new();
-        for i in 0..self.native_entries.len() {
-            let entry = self.native_entries[i];
+        for i in 0..self.cold.native_entries.len() {
+            let entry = self.cold.native_entries[i];
             if !entry.hot {
                 continue;
             }
@@ -187,8 +187,8 @@ impl VM {
                 caps: entry.caps,
             });
         }
-        self.hot_table = table;
-        self.hot_natives = natives;
+        self.cold.hot_table = table;
+        self.cold.hot_natives = natives;
     }
 
     /// Every spelling a call site can use to reach `entry`.
@@ -199,8 +199,8 @@ impl VM {
         }
         if let Some(domain) = entry.domain {
             out.push(format!("{domain}.{}", entry.method).into());
-            for &path in self.domain_alias.keys() {
-                if self.domain_alias.get(path).copied() == Some(domain) {
+            for &path in self.cold.domain_alias.keys() {
+                if self.cold.domain_alias.get(path).copied() == Some(domain) {
                     out.push(format!("{path}.{}", entry.method).into());
                 }
             }

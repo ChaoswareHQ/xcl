@@ -38,7 +38,7 @@ fn engine_path() -> &'static PathBuf {
         } else {
             "libxcl_rt.so"
         };
-        ensure_library("xcl-rt-dll", name)
+        ensure_library("xcl-rt", name)
     })
 }
 

@@ -1,6 +1,6 @@
 //! Registerable opcode extension system.
 //!
-//! Allows crates outside `xcl-vm` to declare and register custom opcodes
+//! Allows crates outside `xcl-toolchains` to declare and register custom opcodes
 //! using the `#[opcode(...)]` macro. Extension opcodes use codes `128..=255`.
 //! Core opcodes remain below 128.
 //!
@@ -81,7 +81,7 @@ pub struct ColdModule {
 
 /// Returns the human-readable name for any core opcode.
 ///
-/// Extension opcode names are resolved via `xcl_std::registered_opcode_name`.
+/// Extension opcode names are resolved via `xcl_rt::registered_opcode_name`.
 pub fn opcode_name(op: u8) -> Option<&'static str> {
     crate::runtime::vm::ops::opcode_name_core(op)
 }
@@ -145,7 +145,7 @@ pub mod special_var_kind {
 /// [`layout::MODULE_INDEX_MASK`] and indexes the 128-entry `opcode_table`
 /// directly, with no second lookup, and `a`/`b`/`c` stay available as the
 /// handler's operands. The range is shared by every linked crate, so codes must
-/// be unique across the whole program — `xcl_std::register_all` rejects
+/// be unique across the whole program — `xcl_rt::register_all` rejects
 /// duplicates and names both owners.
 ///
 /// **Std loads first.** `#[opcode]` routes an entry into
@@ -156,7 +156,7 @@ pub mod special_var_kind {
 ///
 /// `OP_EXT` is the cold tier: operand `a` names a module, `c` names the
 /// instruction inside it, and `b` stays a 16-bit operand. Modules are declared
-/// with `cold_module!` and registered by `xcl_std::register_all`. A cold
+/// with `cold_module!` and registered by `xcl_rt::register_all`. A cold
 /// instruction costs one extra lookup over a hot byte, so it is for plugins whose
 /// instruction set does not fit in 128 bytes — or that run rarely.
 ///

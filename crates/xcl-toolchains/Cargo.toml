@@ -21,7 +21,7 @@ default = ["std", "host"]
 std = ["xcl-rt/std"]
 # File imports, `plugin.toml`, the C ABI, and the global allocator. Off for
 # `wasm32` and for Rust hosts that only want the compiler.
-host = ["std"]
+host = ["std", "dep:mimalloc", "xcl-rt/mimalloc"]
 trace = ["xcl-rt/trace"]
 opcode-stats = ["xcl-rt/opcode-stats"]
 # Cranelift JIT for integer loops. Off by default.
@@ -34,6 +34,7 @@ jit = ["std", "xcl-rt/jit"]
 xcl-rt = { workspace = true, default-features = false }
 logos.workspace = true
 smallvec.workspace = true
+mimalloc = { workspace = true, optional = true }
 
 [dev-dependencies]
 bumpalo.workspace = true

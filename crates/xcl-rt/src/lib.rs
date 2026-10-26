@@ -3,7 +3,7 @@
 //! `xcl-rt` is the minimal library a product ships. It loads compiled bytecode
 //! ([`Bytecode`]) and executes it on a stack-based [`VM`] operating on NaN-boxed
 //! [`Value`] words. It does not contain a lexer, parser, compiler, or plugin
-//! registry. Those live in `xcl-sdk` and `xcl-vm`.
+//! registry. Those live in `xcl-toolchains`.
 //!
 //! # Overview
 //!
@@ -135,12 +135,18 @@ pub(crate) use std::collections::HashMap;
 
 /// Bytecode instruction set and the `Bytecode` container.
 pub mod bytecode;
+/// Engine C ABI — the whole surface for embedding `xcl_rt.dll`.
+#[cfg(feature = "std")]
+pub mod abi;
 /// Distributed registry of natives, types, plugins, features, and opcodes.
 pub mod registry;
 /// VM execution engine: virtual machine, values, and error types.
 pub mod runtime;
 /// The standard library plugin (`std` / `util`): `print`, `input`.
 pub mod stdlib;
+
+#[cfg(feature = "std")]
+pub use abi::{EngineErrorCode, ENGINE_ABI_VERSION, XclEngine};
 
 pub use registry::{
     COLD_MODULE_REGISTRY, FEATURE_REGISTRY, IMPL_REGISTRY, NATIVE_REGISTRY, OPCODE_REGISTRY,

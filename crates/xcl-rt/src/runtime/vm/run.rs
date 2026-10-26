@@ -28,7 +28,7 @@ impl VM {
         // Clear per-run state so repeated runs leave nothing behind.
         // Only the callee-cache slots a previous run actually wrote are cleared;
         // the rest are already nil.
-        self.context_stack.clear();
+        self.cold.context_stack.clear();
         while self.call_cache_dirty != 0 {
             let slot = self.call_cache_dirty.trailing_zeros() as usize;
             self.call_cache_dirty &= self.call_cache_dirty - 1;
@@ -51,14 +51,14 @@ impl VM {
         // load, and the slots are the contiguous range starting at `function_base`.
         let current_code = bc.instructions.clone();
         let is_same_bytecode = self
-            .installed_code
+            .cold.installed_code
             .as_ref()
             .map(|prev| Arc::ptr_eq(prev, &current_code))
             .unwrap_or(false);
 
         if !is_same_bytecode {
             // Drop the previous bytecode's function values.
-            self.globals.truncate(self.function_base as usize);
+            self.globals.truncate(self.cold.function_base as usize);
         }
 
         // Compiler globals (enum variants, type names) occupy slots
@@ -75,11 +75,11 @@ impl VM {
                 self.globals
                     .push(Value::from_func_shared(Arc::clone(func), &self.arena));
             }
-            self.function_base = function_base;
-            self.installed_code = Some(current_code);
+            self.cold.function_base = function_base;
+            self.cold.installed_code = Some(current_code);
         } else {
             // Same bytecode — rewrite each slot with a fresh Value (arena was reset).
-            let base = self.function_base as usize;
+            let base = self.cold.function_base as usize;
             for (i, (_name, func)) in bc.user_functions.iter().enumerate() {
                 self.globals[base + i] = Value::from_func_shared(Arc::clone(func), &self.arena);
             }
@@ -94,7 +94,7 @@ impl VM {
         {
             let frame = &mut self.frames[root];
             frame.stack_base = 0;
-            frame.argv.extend_from_slice(&self.script_args);
+            frame.argv.extend_from_slice(&self.cold.script_args);
         }
 
         // Dispatch state kept in locals instead of behind `frames[top]`.
@@ -258,7 +258,7 @@ impl VM {
         // `dispatch_core` that can only return `None`. Core-only programs never
         // take this branch, so the check costs a predicted-not-taken test.
         if op & crate::runtime::opcode::layout::MODULE_SPACE_MASK != 0 {
-            let Some(table) = self.opcode_table.as_ref() else {
+            let Some(table) = self.cold.opcode_table.as_ref() else {
                 // No plugin opcodes registered: an unclaimed slot is a no-op,
                 // exactly like the empty table this replaces.
                 return Action::Next;

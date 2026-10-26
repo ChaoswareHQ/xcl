@@ -3,7 +3,7 @@
 Benchmark corpus and cross-language harnesses for XCL.
 
 This crate is not a benchmark target. Criterion benches live next to the code
-they measure (`xcl-vm/benches`, `xcl-std/benches`); this crate holds the
+they measure (`xcl-toolchains/benches`, `xcl-rt/benches`); this crate holds the
 other half — the programs and harnesses that compare XCL against Luau, LuaJIT
 and CPython as separate processes, plus the standalone runners they need.
 
@@ -40,11 +40,11 @@ The JIT tier is measured by copying the JIT build aside first, so both binaries
 exist:
 
 ```sh
-cargo build --release -p xcl-sdk --features jit
+cargo build --release -p xcl-toolchains --features jit
 mkdir -p target/release/jit
 cp target/release/xcl target/release/jit/xcl
-cp target/release/xcl_sdk.dll target/release/jit/
-cargo build --release -p xcl-sdk
+cp target/release/xcl_toolchain.dll target/release/jit/
+cargo build --release -p xcl-toolchains
 ```
 
 ## Adding a workload
@@ -59,7 +59,7 @@ cargo build --release -p xcl-sdk
 ## Scoreboard
 
 ```sh
-cargo bench -p xcl-vm --bench vm_core --bench vm_data \
+cargo bench -p xcl-toolchains --bench vm_core --bench vm_data \
     --bench vm_algorithms --bench vm_games -- --save-baseline run
 python crates/xcl-benchmark/scripts/score.py run
 ```

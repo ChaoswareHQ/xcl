@@ -21,11 +21,11 @@ was stable to a few percent across runs. It is converted to an approximate CPU
 time with a frequency calibrated at start-up by a ~1 s CPU-bound process;
 ratios between languages are unaffected by the calibration.
 
-    cargo build --release -p xcl-sdk --features jit
+    cargo build --release -p xcl-toolchains --features jit
     mkdir -p target/release/jit
     cp target/release/xcl target/release/jit/xcl
-    cp target/release/xcl_sdk.dll target/release/jit/
-    cargo build --release -p xcl-sdk
+    cp target/release/xcl_toolchain.dll target/release/jit/
+    cargo build --release -p xcl-toolchains
     python crates/xcl-benchmark/crosslang/usage.py
 
 `CROSSLANG_REPS` controls the measured repetitions (default 5; one extra run

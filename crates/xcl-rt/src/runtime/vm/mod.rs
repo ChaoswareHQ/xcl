@@ -24,8 +24,8 @@
 //!
 //! # Examples
 //!
-//! Running bytecode with a virtual machine. Compilation lives in `xcl-vm`
-//! (the compiler) and `xcl-sdk` (the tooling layer); the engine only executes.
+//! Running bytecode with a virtual machine. Compilation lives in `xcl-toolchains`
+//! (the compiler) and `xcl-toolchains` (the tooling layer); the engine only executes.
 //!
 //! ```
 //! use xcl_rt::{Bytecode, VM};
@@ -411,6 +411,36 @@ pub struct DomainSlot {
     pub auto_import: bool,
 }
 
+/// Cold VM state: registration tables and metadata accessed only during
+/// native/type/trait registration and call resolution, never in the dispatch loop.
+///
+/// Keeping these out of the `VM` value reduces its size so the hot fields
+/// (stack, regs, frames, arena, call_cache) fit in L1 cache during dispatch.
+pub(crate) struct VMCold {
+    pub(crate) global_index: HashMap<Box<str>, u32>,
+    pub(crate) global_table: Vec<Option<BuiltinImpl>>,
+    pub(crate) domain_index: HashMap<Box<str>, u32>,
+    pub(crate) domain_table: Vec<DomainSlot>,
+    pub(crate) plugin_table: Vec<&'static PluginDescriptor>,
+    pub(crate) domain_alias: HashMap<&'static str, &'static str>,
+    pub(crate) type_index: HashMap<Box<str>, &'static TypeDescriptor>,
+    pub(crate) trait_index: HashMap<Box<str>, &'static TraitDescriptor>,
+    pub(crate) impl_index: Vec<&'static ImplDescriptor>,
+    pub(crate) native_entries: Vec<&'static NativeEntry>,
+    pub(crate) hot_natives: Vec<HotNative>,
+    pub(crate) hot_table: HotTable,
+    pub(crate) type_entries: Vec<&'static TypeDescriptor>,
+    pub(crate) context_stack: HashMap<String, Vec<Value>>,
+    pub(crate) opcode_table: Option<
+        Box<[Option<super::opcode::OpcodeFn>; crate::runtime::opcode::layout::MODULE_COUNT]>,
+    >,
+    pub(crate) cold_modules: Vec<(u32, &'static super::opcode::ColdModule)>,
+    pub(crate) script_name: Option<Box<str>>,
+    pub(crate) script_args: Vec<Value>,
+    pub(crate) installed_code: Option<Arc<[Instr]>>,
+    pub(crate) function_base: u32,
+}
+
 /// The XCL Virtual Machine runtime instance.
 ///
 /// Holds the evaluation operand stack, global variable tables, native domain dispatch tables,
@@ -425,49 +455,7 @@ pub struct VM {
     /// `truncate`, and all frames' locals share cache lines).
     regs: Vec<Value>,
     globals: Vec<Value>,
-    global_index: HashMap<Box<str>, u32>,
-    /// Table of globally available builtin and native functions.
-    pub global_table: Vec<Option<BuiltinImpl>>,
-    /// Fast string index mapping domain names to slot offsets in [`VM::domain_table`].
-    pub domain_index: HashMap<Box<str>, u32>,
-    /// Table of registered domain method slots.
-    pub domain_table: Vec<DomainSlot>,
     /// Registered plugins, in registration order.
-    plugin_table: Vec<&'static PluginDescriptor>,
-    /// `"std.util"` → `"util"`, built from every registered plugin's domains.
-    domain_alias: HashMap<&'static str, &'static str>,
-    /// Registry mapping type names to static type descriptors.
-    pub type_index: HashMap<Box<str>, &'static TypeDescriptor>,
-    /// Registry mapping trait names to static trait descriptors.
-    pub trait_index: HashMap<Box<str>, &'static TraitDescriptor>,
-    /// Flat list of all registered trait implementation descriptors.
-    pub impl_index: Vec<&'static ImplDescriptor>,
-    /// Flat list of registered native entries (for override_by_trait lookups).
-    pub native_entries: Vec<&'static NativeEntry>,
-    /// Hot natives indexed by the operand of `OP_CALL_HOT`.
-    hot_natives: Vec<HotNative>,
-    /// Callable spelling → hot slot, consulted by the compiler.
-    hot_table: HotTable,
-    /// Flat list of registered type descriptors (used by `$super` lookups).
-    pub type_entries: Vec<&'static TypeDescriptor>,
-    /// Fast bump allocator arena for temporary heap objects created during execution.
-    pub arena: Bump,
-    pub(crate) frames: Vec<Frame>,
-    /// Stack-based context for domain blocks (e.g., `browser "brave" { ... }`).
-    /// Each key maps to a stack of values, enabling nested domain contexts.
-    pub(crate) context_stack: HashMap<String, Vec<Value>>,
-    /// Dispatch table for extension opcodes (module slots `128..=255`),
-    /// allocated on the first [`VM::register_opcodes`] call.
-    ///
-    /// `None` means "no plugin opcodes registered", which is the case for every
-    /// core-only program. Keeping the 1 KiB table out of the `VM` value matters:
-    /// a VM that allocates one still has to be zeroed and moved, and runtimes
-    /// that create a VM per script end up paying for it on every run.
-    opcode_table: Option<
-        Box<[Option<super::opcode::OpcodeFn>; crate::runtime::opcode::layout::MODULE_COUNT]>,
-    >,
-    /// Cold plugin modules reachable through `OP_EXT`, sorted by id.
-    cold_modules: Vec<(u32, &'static super::opcode::ColdModule)>,
     #[cfg(feature = "opcode-stats")]
     opcode_counter: OpcodeCounter,
     /// Executed instructions as `(ip, frame depth, opcode)`, in order.
@@ -477,18 +465,11 @@ pub struct VM {
     /// running one instruction at a time.
     #[cfg(feature = "trace")]
     trace: Vec<(u32, u8, u8)>,
-    /// Name of the currently running script (`$0`).
-    ///
-    /// `None` means the default `"<input>"`; storing it lazily avoids one boxed
-    /// allocation per VM.
-    script_name: Option<Box<str>>,
     /// Cached `$0` value for the current run (arena-backed).
     ///
     /// Built on the first `$0` read and reset to nil by `run`, so a program
     /// that never mentions `$0` leaves the arena untouched.
     script_name_value: Value,
-    /// Top-level positional script arguments.
-    script_args: Vec<Value>,
     /// Direct-mapped [`CALL_CACHE_SLOTS`]-entry callee cache for fast
     /// recursive call dispatch.
     call_cache: [(Value, Value); CALL_CACHE_SLOTS],
@@ -516,10 +497,11 @@ pub struct VM {
     /// separate pool, which moved ~200 bytes three times per call (~20% of all
     /// retired instructions on recursive workloads).
     frame_depth: usize,
-    /// Previously installed bytecode (for idempotent function installation).
-    installed_code: Option<Arc<[Instr]>>,
-    /// Index in `globals` where the current bytecode's function values start.
-    function_base: u32,
+    /// Fast bump allocator arena for temporary heap objects created during execution.
+    pub arena: Bump,
+    pub(crate) frames: Vec<Frame>,
+    /// Cold state moved out of the hot path for cache efficiency.
+    pub(crate) cold: VMCold,
 }
 
 impl Default for VM {
@@ -574,31 +556,13 @@ impl VM {
             stack,
             regs,
             globals,
-            global_index: Default::default(),
-            global_table: Vec::new(),
-            domain_index: Default::default(),
-            domain_table: Vec::new(),
-            plugin_table: Vec::new(),
-            domain_alias: Default::default(),
-            type_index: Default::default(),
-            trait_index: Default::default(),
-            impl_index: Vec::new(),
-            native_entries: Vec::new(),
-            hot_natives: Vec::new(),
-            hot_table: HotTable::default(),
-            type_entries: Vec::new(),
             arena,
             frames,
-            context_stack: HashMap::new(),
-            opcode_table: None,
-            cold_modules: Vec::new(),
             #[cfg(feature = "opcode-stats")]
             opcode_counter: OpcodeCounter::new(),
             #[cfg(feature = "trace")]
             trace: Vec::new(),
-            script_name: None,
             script_name_value: Value::nil(),
-            script_args: Vec::new(),
             call_cache: [(Value::nil(), Value::nil()); CALL_CACHE_SLOTS],
             call_cache_dirty: 0,
             #[cfg(feature = "jit")]
@@ -606,8 +570,28 @@ impl VM {
             #[cfg(feature = "jit")]
             jit_call_cache: [None; CALL_CACHE_SLOTS],
             frame_depth: 0,
-            installed_code: None,
-            function_base: 0,
+            cold: VMCold {
+                global_index: Default::default(),
+                global_table: Vec::new(),
+                domain_index: Default::default(),
+                domain_table: Vec::new(),
+                plugin_table: Vec::new(),
+                domain_alias: Default::default(),
+                type_index: Default::default(),
+                trait_index: Default::default(),
+                impl_index: Vec::new(),
+                native_entries: Vec::new(),
+                hot_natives: Vec::new(),
+                hot_table: HotTable::default(),
+                type_entries: Vec::new(),
+                context_stack: HashMap::new(),
+                opcode_table: None,
+                cold_modules: Vec::new(),
+                script_name: None,
+                script_args: Vec::new(),
+                installed_code: None,
+                function_base: 0,
+            },
         }
     }
 
@@ -616,14 +600,14 @@ impl VM {
     /// Call this before [`VM::run`]. Script arguments apply to the root frame;
     /// function frames use their own call arguments.
     pub fn set_script_args(&mut self, name: &str, args: Vec<Value>) {
-        self.script_name = Some(name.into());
-        self.script_args = args;
+        self.cold.script_name = Some(name.into());
+        self.cold.script_args = args;
     }
 
     /// Script name reported by `$0` (`"<input>"` until [`VM::set_script_args`]).
     #[inline]
     pub fn script_name(&self) -> &str {
-        self.script_name.as_deref().unwrap_or(DEFAULT_SCRIPT_NAME)
+        self.cold.script_name.as_deref().unwrap_or(DEFAULT_SCRIPT_NAME)
     }
 
     /// Registers native functions from a static slice.
@@ -658,9 +642,9 @@ impl VM {
         if let Some(domain) = entry.domain {
             let full_name = format!("{}.{}", domain, entry.method);
 
-            let didx = *self.domain_index.entry(domain.into()).or_insert_with(|| {
-                let idx = self.domain_table.len() as u32;
-                self.domain_table.push(DomainSlot {
+            let didx = *self.cold.domain_index.entry(domain.into()).or_insert_with(|| {
+                let idx = self.cold.domain_table.len() as u32;
+                self.cold.domain_table.push(DomainSlot {
                     name: domain.into(),
                     methods: Vec::new(),
                     index: HashMap::new(),
@@ -668,7 +652,7 @@ impl VM {
                 });
                 idx
             });
-            let slot = &mut self.domain_table[didx as usize];
+            let slot = &mut self.cold.domain_table[didx as usize];
             if entry.auto_import {
                 slot.auto_import = true;
             }
@@ -677,20 +661,20 @@ impl VM {
             slot.index.insert(entry.method.into(), midx);
 
             if entry.auto_import {
-                let idx = self.global_table.len() as u32;
-                self.global_table.push(Some(impl_));
-                self.global_index.entry(entry.method.into()).or_insert(idx);
+                let idx = self.cold.global_table.len() as u32;
+                self.cold.global_table.push(Some(impl_));
+                self.cold.global_index.entry(entry.method.into()).or_insert(idx);
             }
 
-            let idx = self.global_table.len() as u32;
-            self.global_table.push(Some(impl_));
-            self.global_index.insert(full_name.into(), idx);
+            let idx = self.cold.global_table.len() as u32;
+            self.cold.global_table.push(Some(impl_));
+            self.cold.global_index.insert(full_name.into(), idx);
         } else {
-            let idx = self.global_table.len() as u32;
-            self.global_table.push(Some(impl_));
-            self.global_index.insert(entry.method.into(), idx);
+            let idx = self.cold.global_table.len() as u32;
+            self.cold.global_table.push(Some(impl_));
+            self.cold.global_index.insert(entry.method.into(), idx);
         }
-        self.native_entries.push(entry);
+        self.cold.native_entries.push(entry);
     }
 
     /// Registers plugin descriptors from a static slice.
@@ -713,28 +697,28 @@ impl VM {
                 continue;
             }
             if self
-                .plugin_table
+                .cold.plugin_table
                 .iter()
                 .any(|existing| existing.name == plugin.name)
             {
                 continue;
             }
             for alias in plugin.domains {
-                self.domain_alias.insert(alias.path, alias.domain);
+                self.cold.domain_alias.insert(alias.path, alias.domain);
             }
-            self.plugin_table.push(plugin);
+            self.cold.plugin_table.push(plugin);
         }
     }
 
     /// Registered plugins, in registration order.
     pub fn plugins(&self) -> &[&'static PluginDescriptor] {
-        &self.plugin_table
+        &self.cold.plugin_table
     }
 
     /// Plugin that published `domain`, accepting its flat key or its path.
     pub fn plugin_of(&self, domain: &str) -> Option<&'static str> {
-        let key = self.domain_alias.get(domain).copied().unwrap_or(domain);
-        self.plugin_table
+        let key = self.cold.domain_alias.get(domain).copied().unwrap_or(domain);
+        self.cold.plugin_table
             .iter()
             .find(|plugin| plugin.domains.iter().any(|d| d.domain == key))
             .map(|plugin| plugin.name)
@@ -755,8 +739,8 @@ impl VM {
             if !keep(desc) {
                 continue;
             }
-            self.type_index.insert(desc.name.into(), desc);
-            self.type_entries.push(desc);
+            self.cold.type_index.insert(desc.name.into(), desc);
+            self.cold.type_entries.push(desc);
         }
     }
 
@@ -775,15 +759,15 @@ impl VM {
             if !keep(desc) {
                 continue;
             }
-            self.trait_index.insert(desc.name.into(), desc);
+            self.cold.trait_index.insert(desc.name.into(), desc);
         }
     }
 
     /// Registers impl descriptors from a static slice.
     pub fn register_impls(&mut self, entries: &'static [ImplDescriptor]) {
-        self.impl_index.clear();
+        self.cold.impl_index.clear();
         for desc in entries {
-            self.impl_index.push(desc);
+            self.cold.impl_index.push(desc);
         }
     }
 
@@ -797,11 +781,11 @@ impl VM {
     /// # Panics
     ///
     /// Panics when an entry uses a code below 128. Duplicate codes across crates
-    /// are caught earlier, in `xcl_std::register_all`, which knows the std and
+    /// are caught earlier, in `xcl_rt::register_all`, which knows the std and
     /// plugin slices separately.
     pub fn register_opcodes(&mut self, entries: &'static [super::opcode::OpcodeEntry]) {
         let table = self
-            .opcode_table
+            .cold.opcode_table
             .get_or_insert_with(|| Box::new([None; MODULE_COUNT]));
         for entry in entries.iter() {
             assert!(
@@ -837,10 +821,10 @@ impl VM {
                     op.name
                 );
             }
-            self.cold_modules.push((module.id, module));
+            self.cold.cold_modules.push((module.id, module));
         }
-        self.cold_modules.sort_unstable_by_key(|(id, _)| *id);
-        for pair in self.cold_modules.windows(2) {
+        self.cold.cold_modules.sort_unstable_by_key(|(id, _)| *id);
+        for pair in self.cold.cold_modules.windows(2) {
             assert!(
                 pair[0].0 != pair[1].0,
                 "cold module id {} is claimed by both `{}` and `{}`",
@@ -864,12 +848,12 @@ impl VM {
         instr: Instr,
     ) -> Action {
         let Ok(idx) = self
-            .cold_modules
+            .cold.cold_modules
             .binary_search_by_key(&module_id, |(id, _)| *id)
         else {
             return Action::Next;
         };
-        let module = self.cold_modules[idx].1;
+        let module = self.cold.cold_modules[idx].1;
         match module.ops.iter().find(|op| op.code == local) {
             Some(op) => (op.handler)(self, top, instr),
             None => Action::Next,
@@ -890,9 +874,9 @@ impl VM {
     ///
     /// * `name` - Function name or full dotted identifier (e.g. `"print"` or `"math.sin"`).
     pub fn resolve_builtin(&self, name: &str) -> Option<&BuiltinImpl> {
-        self.global_index
+        self.cold.global_index
             .get(name)
-            .and_then(|&idx| self.global_table.get(idx as usize).and_then(|e| e.as_ref()))
+            .and_then(|&idx| self.cold.global_table.get(idx as usize).and_then(|e| e.as_ref()))
     }
 
     /// Looks up a method registered within a specific domain namespace.
@@ -904,9 +888,9 @@ impl VM {
     pub fn resolve_domain_method(&self, domain: &str, method: &str) -> Option<&BuiltinImpl> {
         // A plugin may publish its domain under a qualified path (`std.util`);
         // translate it to the flat key the natives were registered under.
-        let domain = self.domain_alias.get(domain).copied().unwrap_or(domain);
-        let &didx = self.domain_index.get(domain)?;
-        let slot = self.domain_table.get(didx as usize)?;
+        let domain = self.cold.domain_alias.get(domain).copied().unwrap_or(domain);
+        let &didx = self.cold.domain_index.get(domain)?;
+        let slot = self.cold.domain_table.get(didx as usize)?;
         let &midx = slot.index.get(method)?;
         slot.methods.get(midx as usize).and_then(|e| e.as_ref())
     }
@@ -917,9 +901,9 @@ impl VM {
     /// plugin-provided helpers); the `$` axioms are VM keywords and do not go
     /// through this table.
     fn resolve_universal_method(&self, method: &str) -> Option<&BuiltinImpl> {
-        self.global_index
+        self.cold.global_index
             .get(method)
-            .and_then(|&idx| self.global_table.get(idx as usize).and_then(|e| e.as_ref()))
+            .and_then(|&idx| self.cold.global_table.get(idx as usize).and_then(|e| e.as_ref()))
     }
 
     /// Save current global function mappings and override them with new implementations.
@@ -931,10 +915,10 @@ impl VM {
         let mut saved = Vec::with_capacity(overrides.len());
         for (name, impl_) in overrides {
             let existing = self
-                .global_index
-                .insert((*name).into(), self.global_table.len() as u32);
+                .cold.global_index
+                .insert((*name).into(), self.cold.global_table.len() as u32);
             saved.push(((*name).into(), existing));
-            self.global_table.push(Some(*impl_));
+            self.cold.global_table.push(Some(*impl_));
         }
         saved
     }
@@ -942,11 +926,11 @@ impl VM {
     /// Restore global function mappings from a saved state.
     pub fn restore_globals(&mut self, saved: &[(Box<str>, Option<u32>)]) {
         for (name, existing) in saved.iter().rev() {
-            self.global_table.pop();
+            self.cold.global_table.pop();
             if let Some(idx) = *existing {
-                self.global_index.insert(name.clone(), idx);
+                self.cold.global_index.insert(name.clone(), idx);
             } else {
-                self.global_index.remove(name.as_ref());
+                self.cold.global_index.remove(name.as_ref());
             }
         }
     }
@@ -978,7 +962,7 @@ impl VM {
     /// use xcl_rt::{Bytecode, VM};
     ///
     /// let mut vm = VM::new();
-    /// // A host compiles bytecode elsewhere (see `xcl-vm`) and passes it here.
+    /// // A host compiles bytecode elsewhere (see `xcl-toolchains`) and passes it here.
     /// let result = vm.run(&Bytecode::default());
     /// assert!(result.is_nil());
     /// ```
@@ -1090,70 +1074,70 @@ impl Drop for VM {
 }
 
 impl VM {
-    /// Accessor for `globals` — used by tests in `xcl-vm`.
+    /// Accessor for `globals` — used by tests in `xcl-toolchains`.
     #[doc(hidden)]
     pub fn _globals(&self) -> &[Value] {
         &self.globals
     }
-    /// Accessor for `global_index` — used by tests in `xcl-vm`.
+    /// Accessor for `global_index` — used by tests in `xcl-toolchains`.
     #[doc(hidden)]
     pub fn _global_index(&self) -> &HashMap<Box<str>, u32> {
-        &self.global_index
+        &self.cold.global_index
     }
-    /// Number of live frames — used by tests in `xcl-vm`.
+    /// Number of live frames — used by tests in `xcl-toolchains`.
     #[doc(hidden)]
     pub fn _frames_len(&self) -> usize {
         self.frame_depth
     }
-    /// Accessor for `regs` — used by tests in `xcl-vm`.
+    /// Accessor for `regs` — used by tests in `xcl-toolchains`.
     #[doc(hidden)]
     pub fn _regs(&self) -> &[Value] {
         &self.regs
     }
-    /// Accessor for `regs` capacity — used by tests in `xcl-vm`.
+    /// Accessor for `regs` capacity — used by tests in `xcl-toolchains`.
     #[doc(hidden)]
     pub fn _regs_capacity(&self) -> usize {
         self.regs.capacity()
     }
-    /// Acquires a frame for the given bytecode — used by tests in `xcl-vm`.
+    /// Acquires a frame for the given bytecode — used by tests in `xcl-toolchains`.
     #[doc(hidden)]
     pub fn _acquire_frame(&mut self, bc: &Bytecode) -> usize {
         self.acquire_frame(bc)
     }
-    /// Binds registers for a frame — used by tests in `xcl-vm`.
+    /// Binds registers for a frame — used by tests in `xcl-toolchains`.
     #[doc(hidden)]
     pub fn _bind_registers(&mut self, frame_idx: usize, count: usize, arg_count: usize) -> usize {
         self.bind_registers(frame_idx, count, arg_count)
     }
-    /// Set a register value — used by tests in `xcl-vm`.
+    /// Set a register value — used by tests in `xcl-toolchains`.
     #[doc(hidden)]
     pub fn _set_reg(&mut self, idx: u32, v: Value) {
         self.regs[idx as usize] = v;
     }
-    /// Pointer to the locals of a frame — used by tests in `xcl-vm`.
+    /// Pointer to the locals of a frame — used by tests in `xcl-toolchains`.
     #[doc(hidden)]
     pub fn _frame_locals_ptr(&self, frame_idx: usize) -> usize {
         self.frames[frame_idx].locals.ptr as usize
     }
-    /// Read a local value from a frame — used by tests in `xcl-vm`.
+    /// Read a local value from a frame — used by tests in `xcl-toolchains`.
     #[doc(hidden)]
     pub fn _frame_local(&self, frame_idx: usize, slot: usize) -> Value {
         self.frames[frame_idx].locals[slot]
     }
-    /// Raw pointer to the register file — used by tests in `xcl-vm`.
+    /// Raw pointer to the register file — used by tests in `xcl-toolchains`.
     #[doc(hidden)]
     pub fn _regs_as_ptr(&self) -> usize {
         self.regs.as_ptr() as usize
     }
-    /// Raw pointer to the frame stack — used by tests in `xcl-vm`.
+    /// Raw pointer to the frame stack — used by tests in `xcl-toolchains`.
     #[doc(hidden)]
     pub fn _frames_as_ptr(&self) -> usize {
         self.frames.as_ptr() as usize
     }
-    /// Check if context_stack is empty — used by tests in `xcl-vm`.
+    /// Check if context_stack is empty — used by tests in `xcl-toolchains`.
     #[doc(hidden)]
     pub fn _context_stack_is_empty(&self) -> bool {
-        self.context_stack.is_empty()
+        self.cold.context_stack.is_empty()
     }
 
     /// Returns the opcode dispatch counts as a `HashMap<opcode, count>`.

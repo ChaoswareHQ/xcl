@@ -589,38 +589,44 @@ Source → Lexer → Parser → Compiler → Bytecode → VM → Output
 3. **Compilation** — the AST becomes 64-bit instructions, then peephole and dataflow passes run (constant folding, dead-store elimination, LICM, superinstruction fusion).
 4. **Execution** — a register-file VM with a shared operand stack and `LocalSlice` frames.
 
-### Two libraries: engine and SDK
+### Backend, frontend, launcher
 
-The interpreter is split by purpose, so a product ships only what it needs:
+The interpreter is split the way a managed runtime is: a **backend** that runs and
+owns the base library, a **frontend** that compiles, and a driver.
 
-| Library | Windows / Unix | Contains | Size (release) |
+| Layer | Artifact | Contains | Size (release) |
 |---|---|---|---|
-| **Engine** | `xcl_rt.dll` / `libxcl_rt.so` / `libxcl_rt.dylib` | Values, bytecode, VM, `.xclb` loader. No lexer, parser, compiler, plugins, or diagnostics. | ~366 KB |
-| **SDK** | `xcl_sdk.dll` / `libxcl_sdk.so` / `libxcl_sdk.dylib` | Lexer, parser, compiler, optimizer, plugins, imports, linter, disassembler, `plugin.toml`, mimalloc. Runs the engine internally. | ~1.16 MB |
-| **Launcher** | `xcl` | Argument parsing and dynamic loading only. | ~161 KB |
+| **Backend** | `xcl_rt.dll` / `libxcl_rt.so` / `libxcl_rt.dylib` | Values, bytecode, VM, `.xclb` loader, **registry, standard library (`std.util`), mimalloc**, engine C ABI | ~520 KB |
+| **Frontend** | `xcl_toolchain.dll` / `libxcl_toolchain.so` / `.dylib` | Lexer, parser, optimizer, codegen, linter, disassembler, imports, `plugin.toml`, toolchain C ABI | ~1.03 MB |
+| **Driver** | `xcl` | Argument parsing and dynamic loading only | ~193 KB |
 
 ```
-.xcl source ──SDK──► Bytecode ──engine──► Output
-     │                       ▲
-     └── .xclb ──────────────┘
+.xcl source ──toolchain──► Bytecode ──engine──► Output
+     │                          ▲
+     └──────── .xclb ───────────┘
 ```
 
-`xcl file.xcl` compiles and runs through the SDK.
-`xcl file.xclb` decodes and runs with the SDK's plugins (no compiling).
-`xcl --rt file.xclb` loads only the engine: the smallest possible footprint.
+`xcl file.xcl` compiles and runs through the toolchain.
+`xcl file.xclb` decodes and runs through the toolchain (no compiling).
+`xcl --rt file.xclb` loads only the backend.
 
-Build both with `cargo build`; `cargo build -p xcl-rt` builds the engine alone and
-`cargo build -p xcl-sdk` the development layer. The launcher looks for the SDK in
-`XCL_RUNTIME` and the engine in `XCL_RT`, then next to `xcl`, then in `deps`.
-No allocated value crosses either boundary: hosts pass UTF-8 paths/source and
-receive process exit codes.
+Build both with `cargo build`; `cargo build -p xcl-rt` builds the engine
+(`xcl_rt.dll`) and `cargo build -p xcl-toolchains` the frontend (`xcl_toolchain.dll`). The launcher looks for
+the toolchain in `XCL_TOOLCHAIN` and the engine in `XCL_RT`, then next to `xcl`,
+then in `deps`. No allocated value crosses either boundary: hosts pass UTF-8
+paths/source and receive process exit codes.
+
+The engine crate (`xcl-rt`) produces both `xcl_rt.dll` (`cdylib`) and an `rlib`.
+The `mimalloc` feature is on by default so the shipped DLL carries mimalloc,
+while a Rust game that links the engine as an `rlib` can use
+`default-features = false, features = ["std"]` to keep its own allocator.
 
 ### `.xclb` bytecode
 
 `xcl --compile script.xcl` writes `script.xclb` next to the source (or
 `--compile=out.xclb`). The file stores the instruction stream, constants,
 string/name tables, function bodies, and field chains, and is written by the
-SDK, read by the engine.
+toolchain, read by the engine.
 
 ```text
 magic "XCLB" · format_version · flags · engine_abi · source_name
@@ -648,11 +654,11 @@ int         xcl_rt_set_quiet(XclEngine*, int quiet);
 void        xcl_rt_set_script_args(XclEngine*, size_t argc, const char* const* argv);
 ```
 
-The engine has **no natives**. A C host that loads only `xcl_rt.dll` gets the
-core language (`1 + 2`, strings, functions, closures) but no `print`; a Rust
-host links the engine `rlib` and registers its own natives on the `VM`. That is
-the intended shape for a game: the engine runs the language, the host supplies
-the API.
+The engine installs the standard library (`print`, `input`) and has no extension
+points across the C boundary: a function pointer table would be a much larger
+and less safe contract. A Rust host that wants its own natives links `xcl-rt`
+(the `rlib`) and registers them on the `VM`, with `xcl_rt::install_std` deciding
+whether `std` is present.
 
 ```c
 #include <windows.h>
@@ -676,34 +682,34 @@ free_(engine);
 /* Keep `lib` loaded: Rust thread-local destructors must stay valid. */
 ```
 
-### SDK C ABI
+### Toolchain C ABI
 
-`xcl_sdk_abi_version` reports 6. The SDK adds everything development needs on
-top of the engine:
+`xcl_toolchain_abi_version` reports 7. The frontend adds everything development
+needs on top of the engine:
 
 | Export | Purpose |
 |---|---|
-| `xcl_sdk_abi_version` / `abi_list` | ABI version and the printed surface |
-| `xcl_sdk_new` / `xcl_sdk_free` | SDK context |
-| `xcl_sdk_set_quiet` / `set_format` | Output configuration |
-| `xcl_sdk_add_level` | `-A/-W/-D/-F` lint overrides |
-| `xcl_sdk_set_script_args` | `$1`, `$2`, ... |
-| `xcl_sdk_set_features` | Select compiled plugins |
-| `xcl_sdk_set_profile` | Select the capability profile |
-| `xcl_sdk_list_plugins` / `manifest` | Plugin catalogue and generated TOML |
-| `xcl_sdk_run_file` / `run_source` | Resolve imports, compile, run |
-| `xcl_sdk_compile_file` | Compile to `.xclb`, do not run |
-| `xcl_sdk_run_bytecode` | Decode a `.xclb` and run it — no compiling |
-| `xcl_sdk_decompile_file` / `decompile_source` | Disassemble |
-| `xcl_sdk_lint_file` / `lint_source` | Lint |
-| `xcl_sdk_list_lints` / `explain` | Rule catalogue |
+| `xcl_toolchain_abi_version` / `abi_list` | ABI version and the printed surface |
+| `xcl_toolchain_new` / `xcl_toolchain_free` | Toolchain context |
+| `xcl_toolchain_set_quiet` / `set_format` | Output configuration |
+| `xcl_toolchain_add_level` | `-A/-W/-D/-F` lint overrides |
+| `xcl_toolchain_set_script_args` | `$1`, `$2`, ... |
+| `xcl_toolchain_set_features` | Select compiled plugins |
+| `xcl_toolchain_set_profile` | Select the capability profile |
+| `xcl_toolchain_list_plugins` / `manifest` | Plugin catalogue and generated TOML |
+| `xcl_toolchain_run_file` / `run_source` | Resolve imports, compile, run |
+| `xcl_toolchain_compile_file` | Compile to `.xclb`, do not run |
+| `xcl_toolchain_run_bytecode` | Decode a `.xclb` and run it — no compiling |
+| `xcl_toolchain_decompile_file` / `decompile_source` | Disassemble |
+| `xcl_toolchain_lint_file` / `lint_source` | Lint |
+| `xcl_toolchain_list_lints` / `explain` | Rule catalogue |
 
 ### Features
 
-Optional standard-library plugins are compiled into the SDK and selected at
-run time. They live in `xcl_std::FEATURE_REGISTRY`, a
-`linkme::distributed_slice`, so a new plugin crate adds a plugin without
-changing the SDK or the launcher.
+Optional plugins are compiled into the engine and selected at run time. They
+live in `xcl_rt::FEATURE_REGISTRY`, a `linkme::distributed_slice` declared once
+in the backend, so a new plugin crate adds entries without changing the engine
+or the launcher.
 
 `xcl list` shows what is compiled in, `xcl manifest` prints the generated
 plugin manifest, and `xcl abi` shows the C surface:
@@ -728,7 +734,7 @@ xcl --no-default-features -e '1 + 2'   # core language, no plugins
 xcl --all-features -e 'print "hi"'
 ```
 
-A host selects plugins with `xcl_sdk_set_features(ctx, csv, mode)`: mode `0` is
+A host selects plugins with `xcl_toolchain_set_features(ctx, csv, mode)`: mode `0` is
 defaults, `1` defaults plus `csv`, `2` only `csv` (plus dependencies), and `3`
 every compiled plugin. Dependencies are installed first, and a plugin's
 `install` function registers only the domains it owns. A context starts with the
@@ -842,10 +848,10 @@ enforced would read as a guarantee it does not provide.
 ### JIT
 
 `xcl-jit` compiles hot loops to native code with Cranelift. It is optional and
-must be compiled into the SDK:
+must be compiled into the toolchain:
 
 ```bash
-cargo build --release -p xcl-sdk --features jit
+cargo build --release -p xcl-toolchains --features jit
 ```
 
 The JIT covers integer loops, comparisons, arithmetic, array indexing, and map field reads. Anything it cannot compile falls back to the interpreter, so semantics are identical.
@@ -871,16 +877,13 @@ The code space is `0..=126` for core instructions, `127` for `OP_EXT` (a 32-bit 
 
 | Crate | Description |
 |---|---|
-| `xcl-vm` | Compiler: lexer, parser, AST, codegen, optimizer, manifest. Re-exports the engine |
+| `xcl-rt` | Backend (`cdylib`/`rlib`): values, bytecode, VM, `.xclb` loader, registry, standard library (`std.util`), mimalloc, engine C ABI |
+| `xcl-toolchains` | Frontend (`cdylib`/`rlib`): lexer, parser, optimizer, linter, disassembler, imports, `plugin.toml`, `xcl_toolchain_*` C ABI |
 | `xcl-jit` | Optional Cranelift JIT backend (`jit` feature) |
 | `xcl-macros` | Procedural macros: `#[xcl_fn]`, `#[xcl_impl]`, `#[xcl_trait]`, `#[derive(Xcl)]`, `#[opcode]` |
-| `xcl-std` | Standard library plugin (`std`): the `util` domain with `print` and `input`. Lives in `crates/xcl-std/util/` |
-| `xcl-cli` | Thin launcher: loads the SDK or the engine and forwards commands |
-| `xcl-rt` | Engine (`cdylib`/`rlib`): values, bytecode, VM, `.xclb` loader, engine C ABI. No compiler |
-| `xcl-sdk` | Loadable SDK (`cdylib`): compiler, plugins, imports, diagnostics, mimalloc, SDK C ABI |
+| `xcl-cli` | Thin launcher: loads the toolchain or the engine and forwards commands |
 | `xcl-debug` | `xcl-debug` (tokens/AST) and `xcl-bytecode` (disassemble/trace/profile/stats) |
 | `xcl-doc` | Documentation generator that reads macro metadata and produces an HTML site |
-| `xcl-analysis` | Linter: rustc-style diagnostics, rule catalogue, `--lint` JSON contract |
 | `xcl-wasm` | Browser build for the playground: lint, disassemble, run, opcode map (`wasm32-unknown-unknown`) |
 | `xcl-benchmark` | Benchmark corpus and cross-language harnesses: `crosslang/run.py`, `crosslang/usage.py`, the Luau/LuaJIT runners, and `scripts/score.py` |
 
@@ -1000,7 +1003,7 @@ xcl -d -e 'print 1 + 2'
 
 # Bytecode
 xcl --compile script.xcl        # writes script.xclb, does not run
-xcl script.xclb                 # runs it with the SDK (std available)
+xcl script.xclb                 # runs it with the toolchain
 xcl --rt script.xclb            # runs it on the bare engine (core only)
 
 # Linting
@@ -1011,18 +1014,18 @@ xcl -A style --lint script.xcl            # silence a whole group
 xcl --explain W0001                       # what the rule means and how to fix it
 ```
 
-The linter and disassembler live in `xcl-sdk`; the engine (`xcl_rt.dll`) has
+The linter and disassembler live in `xcl-toolchains`; the engine (`xcl_rt.dll`) has
 neither, and cannot parse source at all. The launcher's `lint`/`debug` features
 are accepted for compatibility but no longer change the build.
 
 ## Building and Benchmarking
 
 ```bash
-# Launcher + loadable interpreter SDK
+# Launcher + loadable toolchain
 cargo build --release
 
 # Development layer + Cranelift JIT
-cargo build --release -p xcl-sdk --features jit
+cargo build --release -p xcl-toolchains --features jit
 
 # Engine only (what a shipped product links)
 cargo build --release -p xcl-rt
@@ -1030,7 +1033,6 @@ cargo build --release -p xcl-rt
 # Tests and lints
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-cargo check -p xcl-vm --no-default-features   # no_std core
 ```
 
 ### Runtime size
@@ -1041,21 +1043,21 @@ x86_64:
 
 | Artifact | Size |
 |---|---|
-| `xcl_rt.dll` (engine: VM + `.xclb`, no compiler) | 374,784 B (~366 KB) |
-| `xcl_sdk.dll` (compiler, plugins, linter, mimalloc) | 1,212,416 B (~1.16 MB) |
-| `xcl.exe` (launcher) | 164,864 B (~161 KB) |
+| `xcl_rt.dll` (engine: VM, `.xclb`, `std`, mimalloc) | 532,992 B (~520 KB) |
+| `xcl_toolchain.dll` (compiler, linter, imports) | 1,054,208 B (~1.03 MB) |
+| `xcl.exe` (launcher) | 197,632 B (~193 KB) |
 
 Before the split, the single `xcl_rt.dll` measured 1,150,976 B at
-`opt-level = 3`. The engine is therefore about **67 % smaller** than the old
-runtime, and a product that ships precompiled `.xclb` never links a lexer,
-parser, optimizer, linter, or plugin registry.
+`opt-level = 3`. The backend is therefore less than half of it, and it carries
+the standard library and the allocator; a product that ships precompiled
+`.xclb` never links a lexer, parser, optimizer, or linter.
 
 Smaller builds remain possible by changing codegen settings, at the cost of
 losing panic messages:
 
 | Build | Engine |
 |---|---|
-| current release profile | 374,784 B |
+| current release profile | 532,992 B |
 | `opt-level = "z"` | measured at ~870 KB for the pre-split runtime |
 
 Reaching the smallest numbers requires moving still more out of the artifact;
@@ -1072,13 +1074,13 @@ cargo bench -p xcl-vm --bench vm_core --bench vm_data \
 Cross-language comparison against Luau, LuaJIT, and CPython:
 
 ```bash
-# Keep a JIT SDK next to a copy of the launcher, then rebuild the default
-# SDK for the interpreter column.
-cargo build --release -p xcl-sdk --features jit
+# Keep a JIT toolchain next to a copy of the launcher, then rebuild the default
+# toolchain for the interpreter column.
+cargo build --release -p xcl-toolchains --features jit
 mkdir -p target/release/jit
 cp target/release/xcl target/release/jit/xcl
-cp target/release/xcl_sdk.dll target/release/jit/   # libxcl_sdk.so on Unix
-cargo build --release -p xcl-sdk
+cp target/release/xcl_toolchain.dll target/release/jit/   # libxcl_toolchain.so on Unix
+cargo build --release -p xcl-toolchains
 CROSSLANG_REPS=9 python crates/xcl-benchmark/crosslang/run.py
 python crates/xcl-benchmark/crosslang/usage.py
 ```

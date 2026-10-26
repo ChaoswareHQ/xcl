@@ -11,12 +11,12 @@ homepage.workspace = true
 
 [lib]
 name = "xcl_rt"
-# Library only. The shipped DLL is built by `xcl-rt-dll` (allocator + C ABI).
-crate-type = ["rlib"]
+crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["std"]
+default = ["std", "mimalloc"]
 std = []
+mimalloc = ["dep:mimalloc"]
 opcode-stats = []
 # Records the executed instruction stream for the browser playground.
 # Off by default: the hook compiles out entirely when the feature is absent.
@@ -34,4 +34,5 @@ hashbrown.workspace = true
 xcl-macros.workspace = true
 linkme.workspace = true
 itoa.workspace = true
+mimalloc = { workspace = true, optional = true }
 xcl-jit = { path = "../xcl-jit", optional = true }

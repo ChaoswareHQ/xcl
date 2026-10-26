@@ -143,10 +143,19 @@ pub mod manifest;
 /// LICM, loop rotation and unrolling.
 pub mod optimizer;
 
-/// Host API and C ABI (`xcl_toolchain_*`), including file imports and
-/// `plugin.toml`.
+/// Host API and configuration (`Runtime`).
 #[cfg(feature = "host")]
 pub mod host;
+
+/// Loadable toolchain C ABI (`xcl_toolchain_*`).
+#[cfg(feature = "host")]
+pub mod abi;
+
+#[cfg(feature = "host")]
+pub use host::Runtime;
+
+#[cfg(feature = "host")]
+pub use abi::ABI_VERSION;
 
 #[cfg(feature = "host")]
 mod imports;

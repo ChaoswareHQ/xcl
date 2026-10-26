@@ -207,8 +207,9 @@ pub struct EngineApi {
     pub load: unsafe extern "C" fn(*mut c_void, *const c_char) -> i32,
     pub run: unsafe extern "C" fn(*mut c_void) -> i32,
     pub error: unsafe extern "C" fn(*const c_void) -> *const c_char,
+    pub error_code: unsafe extern "C" fn(*const c_void) -> i32,
     pub set_quiet: unsafe extern "C" fn(*mut c_void, i32),
-    pub set_script_args: unsafe extern "C" fn(*mut c_void, usize, *const *const c_char),
+    pub set_script_args: unsafe extern "C" fn(*mut c_void, usize, *const *const c_char) -> i32,
 }
 
 impl EngineApi {
@@ -247,10 +248,14 @@ impl EngineApi {
                 "xcl_rt_error",
                 unsafe extern "C" fn(*const c_void) -> *const c_char
             ),
+            error_code: api!(
+                "xcl_rt_error_code",
+                unsafe extern "C" fn(*const c_void) -> i32
+            ),
             set_quiet: api!("xcl_rt_set_quiet", unsafe extern "C" fn(*mut c_void, i32)),
             set_script_args: api!(
                 "xcl_rt_set_script_args",
-                unsafe extern "C" fn(*mut c_void, usize, *const *const c_char)
+                unsafe extern "C" fn(*mut c_void, usize, *const *const c_char) -> i32
             ),
             _library: library,
         })
